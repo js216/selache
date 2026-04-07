@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "selar",
+    "seldump",
     "selelf",
 ]
 resolver = "2"
