@@ -1,0 +1,5 @@
+[package]
+name = "selelf"
+version = "0.1.0"
+edition = "2021"
+description = "Shared ELF/archive library for the Selache toolchain"

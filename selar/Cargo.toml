@@ -1,0 +1,8 @@
+[package]
+name = "selar"
+version = "0.1.0"
+edition = "2021"
+description = "ELF archiver for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }
