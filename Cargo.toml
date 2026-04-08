@@ -5,6 +5,7 @@ members = [
     "selcc",
     "seldump",
     "selelf",
+    "selload",
     "selhex",
     "selinit",
     "selmem",
