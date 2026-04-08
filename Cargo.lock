@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "selload"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]
+
+[[package]]
 name = "selmem"
 version = "0.1.0"
 dependencies = [

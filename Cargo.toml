@@ -3,6 +3,7 @@ members = [
     "selar",
     "selas",
     "selcc",
+    "seld",
     "seldump",
     "selelf",
     "selload",
