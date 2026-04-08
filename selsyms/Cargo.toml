@@ -1,0 +1,8 @@
+[package]
+name = "selsyms"
+version = "0.1.0"
+edition = "2021"
+description = "ELF symbol lister for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }

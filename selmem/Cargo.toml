@@ -1,0 +1,8 @@
+[package]
+name = "selmem"
+version = "0.1.0"
+edition = "2021"
+description = "Memory usage reporter for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }

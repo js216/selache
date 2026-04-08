@@ -1,0 +1,8 @@
+[package]
+name = "selhex"
+version = "0.1.0"
+edition = "2021"
+description = "Intel HEX32 to Motorola S-record converter for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }

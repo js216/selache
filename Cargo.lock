@@ -33,3 +33,38 @@ dependencies = [
 [[package]]
 name = "selelf"
 version = "0.1.0"
+
+[[package]]
+name = "selhex"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]
+
+[[package]]
+name = "selinit"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]
+
+[[package]]
+name = "selmem"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]
+
+[[package]]
+name = "selpatch"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]
+
+[[package]]
+name = "selsyms"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]

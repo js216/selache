@@ -5,5 +5,10 @@ members = [
     "selcc",
     "seldump",
     "selelf",
+    "selhex",
+    "selinit",
+    "selmem",
+    "selpatch",
+    "selsyms",
 ]
 resolver = "2"

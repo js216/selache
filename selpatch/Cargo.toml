@@ -1,0 +1,8 @@
+[package]
+name = "selpatch"
+version = "0.1.0"
+edition = "2021"
+description = "ELF section extract/replace for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }

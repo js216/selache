@@ -17,7 +17,7 @@
 
 ### Getting Started
 
-To build all tools and add to path:
+Build all tools and add to path:
 
     cargo build --release
     export PATH="$PWD/target/release:$PATH"
@@ -32,3 +32,7 @@ Example workflow:
 ### Author
 
 Jakob Kastelic (Stanford Research Systems)
+
+Licensed under the GNU General Public License, version 3. SHARC and
+SHARC+ are trademarks of Analog Devices. This project is not affiliated
+with or endorsed by Analog Devices.

@@ -1,0 +1,8 @@
+[package]
+name = "selinit"
+version = "0.1.0"
+edition = "2021"
+description = "Memory initializer for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }
