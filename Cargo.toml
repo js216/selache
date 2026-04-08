@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "selar",
+    "selas",
+    "selcc",
     "seldump",
     "selelf",
 ]

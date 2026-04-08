@@ -1,0 +1,8 @@
+[package]
+name = "selcc"
+version = "0.1.0"
+edition = "2021"
+description = "C compiler for the Selache toolchain"
+
+[dependencies]
+selelf = { path = "../selelf" }
