@@ -1,0 +1,20 @@
+/* SPDX-License-Identifier: GPL-3.0 */
+/* fmodf.c --- Floating-point remainder */
+/* Copyright (c) 2026 Jakob Kastelic */
+
+#include "math.h"
+
+float fmodf(float x, float y)
+{
+	float q;
+
+	if (isnan(x) || isnan(y) || isinf(x) || y == 0.0f)
+		return NAN;
+	if (isinf(y))
+		return x;
+	if (x == 0.0f)
+		return x;
+
+	q = truncf(x / y);
+	return x - q * y;
+}

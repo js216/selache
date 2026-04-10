@@ -1,19 +1,20 @@
 # Selache: Open-Source Toolchain for SHARC+ DSP
 
-- **selelf**: shared library --- ELF/archive parsing and writing,
-  SHARC+ 48-bit instruction encoder/disassembler, test utilities
+- **libsel**: C standard library (string, math, stdlib, ctype, stdio)
 - **selar**: ELF archive tool for static libraries (.dlb)
-- **seldump**: ELF inspector --- headers, symbols, relocations,
-  hex dump, disassembly, archive browsing
-- **selsyms**: print global/weak symbols as LDF RESOLVE() lines
-- **selpatch**: extract or replace raw section content in ELF
+- **selas**: SHARC+ assembler
+- **selcc**: C99 compiler
+- **seld**: LDF-driven linker with processor memory model
+- **seldump**: inspect ELF headers, symbols, relocations, hex dump,
+  disassembly, archive browsing
+- **selelf**: ELF/archive parsing and writing, instruction
+  encoder/disassembler
 - **selhex**: convert Intel HEX32 to Motorola S-record
 - **selinit**: generate runtime memory initializer tables
-- **selmem**: report memory usage vs. processor memory map
 - **selload**: generate SHARC+ boot stream (LDR) from ELF
-- **seld**: LDF-driven linker with SHARC+ memory model
-- **selas**: SHARC+ assembler (48-bit instruction encoding)
-- **selcc**: C99 compiler
+- **selmem**: report memory usage vs. processor memory map
+- **selpatch**: extract or replace raw section content in ELF
+- **selsyms**: print global/weak symbols as LDF RESOLVE() lines
 
 ### Getting Started
 
@@ -29,10 +30,11 @@ Example workflow:
     seld -proc ADSP-21569 -T app.ldf -o app.dxe main.doj start.doj
     selload -proc ADSP-21569 -o app.ldr app.dxe
 
-### Author
+### Legal
 
-Jakob Kastelic (Stanford Research Systems)
+Author: Jakob Kastelic (Stanford Research Systems, Inc.).
 
-Licensed under the GNU General Public License, version 3. SHARC and
-SHARC+ are trademarks of Analog Devices. This project is not affiliated
-with or endorsed by Analog Devices.
+Licensed under the GNU General Public License, version 3.
+
+SHARC and SHARC+ are trademarks of Analog Devices. This project is not
+affiliated with or endorsed by Analog Devices.

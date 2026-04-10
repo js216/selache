@@ -10,231 +10,20 @@ use crate::error::{Error, Result};
 const MAX_INCLUDE_DEPTH: u32 = 200;
 const MAX_EXPANSION_DEPTH: u32 = 256;
 
-const BUILTIN_STDARG: &str = r#"
-#ifndef _STDARG_H
-#define _STDARG_H
-typedef int *__va_list;
-#define va_list __va_list
-#define va_start(ap, last) ((void)((ap) = (int *)&(last) - 1))
-#define va_arg(ap, type) (*(type *)((ap)--))
-#define va_end(ap) ((void)0)
-#define va_copy(dest, src) ((dest) = (src))
-#endif
-"#;
-
-const BUILTIN_STDDEF: &str = r#"
-#ifndef _STDDEF_H
-#define _STDDEF_H
-typedef unsigned int size_t;
-typedef int ptrdiff_t;
-#define NULL ((void *)0)
-#define offsetof(type, member) ((size_t)&((type *)0)->member)
-#endif
-"#;
-
-const BUILTIN_STDINT: &str = r#"
-#ifndef _STDINT_H
-#define _STDINT_H
-typedef signed char int8_t;
-typedef short int16_t;
-typedef int int32_t;
-typedef long long int64_t;
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef int intptr_t;
-typedef unsigned int uintptr_t;
-#endif
-"#;
-
-const BUILTIN_STDBOOL: &str = r#"
-#ifndef _STDBOOL_H
-#define _STDBOOL_H
-#define bool _Bool
-#define true ((_Bool)+1)
-#define false ((_Bool)+0)
-#endif
-"#;
-
-const BUILTIN_COMPLEX: &str = r#"
-#ifndef _COMPLEX_H
-#define _COMPLEX_H
-#define complex _Complex
-#define _Complex_I ((__extension__ 1.0fi))
-#define I _Complex_I
-extern float crealf(float _Complex);
-extern double creal(double _Complex);
-extern float cimagf(float _Complex);
-extern double cimag(double _Complex);
-extern float cabsf(float _Complex);
-extern double cabs(double _Complex);
-extern float _Complex conjf(float _Complex);
-extern double _Complex conj(double _Complex);
-#endif
-"#;
-
-const BUILTIN_INTTYPES: &str = r#"
-#ifndef _INTTYPES_H
-#define _INTTYPES_H
-#include <stdint.h>
-#define PRId8  "d"
-#define PRId16 "d"
-#define PRId32 "d"
-#define PRId64 "lld"
-#define PRIi8  "i"
-#define PRIi16 "i"
-#define PRIi32 "i"
-#define PRIi64 "lli"
-#define PRIu8  "u"
-#define PRIu16 "u"
-#define PRIu32 "u"
-#define PRIu64 "llu"
-#define PRIx8  "x"
-#define PRIx16 "x"
-#define PRIx32 "x"
-#define PRIx64 "llx"
-#define PRIX8  "X"
-#define PRIX16 "X"
-#define PRIX32 "X"
-#define PRIX64 "llX"
-#define SCNd8  "hhd"
-#define SCNd16 "hd"
-#define SCNd32 "d"
-#define SCNd64 "lld"
-#define SCNu8  "hhu"
-#define SCNu16 "hu"
-#define SCNu32 "u"
-#define SCNu64 "llu"
-#define SCNx8  "hhx"
-#define SCNx16 "hx"
-#define SCNx32 "x"
-#define SCNx64 "llx"
-#endif
-"#;
-
-const BUILTIN_ISO646: &str = r#"
-#ifndef _ISO646_H
-#define _ISO646_H
-#define and    &&
-#define or     ||
-#define not    !
-#define xor    ^
-#define bitand &
-#define bitor  |
-#define compl  ~
-#define and_eq &=
-#define or_eq  |=
-#define xor_eq ^=
-#define not_eq !=
-#endif
-"#;
-
-const BUILTIN_ERRNO: &str = r#"
-#ifndef _ERRNO_H
-#define _ERRNO_H
-extern int errno;
-#define EDOM   1
-#define ERANGE 2
-#define EILSEQ 3
-#endif
-"#;
-
-const BUILTIN_ASSERT: &str = r#"
-#ifndef _ASSERT_H
-#define _ASSERT_H
-#ifdef NDEBUG
-#define assert(e) ((void)0)
-#else
-extern void __assert_fail(const char *, const char *, int);
-#define assert(e) ((e) ? ((void)0) : __assert_fail(#e, __FILE__, __LINE__))
-#endif
-#endif
-"#;
-
-const BUILTIN_LIMITS: &str = r#"
-#ifndef _LIMITS_H
-#define _LIMITS_H
-#define CHAR_BIT 8
-#define SCHAR_MIN (-128)
-#define SCHAR_MAX 127
-#define UCHAR_MAX 255
-#define CHAR_MIN SCHAR_MIN
-#define CHAR_MAX SCHAR_MAX
-#define SHRT_MIN (-32768)
-#define SHRT_MAX 32767
-#define USHRT_MAX 65535
-#define INT_MIN (-2147483647 - 1)
-#define INT_MAX 2147483647
-#define UINT_MAX 4294967295U
-#define LONG_MIN INT_MIN
-#define LONG_MAX INT_MAX
-#define ULONG_MAX UINT_MAX
-#endif
-"#;
-
-const BUILTIN_FLOAT: &str = r#"
-#ifndef _FLOAT_H
-#define _FLOAT_H
-#define FLT_RADIX 2
-#define FLT_MANT_DIG 24
-#define FLT_DIG 6
-#define FLT_MIN_EXP (-125)
-#define FLT_MIN_10_EXP (-37)
-#define FLT_MAX_EXP 128
-#define FLT_MAX_10_EXP 38
-#define FLT_MAX 3.40282346638528859812e+38f
-#define FLT_EPSILON 1.19209289550781250000e-7f
-#define FLT_MIN 1.17549435082228750797e-38f
-#define DBL_MANT_DIG 24
-#define DBL_DIG 6
-#define DBL_MIN_EXP (-125)
-#define DBL_MIN_10_EXP (-37)
-#define DBL_MAX_EXP 128
-#define DBL_MAX_10_EXP 38
-#define DBL_MAX 3.40282346638528859812e+38
-#define DBL_EPSILON 1.19209289550781250000e-7
-#define DBL_MIN 1.17549435082228750797e-38
-#define LDBL_MANT_DIG DBL_MANT_DIG
-#define LDBL_DIG DBL_DIG
-#define LDBL_MIN_EXP DBL_MIN_EXP
-#define LDBL_MIN_10_EXP DBL_MIN_10_EXP
-#define LDBL_MAX_EXP DBL_MAX_EXP
-#define LDBL_MAX_10_EXP DBL_MAX_10_EXP
-#define LDBL_MAX DBL_MAX
-#define LDBL_EPSILON DBL_EPSILON
-#define LDBL_MIN DBL_MIN
-#define DECIMAL_DIG 9
-#endif
-"#;
-
-const BUILTIN_MATH: &str = r#"
-#ifndef _MATH_H
-#define _MATH_H
-extern float fabsf(float x);
-extern double fabs(double x);
-extern float sqrtf(float x);
-extern double sqrt(double x);
-extern float ldexpf(float x, int exp);
-extern double ldexp(double x, int exp);
-extern float floorf(float x);
-extern double floor(double x);
-extern float ceilf(float x);
-extern double ceil(double x);
-extern float fmodf(float x, float y);
-extern double fmod(double x, double y);
-extern float powf(float x, float y);
-extern double pow(double x, double y);
-extern float logf(float x);
-extern double log(double x);
-extern float expf(float x);
-extern double exp(double x);
-extern float sinf(float x);
-extern double sin(double x);
-extern float cosf(float x);
-extern double cos(double x);
-#endif
-"#;
+const BUILTIN_STDARG: &str = include_str!("../../libsel/include/stdarg.h");
+const BUILTIN_STDDEF: &str = include_str!("../../libsel/include/stddef.h");
+const BUILTIN_STDINT: &str = include_str!("../../libsel/include/stdint.h");
+const BUILTIN_STDBOOL: &str = include_str!("../../libsel/include/stdbool.h");
+const BUILTIN_COMPLEX: &str = include_str!("../../libsel/include/complex.h");
+const BUILTIN_INTTYPES: &str = include_str!("../../libsel/include/inttypes.h");
+const BUILTIN_ISO646: &str = include_str!("../../libsel/include/iso646.h");
+const BUILTIN_ERRNO: &str = include_str!("../../libsel/include/errno.h");
+const BUILTIN_ASSERT: &str = include_str!("../../libsel/include/assert.h");
+const BUILTIN_LIMITS: &str = include_str!("../../libsel/include/limits.h");
+const BUILTIN_FLOAT: &str = include_str!("../../libsel/include/float.h");
+const BUILTIN_MATH: &str = include_str!("../../libsel/include/math.h");
+const BUILTIN_STRING: &str = include_str!("../../libsel/include/string.h");
+const BUILTIN_CTYPE: &str = include_str!("../../libsel/include/ctype.h");
 
 #[derive(Debug, Clone)]
 enum MacroDef {
@@ -676,6 +465,8 @@ impl Preprocessor {
             "iso646.h" => Some(BUILTIN_ISO646),
             "errno.h" => Some(BUILTIN_ERRNO),
             "assert.h" => Some(BUILTIN_ASSERT),
+            "string.h" => Some(BUILTIN_STRING),
+            "ctype.h" => Some(BUILTIN_CTYPE),
             _ => None,
         }
     }

@@ -24,6 +24,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "seld"
+version = "0.1.0"
+dependencies = [
+ "selelf",
+]
+
+[[package]]
 name = "seldump"
 version = "0.1.0"
 dependencies = [

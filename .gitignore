@@ -1,4 +1,7 @@
 *.swp
 
+.claude
+.gstack
+build
 target
 xtest
