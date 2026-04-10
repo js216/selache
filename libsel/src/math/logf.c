@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* logf.c --- Natural logarithm via IEEE 754 decomposition and polynomial */
 /* Copyright (c) 2026 Jakob Kastelic */
 

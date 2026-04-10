@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* snprintf.c --- Formatted output into a sized buffer (variadic) */
 /* Copyright (c) 2026 Jakob Kastelic */
 

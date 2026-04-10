@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* fmin.c --- Minimum of two doubles */
 /* Copyright (c) 2026 Jakob Kastelic */
 

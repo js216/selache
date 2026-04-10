@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* exit_internal.h --- Shared state for exit/atexit handlers */
 /* Copyright (c) 2026 Jakob Kastelic */
 

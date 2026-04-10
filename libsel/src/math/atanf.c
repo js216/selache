@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* atanf.c --- Arctangent via polynomial with range reduction */
 /* Copyright (c) 2026 Jakob Kastelic */
 

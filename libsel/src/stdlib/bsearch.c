@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* bsearch.c --- Binary search of a sorted array */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* rand.c --- Pseudo-random number generator */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* fmax.c --- Maximum of two doubles */
 /* Copyright (c) 2026 Jakob Kastelic */
 

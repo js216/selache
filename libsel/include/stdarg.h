@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* stdarg.h --- Variable argument list support */
 /* Copyright (c) 2026 Jakob Kastelic */
 

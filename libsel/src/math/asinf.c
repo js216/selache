@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* asinf.c --- Arcsine via atan2 identity */
 /* Copyright (c) 2026 Jakob Kastelic */
 

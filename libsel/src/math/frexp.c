@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* frexp.c --- Extract mantissa and exponent from a double */
 /* Copyright (c) 2026 Jakob Kastelic */
 

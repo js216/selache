@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* strpbrk.c --- Find any character from a set in a string */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* ldexpf.c --- Multiply float by power of two via exponent adjustment */
 /* Copyright (c) 2026 Jakob Kastelic */
 

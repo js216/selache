@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* strncat.c --- Concatenate up to n characters from a string */
 /* Copyright (c) 2026 Jakob Kastelic */
 

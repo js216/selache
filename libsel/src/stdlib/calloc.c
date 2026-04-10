@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* calloc.c --- Allocate and zero-initialize memory */
 /* Copyright (c) 2026 Jakob Kastelic */
 

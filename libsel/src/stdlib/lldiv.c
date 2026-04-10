@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* lldiv.c --- Long long integer division with quotient and remainder */
 /* Copyright (c) 2026 Jakob Kastelic */
 

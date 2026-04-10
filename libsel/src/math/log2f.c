@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* log2f.c --- Base-2 logarithm via natural logarithm */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* tanf.c --- Tangent as sine over cosine ratio */
 /* Copyright (c) 2026 Jakob Kastelic */
 

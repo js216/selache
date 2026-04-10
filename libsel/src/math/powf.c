@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* powf.c --- Power function via exp and log */
 /* Copyright (c) 2026 Jakob Kastelic */
 

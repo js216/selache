@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* realloc.c --- Resize a memory allocation */
 /* Copyright (c) 2026 Jakob Kastelic */
 

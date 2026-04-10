@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* islower.c --- Lowercase letter test */
 /* Copyright (c) 2026 Jakob Kastelic */
 

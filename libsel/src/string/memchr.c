@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* memchr.c --- Find a byte in the first n bytes of memory */
 /* Copyright (c) 2026 Jakob Kastelic */
 

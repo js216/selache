@@ -34,7 +34,10 @@ Example workflow:
 
 Author: Jakob Kastelic (Stanford Research Systems, Inc.).
 
-Licensed under the GNU General Public License, version 3.
+The toolchain (selcc, selas, seld, and all other tools) is licensed under
+the GNU General Public License, version 3. The runtime library (libsel) is
+licensed under the MIT License, so binaries compiled with selcc may be
+distributed under any license, including proprietary ones.
 
 SHARC and SHARC+ are trademarks of Analog Devices. This project is not
 affiliated with or endorsed by Analog Devices.

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* tolower.c --- Convert uppercase letter to lowercase */
 /* Copyright (c) 2026 Jakob Kastelic */
 

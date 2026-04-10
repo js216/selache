@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* fabsf.c --- Absolute value of a float */
 /* Copyright (c) 2026 Jakob Kastelic */
 

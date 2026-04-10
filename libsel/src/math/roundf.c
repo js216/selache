@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* roundf.c --- Round to nearest integer, ties away from zero */
 /* Copyright (c) 2026 Jakob Kastelic */
 

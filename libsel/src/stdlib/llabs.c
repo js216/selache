@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* llabs.c --- Absolute value of long long */
 /* Copyright (c) 2026 Jakob Kastelic */
 

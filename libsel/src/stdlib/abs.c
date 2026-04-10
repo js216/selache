@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* abs.c --- Absolute value of int */
 /* Copyright (c) 2026 Jakob Kastelic */
 

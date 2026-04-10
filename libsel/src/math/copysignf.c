@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* copysignf.c --- Copy sign bit between floats via bit manipulation */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* atan2.c --- Two-argument arctangent of doubles */
 /* Copyright (c) 2026 Jakob Kastelic */
 

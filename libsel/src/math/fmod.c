@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* fmod.c --- Floating-point remainder of doubles */
 /* Copyright (c) 2026 Jakob Kastelic */
 

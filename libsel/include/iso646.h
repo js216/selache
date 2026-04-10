@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* iso646.h --- Alternative spellings for operators */
 /* Copyright (c) 2026 Jakob Kastelic */
 

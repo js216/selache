@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* string.h --- String handling functions */
 /* Copyright (c) 2026 Jakob Kastelic */
 

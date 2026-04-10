@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* errno_shim.c --- Set errno for stdlib functions */
 /* Copyright (c) 2026 Jakob Kastelic */
 

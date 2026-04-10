@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* modf.c --- Split double into integer and fractional parts */
 /* Copyright (c) 2026 Jakob Kastelic */
 

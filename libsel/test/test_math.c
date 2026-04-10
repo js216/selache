@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* test_math.c --- Tests for math functions against hardcoded values */
 /* Copyright (c) 2026 Jakob Kastelic */
 

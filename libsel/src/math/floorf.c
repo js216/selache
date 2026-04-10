@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* floorf.c --- Floor via IEEE 754 bit manipulation */
 /* Copyright (c) 2026 Jakob Kastelic */
 

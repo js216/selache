@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* strcspn.c --- Length of prefix not containing any rejected characters */
 /* Copyright (c) 2026 Jakob Kastelic */
 

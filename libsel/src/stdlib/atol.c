@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* atol.c --- Convert string to long */
 /* Copyright (c) 2026 Jakob Kastelic */
 

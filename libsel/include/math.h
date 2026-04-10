@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* math.h --- Mathematical functions (C99 7.12) */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* expf.c --- Exponential via range reduction and polynomial */
 /* Copyright (c) 2026 Jakob Kastelic */
 

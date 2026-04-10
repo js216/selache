@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* ctype.h --- Character classification and conversion (C99 7.4) */
 /* Copyright (c) 2026 Jakob Kastelic */
 

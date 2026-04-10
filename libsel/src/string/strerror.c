@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* strerror.c --- Return a description string for an error number */
 /* Copyright (c) 2026 Jakob Kastelic */
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* cosf.c --- Cosine via sine with phase shift */
 /* Copyright (c) 2026 Jakob Kastelic */
 

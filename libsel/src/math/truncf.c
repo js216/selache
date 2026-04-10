@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* truncf.c --- Truncation toward zero via IEEE 754 bit masking */
 /* Copyright (c) 2026 Jakob Kastelic */
 

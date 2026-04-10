@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* frexpf.c --- Extract mantissa and exponent from IEEE 754 float */
 /* Copyright (c) 2026 Jakob Kastelic */
 

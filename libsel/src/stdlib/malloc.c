@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* malloc.c --- Allocate memory from a static heap */
 /* Copyright (c) 2026 Jakob Kastelic */
 

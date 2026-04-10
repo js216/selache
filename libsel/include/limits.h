@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* limits.h --- Implementation-defined limits */
 /* Copyright (c) 2026 Jakob Kastelic */
 

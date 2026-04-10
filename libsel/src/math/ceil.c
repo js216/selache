@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* ceil.c --- Ceiling of a double */
 /* Copyright (c) 2026 Jakob Kastelic */
 

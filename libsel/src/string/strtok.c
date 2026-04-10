@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* strtok.c --- Tokenize a string using delimiter characters */
 /* Copyright (c) 2026 Jakob Kastelic */
 

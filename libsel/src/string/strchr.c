@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* strchr.c --- Find first occurrence of a character in a string */
 /* Copyright (c) 2026 Jakob Kastelic */
 

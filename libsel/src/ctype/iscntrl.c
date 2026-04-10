@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* iscntrl.c --- Control character test */
 /* Copyright (c) 2026 Jakob Kastelic */
 

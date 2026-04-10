@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* log10.c --- Base-10 logarithm of a double */
 /* Copyright (c) 2026 Jakob Kastelic */
 

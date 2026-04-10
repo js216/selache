@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0 */
+/* SPDX-License-Identifier: MIT */
 /* heap_internal.h --- Shared heap state for malloc/free/calloc/realloc */
 /* Copyright (c) 2026 Jakob Kastelic */
 
