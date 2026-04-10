@@ -288,6 +288,7 @@ impl Allocator {
             | Instruction::CJump { .. }
             | Instruction::UregDagMove { .. }
             | Instruction::DagModify { .. }
+            | Instruction::RegisterSwap { .. }
             | Instruction::ImmShift { .. }
             | Instruction::UregAbsAccess { .. }
             | Instruction::DmImmStore { .. }

@@ -23,6 +23,7 @@ pub struct ParsedLine {
     pub label: Option<String>,
     pub instruction: Option<Instruction>,
     pub directive: Option<Directive>,
+    pub label_ref: Option<String>,
 }
 
 /// Assembler directive.
@@ -34,6 +35,7 @@ pub enum Directive {
     Var(String),
     Byte(Vec<u8>),
     Align(u32),
+    Set(String, String),
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,7 @@ impl<'a> AsmParser<'a> {
                 label: None,
                 instruction: None,
                 directive: None,
+                label_ref: None,
             });
         }
         if line.is_empty() {
@@ -115,6 +118,7 @@ impl<'a> AsmParser<'a> {
                 label: None,
                 instruction: None,
                 directive: None,
+                label_ref: None,
             });
         }
 
@@ -135,6 +139,7 @@ impl<'a> AsmParser<'a> {
                 label,
                 instruction: None,
                 directive: None,
+                label_ref: None,
             });
         }
 
@@ -145,15 +150,17 @@ impl<'a> AsmParser<'a> {
                 label,
                 instruction: None,
                 directive: Some(directive),
+                label_ref: None,
             });
         }
 
         // Parse instruction
-        let instr = parse_instruction_at_line(rest, self.line)?;
+        let (instr, label_ref) = parse_instruction_at_line(rest, self.line)?;
         Ok(ParsedLine {
             label,
             instruction: Some(instr),
             directive: None,
+            label_ref,
         })
     }
 
@@ -194,6 +201,21 @@ impl<'a> AsmParser<'a> {
         if upper.starts_with(".BYTE") {
             return Ok(Directive::Byte(Vec::new()));
         }
+        if upper.starts_with(".SET") {
+            let rest = &text[4..];
+            let rest = rest.trim().trim_end_matches(';').trim();
+            let (name, value) = if let Some((l, r)) = rest.split_once('=') {
+                (l.trim().to_string(), r.trim().to_string())
+            } else if let Some((l, r)) = rest.split_once(',') {
+                (l.trim().to_string(), r.trim().to_string())
+            } else {
+                return Err(Error::Parse {
+                    line: self.line,
+                    msg: format!("invalid .SET syntax: {text}"),
+                });
+            };
+            return Ok(Directive::Set(name, value));
+        }
         // Silently ignore known toolchain directives that don't affect code generation
         if is_ignored_directive(&upper) {
             return Ok(Directive::Align(0));
@@ -212,13 +234,22 @@ impl<'a> AsmParser<'a> {
 /// Parse a single instruction mnemonic string. Returns the instruction.
 #[cfg(test)]
 pub fn parse_instruction(text: &str) -> Result<Instruction> {
-    parse_instruction_at_line(text, 0)
+    let (instr, _label_ref) = parse_instruction_at_line(text, 0)?;
+    Ok(instr)
 }
 
-fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
+fn parse_instruction_at_line(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     let text = text.trim();
     // Normalize spacing: insert spaces around +/- between register operands
     let normalized = normalize_compute_spacing(text);
+    let (instr, label_ref) = parse_instruction_inner(&normalized, line)?;
+    // The inner parser works on upper-cased text, so label names lose their
+    // original case. Recover it from the un-modified source.
+    let label_ref = label_ref.map(|lr| recover_label_case(&lr, &normalized));
+    Ok((instr, label_ref))
+}
+
+fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     let upper = normalized.to_uppercase();
     let tokens: Vec<&str> = upper.split_whitespace().collect();
 
@@ -231,22 +262,22 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
 
     // NOP
     if upper == "NOP" {
-        return Ok(Instruction::Nop);
+        return Ok((Instruction::Nop, None));
     }
 
     // IDLE
     if upper == "IDLE" {
-        return Ok(Instruction::Idle);
+        return Ok((Instruction::Idle, None));
     }
 
     // EMUIDLE
     if upper == "EMUIDLE" {
-        return Ok(Instruction::EmuIdle);
+        return Ok((Instruction::EmuIdle, None));
     }
 
     // SYNC
     if upper == "SYNC" {
-        return Ok(Instruction::Sync);
+        return Ok((Instruction::Sync, None));
     }
 
     // SIMD mode and frame instructions — encode as NOP (assembler placeholder)
@@ -255,12 +286,12 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
         || upper == "RFRAME" || upper == "CFRAME"
         || upper.starts_with("FETCH_RETURN")
     {
-        return Ok(Instruction::Nop);
+        return Ok((Instruction::Nop, None));
     }
 
     // RTS / RTI (possibly conditional or with compute)
     if let Some(instr) = try_parse_return(&upper, line)? {
-        return Ok(instr);
+        return Ok((instr, None));
     }
 
     // LCNTR = ..., DO ... UNTIL LCE
@@ -275,12 +306,14 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
 
     // BIT SET/CLR/TGL/TST/XOR sreg data32
     if upper.starts_with("BIT ") {
-        return parse_bit_op(&upper, line);
+        let instr = parse_bit_op(&upper, line)?;
+        return Ok((instr, None));
     }
 
     // PUSH/POP stack operations
     if upper.starts_with("PUSH ") || upper.starts_with("POP ") || upper.starts_with("FLUSH ") {
-        return parse_stack_op(&upper, line);
+        let instr = parse_stack_op(&upper, line)?;
+        return Ok((instr, None));
     }
 
     // CJUMP addr (DB)
@@ -290,14 +323,16 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
 
     // MODIFY(Ii, Mm) — DAG register modify
     if upper.starts_with("MODIFY(") || upper.starts_with("MODIFY (") {
-        return parse_dag_modify(&upper, line);
+        let instr = parse_dag_modify(&upper, line)?;
+        return Ok((instr, None));
     }
 
     // Ii=MODIFY (Ii, Mm)(NW) — enhanced Type 7 MODIFY or Type 19 MODIFY
     // Match when "=MODIFY" appears (e.g. "I4=MODIFY (I4,0x4)")
     // Also handles compound: "compute , I7=MODIFY (I7,M6)(NW)"
     if upper.contains("=MODIFY") {
-        return parse_modify_assign(&upper, line);
+        let instr = parse_modify_assign(&upper, line)?;
+        return Ok((instr, None));
     }
 
     // IF cond ...
@@ -316,7 +351,8 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
     if upper.contains("DM(") || upper.contains("PM(")
         || upper.contains("DM (") || upper.contains("PM (")
     {
-        return parse_mem_access(&upper, line);
+        let instr = parse_mem_access(&upper, line)?;
+        return Ok((instr, None));
     }
 
     // Compound: "compute , MODIFY(Ii, Mm)"
@@ -331,18 +367,23 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
                 let compute = parse_compute_op(before, line)?;
                 let modify = parse_dag_modify(after, line)?;
                 if let Instruction::DagModify { pm, i_reg, m_reg, cond, .. } = modify {
-                    return Ok(Instruction::DagModify {
+                    return Ok((Instruction::DagModify {
                         pm, i_reg, m_reg, cond,
                         compute: Some(compute),
-                    });
+                    }, None));
                 }
             }
         }
     }
 
+    // Register swap: R14<->S8, or compound: compute , R14<->S8
+    if upper.contains("<->") {
+        return parse_register_swap(&upper, line).map(|i| (i, None));
+    }
+
     // Multifunction compute: "R0 = R1 * R2 (SSF) , R3 = R4 + R5" etc.
     if let Some(multi) = try_parse_multifunction(&upper, line)? {
-        return Ok(Instruction::Compute { cond: 31, compute: multi });
+        return Ok((Instruction::Compute { cond: 31, compute: multi }, None));
     }
 
     // Compound: "compute , ureg = ureg" (Type 5a with compute)
@@ -356,18 +397,33 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
                 let dst = after[..eq_pos].trim();
                 let src = after[eq_pos + 1..].trim();
                 if let (Some(dst_code), Some(src_code)) = (ureg_code(dst), ureg_code(src)) {
-                    return Ok(Instruction::UregTransfer {
+                    return Ok((Instruction::UregTransfer {
                         src_ureg: src_code,
                         dst_ureg: dst_code,
                         compute: Some(compute),
-                    });
+                    }, None));
                 }
             }
         }
     }
 
     // Compute or load-immediate
-    parse_compute_or_load(&upper, line)
+    let instr = parse_compute_or_load(&upper, line)?;
+    Ok((instr, None))
+}
+
+/// Recover the original-case label name from the source text.
+///
+/// The instruction parser upper-cases everything for keyword matching, but
+/// label names are case-sensitive. Given the upper-cased label from the
+/// parser and the original (un-modified-case) source line, find the
+/// matching identifier and return it in its original case.
+fn recover_label_case(upper_label: &str, original: &str) -> String {
+    let hay_upper = original.to_uppercase();
+    if let Some(pos) = hay_upper.find(upper_label) {
+        return original[pos..pos + upper_label.len()].to_string();
+    }
+    upper_label.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -422,10 +478,60 @@ fn try_parse_return(text: &str, line: u32) -> Result<Option<Instruction>> {
 }
 
 // ---------------------------------------------------------------------------
+// Register swap (Type 5b): Rn<->Sm, compute , Rn<->Sm
+// ---------------------------------------------------------------------------
+
+fn parse_register_swap(text: &str, line: u32) -> Result<Instruction> {
+    // May be compound: "compute , Rn<->Sm"
+    let (swap_text, compute) = if let Some(comma) = find_comma_outside_parens(text) {
+        let before = text[..comma].trim();
+        let after = text[comma + 1..].trim();
+        if after.contains("<->") {
+            // "compute , Rn<->Sm"
+            let comp = parse_compute_op(before, line)?;
+            (after, Some(comp))
+        } else if before.contains("<->") {
+            let comp = parse_compute_op(after, line)?;
+            (before, Some(comp))
+        } else {
+            return Err(Error::Parse {
+                line,
+                msg: format!("expected register swap with <->: {text}"),
+            });
+        }
+    } else {
+        (text, None)
+    };
+
+    let arrow_pos = swap_text.find("<->").ok_or_else(|| Error::Parse {
+        line,
+        msg: format!("expected <-> in register swap: {swap_text}"),
+    })?;
+    let left = swap_text[..arrow_pos].trim();
+    let right = swap_text[arrow_pos + 3..].trim();
+
+    let dreg = parse_dreg(left, line)?;
+    let cdreg = parse_reg_index(right, 'S', line)?;
+    if cdreg > 15 {
+        return Err(Error::Parse {
+            line,
+            msg: format!("cdreg index out of range (0-15): {cdreg}"),
+        });
+    }
+
+    Ok(Instruction::RegisterSwap {
+        dreg,
+        cdreg,
+        cond: 31,
+        compute,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Branch (JUMP / CALL)
 // ---------------------------------------------------------------------------
 
-fn parse_branch(text: &str, line: u32) -> Result<Instruction> {
+fn parse_branch(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     let call = text.starts_with("CALL");
     let rest = text[4..].trim();
 
@@ -442,14 +548,14 @@ fn parse_branch(text: &str, line: u32) -> Result<Instruction> {
                     // Check for (DB) after the closing paren
                     let after = rest[close + 1..].trim();
                     let delayed = after.starts_with("(DB)");
-                    return Ok(Instruction::IndirectBranch {
+                    return Ok((Instruction::IndirectBranch {
                         call,
                         cond: 31,
                         pm_i: i_code & 0xF,
                         pm_m: m_code & 0xF,
                         delayed,
                         compute: None,
-                    });
+                    }, None));
                 }
             }
         }
@@ -458,16 +564,16 @@ fn parse_branch(text: &str, line: u32) -> Result<Instruction> {
     // PC-relative or absolute — check for (DB) suffix
     let delayed = rest.contains("(DB)");
     let target_text = rest.replace("(DB)", "").trim().to_string();
-    let target = parse_branch_target(&target_text, line)?;
-    Ok(Instruction::Branch {
+    let (target, label_ref) = parse_branch_target(&target_text, line)?;
+    Ok((Instruction::Branch {
         call,
         cond: 31,
         target,
         delayed,
-    })
+    }, label_ref))
 }
 
-fn parse_branch_target(text: &str, line: u32) -> Result<BranchTarget> {
+fn parse_branch_target(text: &str, line: u32) -> Result<(BranchTarget, Option<String>)> {
     // "(PC, offset)" form
     if text.starts_with('(') {
         let close = text.find(')').ok_or_else(|| Error::Parse {
@@ -491,7 +597,7 @@ fn parse_branch_target(text: &str, line: u32) -> Result<BranchTarget> {
                 // Symbolic label or decimal — treat as offset 0 for labels
                 s.parse::<i32>().unwrap_or_default()
             };
-            return Ok(BranchTarget::PcRelative(offset));
+            return Ok((BranchTarget::PcRelative(offset), None));
         }
         return Err(Error::Parse {
             line,
@@ -499,16 +605,16 @@ fn parse_branch_target(text: &str, line: u32) -> Result<BranchTarget> {
         });
     }
 
-    // Absolute hex address
-    let addr = parse_address(text, line)?;
-    Ok(BranchTarget::Absolute(addr))
+    // Absolute address or symbolic label
+    let (addr, label_ref) = parse_address_or_label(text, line)?;
+    Ok((BranchTarget::Absolute(addr), label_ref))
 }
 
 // ---------------------------------------------------------------------------
 // Conditional instructions
 // ---------------------------------------------------------------------------
 
-fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
+fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     // "IF cond ..."
     let after_if = text[3..].trim();
 
@@ -523,13 +629,13 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         let branch_rest = rest[4..].trim();
         let delayed = branch_rest.contains("(DB)");
         let target_text = branch_rest.replace("(DB)", "").trim().to_string();
-        let target = parse_branch_target(&target_text, line)?;
-        return Ok(Instruction::Branch {
+        let (target, label_ref) = parse_branch_target(&target_text, line)?;
+        return Ok((Instruction::Branch {
             call,
             cond: cond_code,
             target,
             delayed,
-        });
+        }, label_ref));
     }
 
     // IF cond RTS/RTI
@@ -544,13 +650,13 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         } else {
             None
         };
-        return Ok(Instruction::Return {
+        return Ok((Instruction::Return {
             interrupt: false,
             cond: cond_code,
             delayed,
             lr,
             compute,
-        });
+        }, None));
     }
     if rts_norm.starts_with("RTI") && (rts_norm == "RTI" || rts_norm.starts_with("RTI(")) {
         let delayed = rts_norm.contains("DB");
@@ -560,13 +666,13 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         } else {
             None
         };
-        return Ok(Instruction::Return {
+        return Ok((Instruction::Return {
             interrupt: true,
             cond: cond_code,
             delayed,
             lr,
             compute,
-        });
+        }, None));
     }
 
     // IF cond NOP
@@ -578,7 +684,7 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         // no "conditional NOP" variant in our Instruction enum, we use Nop and
         // accept that the condition is dropped for now. A future improvement
         // could add a dedicated ConditionalNop variant.
-        return Ok(Instruction::Nop);
+        return Ok((Instruction::Nop, None));
     }
 
     // IF cond [compute] , mem_op — conditional memory/dag ops
@@ -588,7 +694,8 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         || rest.contains("DM (") || rest.contains("PM (")
     {
         // Re-parse as conditional memory instruction
-        return parse_conditional_mem(rest, cond_code, line);
+        let instr = parse_conditional_mem(rest, cond_code, line)?;
+        return Ok((instr, None));
     }
 
     // "IF cond , MODIFY(Ii, Mm)" — comma before MODIFY with empty compute
@@ -597,13 +704,13 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         if after_comma.starts_with("MODIFY(") || after_comma.starts_with("MODIFY (") {
             let modify = parse_dag_modify(after_comma, line)?;
             if let Instruction::DagModify { pm, i_reg, m_reg, .. } = modify {
-                return Ok(Instruction::DagModify {
+                return Ok((Instruction::DagModify {
                     pm,
                     i_reg,
                     m_reg,
                     cond: cond_code,
                     compute: None,
-                });
+                }, None));
             }
         }
         // "IF cond , ureg=ureg" — conditional transfer with empty compute
@@ -611,11 +718,11 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
             let lhs = after_comma[..eq].trim();
             let rhs = after_comma[eq + 1..].trim();
             if let (Some(dst), Some(src)) = (ureg_code(lhs), ureg_code(rhs)) {
-                return Ok(Instruction::UregTransfer {
+                return Ok((Instruction::UregTransfer {
                     src_ureg: src,
                     dst_ureg: dst,
                     compute: None,
-                });
+                }, None));
             }
         }
     }
@@ -628,15 +735,24 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
             let modify = parse_dag_modify(after, line)?;
             let compute = parse_compute_op(before, line)?;
             if let Instruction::DagModify { pm, i_reg, m_reg, cond: _, .. } = modify {
-                return Ok(Instruction::DagModify {
+                return Ok((Instruction::DagModify {
                     pm,
                     i_reg,
                     m_reg,
                     cond: cond_code,
                     compute: Some(compute),
-                });
+                }, None));
             }
         }
+    }
+
+    // IF cond Rn<->Sm (conditional register swap)
+    if rest.contains("<->") {
+        let mut swap = parse_register_swap(rest, line)?;
+        if let Instruction::RegisterSwap { ref mut cond, .. } = swap {
+            *cond = cond_code;
+        }
+        return Ok((swap, None));
     }
 
     // IF cond ImmShift (e.g. "IF LE R8 = LSHIFT R1 BY -1")
@@ -645,21 +761,21 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
     if let Some(imm_shift) = try_parse_imm_shift(rest, line)? {
         match imm_shift {
             Instruction::ImmShift { shift_type, sub_op, imm, rn, rx, data_hi, .. } => {
-                return Ok(Instruction::ImmShift {
+                return Ok((Instruction::ImmShift {
                     shift_type, sub_op, imm, rn, rx, data_hi,
                     cond: cond_code,
-                });
+                }, None));
             }
-            other => return Ok(other),
+            other => return Ok((other, None)),
         }
     }
 
     // IF cond compute
     let compute = parse_compute_op(rest, line)?;
-    Ok(Instruction::Compute {
+    Ok((Instruction::Compute {
         cond: cond_code,
         compute,
-    })
+    }, None))
 }
 
 fn parse_conditional_mem(text: &str, cond: u8, line: u32) -> Result<Instruction> {
@@ -780,7 +896,7 @@ fn negate_condition(code: u8) -> u8 {
 // DO loops
 // ---------------------------------------------------------------------------
 
-fn parse_do_loop(text: &str, line: u32) -> Result<Instruction> {
+fn parse_do_loop(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     // Formats from disassembler:
     //   "LCNTR = 0x64 , DO (PC,0x2000)UNTIL LCE"   (Type 12a)
     //   "LCNTR = R5, DO 0x003000 UNTIL LCE"         (Type 12b)
@@ -841,29 +957,29 @@ fn parse_do_loop(text: &str, line: u32) -> Result<Instruction> {
         addr_str = do_part[..until_pos].trim().to_string();
     }
 
-    let end_pc = parse_address(addr_str.trim(), line)?;
+    let (end_pc, label_ref) = parse_address_or_label(addr_str.trim(), line)?;
 
     // Counter is either a number or a register name
     let counter_str = counter_str.trim();
     if let Some(val) = parse_number(counter_str) {
-        Ok(Instruction::DoLoop {
+        Ok((Instruction::DoLoop {
             counter: LoopCounter::Immediate(val as u16),
             end_pc,
-        })
+        }, label_ref))
     } else {
         let ureg = ureg_code(counter_str).ok_or_else(|| Error::UnknownRegister {
             line,
             name: counter_str.to_string(),
         })?;
-        Ok(Instruction::DoLoop {
+        Ok((Instruction::DoLoop {
             counter: LoopCounter::Ureg(ureg),
             end_pc,
-        })
+        }, label_ref))
     }
 }
 
 /// Parse "DO addr UNTIL cond" (Type 13).
-fn parse_do_until(text: &str, line: u32) -> Result<Instruction> {
+fn parse_do_until(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     let rest = text.strip_prefix("DO ").unwrap().trim();
     let until_pos = rest.find("UNTIL").ok_or_else(|| Error::Parse {
         line,
@@ -872,12 +988,12 @@ fn parse_do_until(text: &str, line: u32) -> Result<Instruction> {
     let addr_str = rest[..until_pos].trim();
     let term_str = rest[until_pos + 5..].trim();
 
-    let addr = parse_address(addr_str, line)?;
+    let (addr, label_ref) = parse_address_or_label(addr_str, line)?;
     let term = cond_code_base(term_str).ok_or_else(|| Error::UnknownCondition {
         line,
         name: term_str.to_string(),
     })?;
-    Ok(Instruction::DoUntil { addr, term })
+    Ok((Instruction::DoUntil { addr, term }, label_ref))
 }
 
 // ---------------------------------------------------------------------------
@@ -981,7 +1097,7 @@ fn stack_op_bit(text: &str) -> Option<u8> {
 // CJUMP (computed jump)
 // ---------------------------------------------------------------------------
 
-fn parse_cjump(text: &str, line: u32) -> Result<Instruction> {
+fn parse_cjump(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     // "CJUMP 0x001234 (DB)" or "CJUMP 0x001234"
     let rest = text[5..].trim(); // skip "CJUMP"
     let delayed = rest.contains("(DB)");
@@ -990,8 +1106,8 @@ fn parse_cjump(text: &str, line: u32) -> Result<Instruction> {
     } else {
         rest.to_string()
     };
-    let addr = parse_address(addr_str.trim(), line)?;
-    Ok(Instruction::CJump { addr, delayed })
+    let (addr, label_ref) = parse_address_or_label(addr_str.trim(), line)?;
+    Ok((Instruction::CJump { addr, delayed }, label_ref))
 }
 
 // ---------------------------------------------------------------------------
@@ -1960,6 +2076,16 @@ fn parse_compute_or_load(text: &str, line: u32) -> Result<Instruction> {
     if let Some(eq) = text.find('=') {
         let lhs = text[..eq].trim();
         let rhs = text[eq + 1..].trim();
+
+        // Try constant expression evaluation first: "R0 = 1 + 1" etc.
+        // eval_const_expr only succeeds on pure numeric expressions (no
+        // register names), so "R0 = R1 + R2" will not match here.
+        if let Some(expr_val) = eval_const_expr(rhs) {
+            if let Some(ureg) = ureg_code(lhs) {
+                let value = expr_val as u32;
+                return Ok(Instruction::LoadImm { ureg, value });
+            }
+        }
 
         // Check if RHS is a pure number (immediate load), including negative
         let is_numeric_rhs = rhs.starts_with("0X")
@@ -3239,13 +3365,225 @@ fn parse_reg_index(name: &str, prefix: char, line: u32) -> Result<u8> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Constant expression evaluator (recursive descent)
+// ---------------------------------------------------------------------------
+
+/// Evaluate a constant arithmetic expression at assembly time.
+///
+/// Supports: `+`, `-`, `*`, `/`, `%`, `<<`, `>>`, `|`, `&`, `^`, `~`,
+/// unary minus, and parentheses. Operands are hex (`0x...`) or decimal
+/// integer literals. Returns `None` if the string is not a valid constant
+/// expression (e.g. contains register names).
+fn eval_const_expr(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+    let mut pos = 0;
+    let result = expr_bitor(bytes, &mut pos)?;
+    // Skip trailing whitespace
+    skip_ws(bytes, &mut pos);
+    if pos == bytes.len() {
+        Some(result)
+    } else {
+        None // trailing garbage
+    }
+}
+
+fn skip_ws(bytes: &[u8], pos: &mut usize) {
+    while *pos < bytes.len() && bytes[*pos] == b' ' {
+        *pos += 1;
+    }
+}
+
+fn expr_bitor(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    let mut val = expr_bitxor(bytes, pos)?;
+    loop {
+        skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b'|' {
+            *pos += 1;
+            let rhs = expr_bitxor(bytes, pos)?;
+            val |= rhs;
+        } else {
+            break;
+        }
+    }
+    Some(val)
+}
+
+fn expr_bitxor(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    let mut val = expr_bitand(bytes, pos)?;
+    loop {
+        skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b'^' {
+            *pos += 1;
+            let rhs = expr_bitand(bytes, pos)?;
+            val ^= rhs;
+        } else {
+            break;
+        }
+    }
+    Some(val)
+}
+
+fn expr_bitand(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    let mut val = expr_shift(bytes, pos)?;
+    loop {
+        skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b'&' {
+            *pos += 1;
+            let rhs = expr_shift(bytes, pos)?;
+            val &= rhs;
+        } else {
+            break;
+        }
+    }
+    Some(val)
+}
+
+fn expr_shift(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    let mut val = expr_additive(bytes, pos)?;
+    loop {
+        skip_ws(bytes, pos);
+        if *pos + 1 < bytes.len() && bytes[*pos] == b'<' && bytes[*pos + 1] == b'<' {
+            *pos += 2;
+            let rhs = expr_additive(bytes, pos)?;
+            if !(0..64).contains(&rhs) {
+                return None;
+            }
+            val = val.wrapping_shl(rhs as u32);
+        } else if *pos + 1 < bytes.len() && bytes[*pos] == b'>' && bytes[*pos + 1] == b'>' {
+            *pos += 2;
+            let rhs = expr_additive(bytes, pos)?;
+            if !(0..64).contains(&rhs) {
+                return None;
+            }
+            val = val.wrapping_shr(rhs as u32);
+        } else {
+            break;
+        }
+    }
+    Some(val)
+}
+
+fn expr_additive(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    let mut val = expr_multiplicative(bytes, pos)?;
+    loop {
+        skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b'+' {
+            *pos += 1;
+            let rhs = expr_multiplicative(bytes, pos)?;
+            val = val.wrapping_add(rhs);
+        } else if *pos < bytes.len() && bytes[*pos] == b'-' {
+            *pos += 1;
+            let rhs = expr_multiplicative(bytes, pos)?;
+            val = val.wrapping_sub(rhs);
+        } else {
+            break;
+        }
+    }
+    Some(val)
+}
+
+fn expr_multiplicative(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    let mut val = expr_unary(bytes, pos)?;
+    loop {
+        skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b'*' {
+            *pos += 1;
+            let rhs = expr_unary(bytes, pos)?;
+            val = val.wrapping_mul(rhs);
+        } else if *pos < bytes.len() && bytes[*pos] == b'/' {
+            *pos += 1;
+            let rhs = expr_unary(bytes, pos)?;
+            if rhs == 0 {
+                return None;
+            }
+            val /= rhs;
+        } else if *pos < bytes.len() && bytes[*pos] == b'%' {
+            *pos += 1;
+            let rhs = expr_unary(bytes, pos)?;
+            if rhs == 0 {
+                return None;
+            }
+            val %= rhs;
+        } else {
+            break;
+        }
+    }
+    Some(val)
+}
+
+fn expr_unary(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    skip_ws(bytes, pos);
+    if *pos < bytes.len() && bytes[*pos] == b'~' {
+        *pos += 1;
+        let val = expr_unary(bytes, pos)?;
+        Some(!val)
+    } else if *pos < bytes.len() && bytes[*pos] == b'-' {
+        *pos += 1;
+        let val = expr_unary(bytes, pos)?;
+        Some(val.wrapping_neg())
+    } else {
+        expr_atom(bytes, pos)
+    }
+}
+
+fn expr_atom(bytes: &[u8], pos: &mut usize) -> Option<i64> {
+    skip_ws(bytes, pos);
+    if *pos < bytes.len() && bytes[*pos] == b'(' {
+        *pos += 1;
+        let val = expr_bitor(bytes, pos)?;
+        skip_ws(bytes, pos);
+        if *pos < bytes.len() && bytes[*pos] == b')' {
+            *pos += 1;
+            Some(val)
+        } else {
+            None // unmatched paren
+        }
+    } else {
+        // Number literal: hex (0x...) or decimal
+        let start = *pos;
+        if *pos + 1 < bytes.len()
+            && bytes[*pos] == b'0'
+            && (bytes[*pos + 1] == b'x' || bytes[*pos + 1] == b'X')
+        {
+            *pos += 2;
+            let hex_start = *pos;
+            while *pos < bytes.len() && bytes[*pos].is_ascii_hexdigit() {
+                *pos += 1;
+            }
+            if *pos == hex_start {
+                return None; // "0x" with no digits
+            }
+            let hex_str = std::str::from_utf8(&bytes[hex_start..*pos]).ok()?;
+            let v = u64::from_str_radix(hex_str, 16).ok()?;
+            Some(v as i64)
+        } else if *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+            while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+                *pos += 1;
+            }
+            // Reject if followed by a letter (e.g. register name like "0R")
+            if *pos < bytes.len() && bytes[*pos].is_ascii_alphabetic() {
+                return None;
+            }
+            let num_str = std::str::from_utf8(&bytes[start..*pos]).ok()?;
+            num_str.parse::<i64>().ok()
+        } else {
+            None // not a number, probably a register name or other token
+        }
+    }
+}
+
 fn parse_number(s: &str) -> Option<u32> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0X").or_else(|| s.strip_prefix("0x")) {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        s.parse::<u32>().ok()
+        if let Ok(v) = u32::from_str_radix(hex, 16) {
+            return Some(v);
+        }
     }
+    if let Ok(v) = s.parse::<u32>() {
+        return Some(v);
+    }
+    eval_const_expr(s).map(|v| v as u32)
 }
 
 fn parse_signed_number(s: &str) -> Option<i64> {
@@ -3256,22 +3594,36 @@ fn parse_signed_number(s: &str) -> Option<i64> {
         if let Some(hex) = rest.strip_prefix("0X").or_else(|| rest.strip_prefix("0x")) {
             return u32::from_str_radix(hex, 16).ok().map(|v| -(v as i64));
         }
-        return rest.parse::<i64>().ok().map(|v| -v);
+        if let Ok(v) = rest.parse::<i64>() {
+            return Some(-v);
+        }
     }
     if let Some(hex) = s.strip_prefix("0X").or_else(|| s.strip_prefix("0x")) {
-        u32::from_str_radix(hex, 16).ok().map(|v| v as i64)
-    } else {
-        s.parse::<i64>().ok()
+        if let Ok(v) = u32::from_str_radix(hex, 16) {
+            return Some(v as i64);
+        }
     }
+    if let Ok(v) = s.parse::<i64>() {
+        return Some(v);
+    }
+    eval_const_expr(s)
 }
 
-fn parse_address(s: &str, line: u32) -> Result<u32> {
+fn parse_address_or_label(s: &str, line: u32) -> Result<(u32, Option<String>)> {
+    let s = s.trim();
     if let Some(val) = parse_number(s) {
-        return Ok(val);
+        return Ok((val, None));
     }
-    // Symbolic label — return 0 (resolved by two-pass assembler)
-    let _ = line;
-    Ok(0)
+    // Symbolic label — return 0 placeholder + the label name
+    if !s.is_empty()
+        && (s.starts_with('_') || s.as_bytes()[0].is_ascii_alphabetic())
+    {
+        return Ok((0, Some(s.to_string())));
+    }
+    Err(Error::Parse {
+        line,
+        msg: format!("invalid address: {s}"),
+    })
 }
 
 /// Map a universal register name string to its 8-bit ureg code.
@@ -4149,6 +4501,142 @@ mod tests {
                 assert_eq!(alu_sel, 0);
             }
             other => panic!("expected Multi MulAlu with MRF acc, got {other:?}"),
+        }
+    }
+
+    // -- Type 5b: RegisterSwap --
+
+    #[test]
+    fn roundtrip_register_swap() {
+        roundtrip(&Instruction::RegisterSwap {
+            dreg: 14,
+            cdreg: 8,
+            cond: 31,
+            compute: None,
+        });
+    }
+
+    #[test]
+    fn roundtrip_register_swap_with_compute() {
+        roundtrip(&Instruction::RegisterSwap {
+            dreg: 14,
+            cdreg: 8,
+            cond: 31,
+            compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
+        });
+    }
+
+    #[test]
+    fn roundtrip_register_swap_conditional() {
+        roundtrip(&Instruction::RegisterSwap {
+            dreg: 5,
+            cdreg: 3,
+            cond: 0,
+            compute: None,
+        });
+    }
+
+    #[test]
+    fn parse_swap_text() {
+        let instr = parse_instruction("R14<->S8").unwrap();
+        match instr {
+            Instruction::RegisterSwap { dreg, cdreg, cond, compute } => {
+                assert_eq!(dreg, 14);
+                assert_eq!(cdreg, 8);
+                assert_eq!(cond, 31);
+                assert!(compute.is_none());
+            }
+            other => panic!("expected RegisterSwap, got {other:?}"),
+        }
+    }
+
+    // -- Constant expression evaluator --
+
+    #[test]
+    fn test_eval_const_expr() {
+        assert_eq!(eval_const_expr("1 + 1"), Some(2));
+        assert_eq!(eval_const_expr("0x100 - 5"), Some(251));
+        assert_eq!(eval_const_expr("(1 << 4) | 5"), Some(21));
+        assert_eq!(eval_const_expr("10 * 3 + 2"), Some(32));
+        assert_eq!(eval_const_expr("~0"), Some(-1));
+        assert_eq!(eval_const_expr("0xFF & 0x0F"), Some(15));
+        assert_eq!(eval_const_expr("100 / 3"), Some(33));
+        assert_eq!(eval_const_expr("42"), Some(42));
+        assert_eq!(eval_const_expr("0x1000"), Some(4096));
+        assert_eq!(eval_const_expr("-1"), Some(-1));
+        assert_eq!(eval_const_expr("0xFFFFFFFF"), Some(4294967295));
+        assert_eq!(eval_const_expr("4 * 1024"), Some(4096));
+        assert_eq!(eval_const_expr("7 % 3"), Some(1));
+        assert_eq!(eval_const_expr("0xFF ^ 0x0F"), Some(240));
+        assert_eq!(eval_const_expr("1 << 31"), Some(2147483648));
+        assert_eq!(eval_const_expr("(2 + 3) * 4"), Some(20));
+        assert_eq!(eval_const_expr("10 / 0"), None);
+        assert_eq!(eval_const_expr("10 % 0"), None);
+        // Not an expression:
+        assert_eq!(eval_const_expr("R0"), None);
+        assert_eq!(eval_const_expr("R1 + R2"), None);
+        assert_eq!(eval_const_expr(""), None);
+        assert_eq!(eval_const_expr("PASS R0"), None);
+    }
+
+    #[test]
+    fn test_expr_in_load_imm() {
+        let instr = parse_instruction("R0 = 1 + 1").unwrap();
+        match instr {
+            Instruction::LoadImm { ureg, value } => {
+                assert_eq!(ureg, 0);
+                assert_eq!(value, 2);
+            }
+            other => panic!("expected LoadImm, got {other:?}"),
+        }
+
+        let instr = parse_instruction("R0 = (1 << 4) | 5").unwrap();
+        match instr {
+            Instruction::LoadImm { ureg, value } => {
+                assert_eq!(ureg, 0);
+                assert_eq!(value, 21);
+            }
+            other => panic!("expected LoadImm, got {other:?}"),
+        }
+
+        let instr = parse_instruction("R0 = 0x100 - 5").unwrap();
+        match instr {
+            Instruction::LoadImm { ureg, value } => {
+                assert_eq!(ureg, 0);
+                assert_eq!(value, 251);
+            }
+            other => panic!("expected LoadImm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_swap_compound() {
+        let instr = parse_instruction("R0 = R1 + R2 , R14<->S8").unwrap();
+        match instr {
+            Instruction::RegisterSwap { dreg, cdreg, cond, compute } => {
+                assert_eq!(dreg, 14);
+                assert_eq!(cdreg, 8);
+                assert_eq!(cond, 31);
+                assert!(compute.is_some());
+            }
+            other => panic!("expected RegisterSwap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_expr_does_not_break_compute() {
+        // "R0 = R1 + R2" must still parse as a compute, not a LoadImm
+        let instr = parse_instruction("R0 = R1 + R2").unwrap();
+        match instr {
+            Instruction::Compute { .. } => {}
+            other => panic!("expected Compute for R0 = R1 + R2, got {other:?}"),
+        }
+
+        // "R0 = PASS R1" must still be a compute
+        let instr = parse_instruction("R0 = PASS R1").unwrap();
+        match instr {
+            Instruction::Compute { .. } => {}
+            other => panic!("expected Compute for R0 = PASS R1, got {other:?}"),
         }
     }
 }

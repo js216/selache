@@ -410,6 +410,17 @@ pub enum Instruction {
         /// Optional compute
         compute: Option<ComputeOp>,
     },
+    /// Type 5b: Compute, dreg<->cdreg (SIMD register swap).
+    RegisterSwap {
+        /// Data register index (0-15, R0-R15)
+        dreg: u8,
+        /// Complementary data register index (0-15, S0-S15)
+        cdreg: u8,
+        /// Condition code (31 = TRUE = unconditional)
+        cond: u8,
+        /// Optional compute
+        compute: Option<ComputeOp>,
+    },
     /// Type 5a: Compute, ureg<->ureg transfer.
     UregTransfer {
         /// Source universal register code
@@ -569,6 +580,9 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
                 | ((cond as u64 & 0x1F) << 23)
                 | (comp as u64);
             Ok(word)
+        }
+        Instruction::RegisterSwap { dreg, cdreg, cond, ref compute } => {
+            encode_type5b(dreg, cdreg, cond, compute)
         }
         Instruction::UregTransfer { src_ureg, dst_ureg, compute } => {
             let comp = encode_compute_opt(&compute)?;
@@ -1267,6 +1281,27 @@ fn encode_type5a(dest: u8, src: u8) -> Result<u64, EncodeError> {
         | ((src as u64 & 0xFF) << 34)
         | ((dest as u64 & 0xFF) << 26)
         | (7u64 << 23);      // cond = 7 (always)
+    Ok(word)
+}
+
+// ---------------------------------------------------------------------------
+// Type 5b: Compute, dreg<->cdreg (SIMD register swap)
+// bits[47:43] = 01111
+// bits[41:38] = cdreg[3:0]
+// bits[37:33] = cond[4:0] (31 = TRUE)
+// bits[26:23] = dreg[3:0]
+// bits[22:0]  = compute
+// ---------------------------------------------------------------------------
+
+fn encode_type5b(dreg: u8, cdreg: u8, cond: u8, compute: &Option<ComputeOp>) -> Result<u64, EncodeError> {
+    check_reg4("dreg", dreg)?;
+    check_reg4("cdreg", cdreg)?;
+    let comp = encode_compute_opt(compute)?;
+    let word = (0b01111u64 << 43)
+        | ((cdreg as u64 & 0xF) << 38)
+        | ((cond as u64 & 0x1F) << 33)
+        | ((dreg as u64 & 0xF) << 23)
+        | (comp as u64);
     Ok(word)
 }
 
@@ -2317,5 +2352,40 @@ mod tests {
         };
         let text = roundtrip(&instr);
         assert_eq!(text, "MRF = MRF + R2 * R6 (SSF) , R11 = R9 + R13");
+    }
+
+    // -- Type 5b: RegisterSwap --
+
+    #[test]
+    fn roundtrip_register_swap() {
+        let text = roundtrip(&Instruction::RegisterSwap {
+            dreg: 14,
+            cdreg: 8,
+            cond: 31,
+            compute: None,
+        });
+        assert_eq!(text, "R14<->S8");
+    }
+
+    #[test]
+    fn roundtrip_register_swap_with_compute() {
+        let text = roundtrip(&Instruction::RegisterSwap {
+            dreg: 0,
+            cdreg: 0,
+            cond: 31,
+            compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
+        });
+        assert_eq!(text, "R0 = R1 + R2 , R0<->S0");
+    }
+
+    #[test]
+    fn roundtrip_register_swap_conditional() {
+        let text = roundtrip(&Instruction::RegisterSwap {
+            dreg: 5,
+            cdreg: 3,
+            cond: 0, // EQ
+            compute: None,
+        });
+        assert_eq!(text, "IF EQ R5<->S3");
     }
 }

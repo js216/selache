@@ -5,6 +5,8 @@
 //! Multi-section assembler orchestrator: reads .s files, parses, encodes, and
 //! emits .doj ELF objects with per-section code and relocation support.
 
+use std::collections::HashMap;
+
 use crate::asmparse::{AsmParser, Directive, ParsedLine};
 use crate::error::Result;
 
@@ -147,6 +149,48 @@ fn current_or_default(
     idx
 }
 
+/// An instruction that may need label resolution in a second pass.
+struct PendingInstr {
+    section_idx: usize,
+    byte_offset: usize,
+    byte_len: usize,
+    instr: selelf::encode::Instruction,
+    label_ref: String,
+}
+
+/// Resolve a symbolic label reference inside an instruction, replacing the
+/// placeholder address (0) with the actual word offset from `label_map`.
+fn resolve_labels(
+    instr: &selelf::encode::Instruction,
+    label_name: &str,
+    label_map: &std::collections::HashMap<String, u32>,
+) -> selelf::encode::Instruction {
+    let addr = match label_map.get(label_name) {
+        Some(&a) => a,
+        None => {
+            eprintln!("warning: undefined label: {label_name}");
+            return *instr;
+        }
+    };
+
+    use selelf::encode::{BranchTarget, Instruction};
+    match *instr {
+        Instruction::Branch { call, cond, target: BranchTarget::Absolute(0), delayed } => {
+            Instruction::Branch { call, cond, target: BranchTarget::Absolute(addr), delayed }
+        }
+        Instruction::DoLoop { counter, end_pc: 0 } => {
+            Instruction::DoLoop { counter, end_pc: addr }
+        }
+        Instruction::DoUntil { addr: 0, term } => {
+            Instruction::DoUntil { addr, term }
+        }
+        Instruction::CJump { addr: 0, delayed } => {
+            Instruction::CJump { addr, delayed }
+        }
+        other => other,
+    }
+}
+
 /// Assemble an input .s file to an output .doj ELF object.
 ///
 /// When `visa` is true, PM code sections use VISA variable-width encoding
@@ -160,12 +204,15 @@ pub fn assemble_file_visa(input: &str, output: &str) -> Result<()> {
     assemble_file_inner(input, output, true)
 }
 
-/// A pending instruction recorded during pass 1 for re-encoding in pass 2.
-struct PendingInstr {
-    section_idx: usize,
-    byte_offset: usize,
-    byte_len: usize,
-    instr: selelf::encode::Instruction,
+/// Build a label -> address map from all section symbols.
+fn build_label_map(sections: &[(String, SectionData)]) -> std::collections::HashMap<String, u32> {
+    let mut map = std::collections::HashMap::new();
+    for (_, sec) in sections {
+        for (name, offset) in &sec.symbols {
+            map.insert(name.clone(), *offset);
+        }
+    }
+    map
 }
 
 fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
@@ -177,16 +224,19 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
     let mut sections: Vec<(String, SectionData)> = Vec::new();
     let mut globals: Vec<String> = Vec::new();
     let mut externs: Vec<String> = Vec::new();
+    let mut aliases: HashMap<String, String> =
+        HashMap::new();
     let mut current_section_idx: Option<usize> = None;
     let mut pending: Vec<PendingInstr> = Vec::new();
 
-    // Pass 1: encode all instructions, determine sizes, assign label addresses.
+    // Pass 1: encode instructions, build label map, track unresolved refs
     for line in &lines {
         process_directives(
             line,
             &mut sections,
             &mut globals,
             &mut externs,
+            &mut aliases,
             &mut current_section_idx,
             visa,
         );
@@ -223,12 +273,13 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
                 sec.code.extend_from_slice(&bytes);
             }
             let byte_len = sec.code.len() - byte_offset;
-            if needs_label_resolution(instr) {
+            if let Some(ref label_ref) = line.label_ref {
                 pending.push(PendingInstr {
                     section_idx: idx,
                     byte_offset,
                     byte_len,
                     instr: *instr,
+                    label_ref: label_ref.clone(),
                 });
             }
         }
@@ -238,7 +289,7 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
     if !pending.is_empty() {
         let label_map = build_label_map(&sections);
         for pi in &pending {
-            let resolved = resolve_labels(&pi.instr, &label_map);
+            let resolved = resolve_labels(&pi.instr, &pi.label_ref, &label_map);
             let sec = &mut sections[pi.section_idx].1;
             if visa && sec.is_visa {
                 let isa_bytes =
@@ -256,44 +307,10 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
         }
     }
 
+    // Resolve .SET aliases into section symbol tables.
+    resolve_aliases(&mut sections, &aliases);
+
     emit_elf(&sections, &globals, &externs, output)
-}
-
-/// Check whether an instruction references an address that may be a label
-/// (address == 0 is the placeholder for unresolved labels).
-fn needs_label_resolution(instr: &selelf::encode::Instruction) -> bool {
-    use selelf::encode::{BranchTarget, Instruction};
-    matches!(
-        *instr,
-        Instruction::Branch { target: BranchTarget::Absolute(0), .. }
-            | Instruction::DoLoop { end_pc: 0, .. }
-            | Instruction::DoUntil { addr: 0, .. }
-            | Instruction::CJump { addr: 0, .. }
-    )
-}
-
-/// Build a label → address map from all section symbols.
-fn build_label_map(sections: &[(String, SectionData)]) -> std::collections::HashMap<String, u32> {
-    let mut map = std::collections::HashMap::new();
-    for (_, sec) in sections {
-        for (name, offset) in &sec.symbols {
-            map.insert(name.clone(), *offset);
-        }
-    }
-    map
-}
-
-/// Resolve label references in an instruction using the label map.
-/// Currently a placeholder: returns the instruction unchanged since the parser
-/// does not yet track which symbolic label an address-0 reference came from.
-/// When the parser gains label tracking, this function will perform the lookup.
-fn resolve_labels(
-    instr: &selelf::encode::Instruction,
-    _label_map: &std::collections::HashMap<String, u32>,
-) -> selelf::encode::Instruction {
-    // TODO: When the parser tracks symbolic label names for branch targets,
-    // look up the label in the map and return a patched instruction.
-    *instr
 }
 
 /// Process directive and section-state effects from a parsed line.
@@ -302,6 +319,7 @@ fn process_directives(
     sections: &mut Vec<(String, SectionData)>,
     globals: &mut Vec<String>,
     externs: &mut Vec<String>,
+    aliases: &mut HashMap<String, String>,
     current_section_idx: &mut Option<usize>,
     visa: bool,
 ) {
@@ -358,6 +376,51 @@ fn process_directives(
                         sec.code
                             .extend(std::iter::repeat_n(0u8, pad_words * unit));
                     }
+                }
+            }
+        }
+        Directive::Set(name, value) => {
+            aliases.insert(name.clone(), value.clone());
+        }
+    }
+}
+
+/// Resolve `.SET` aliases into section symbol tables.
+///
+/// For each alias, look up the value: if it names an existing symbol in any
+/// section, copy that symbol's address; if it parses as a numeric literal,
+/// use that value directly.  Chains (A = B, B = C) are resolved transitively
+/// up to a bounded depth.
+fn resolve_aliases(
+    sections: &mut [(String, SectionData)],
+    aliases: &HashMap<String, String>,
+) {
+    for (alias_name, raw_value) in aliases {
+        // Resolve transitive chains: follow symbol names through the alias map.
+        let mut value = raw_value.clone();
+        for _ in 0..16 {
+            match aliases.get(&value) {
+                Some(next) => value = next.clone(),
+                None => break,
+            }
+        }
+
+        // Try to find the resolved value as an existing symbol.
+        let mut found = false;
+        for sec in sections.iter_mut() {
+            let hit = sec.1.symbols.iter().find(|(n, _)| *n == value).map(|(_, off)| *off);
+            if let Some(addr) = hit {
+                sec.1.symbols.push((alias_name.clone(), addr));
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            // Try as a numeric literal; add to the first section (or skip).
+            if let Some(num) = parse_u32_literal(&value) {
+                if let Some(first) = sections.first_mut() {
+                    first.1.symbols.push((alias_name.clone(), num));
                 }
             }
         }
@@ -659,5 +722,120 @@ mod tests {
         let (name, val) = parse_var_body("_count = 42;");
         assert_eq!(name, "_count");
         assert_eq!(val, Some(42));
+    }
+
+    /// Read a 48-bit big-endian instruction word from 6 bytes.
+    fn read_word48(bytes: &[u8]) -> u64 {
+        ((bytes[0] as u64) << 40)
+            | ((bytes[1] as u64) << 32)
+            | ((bytes[2] as u64) << 24)
+            | ((bytes[3] as u64) << 16)
+            | ((bytes[4] as u64) << 8)
+            | (bytes[5] as u64)
+    }
+
+    #[test]
+    fn test_set_directive() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             .GLOBAL _start;\n\
+             _start: NOP;\n\
+             .SET _alias = _start;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+    }
+
+    #[test]
+    fn test_set_numeric() {
+        let data = assemble_str(
+            ".SET _CONST = 0x1000;\n\
+             .SECTION/PM seg_pmco;\n\
+             NOP;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+    }
+
+    #[test]
+    fn test_set_comma_syntax() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             .GLOBAL _start;\n\
+             _start: NOP;\n\
+             .SET _alias, _start;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+    }
+
+    #[test]
+    fn test_branch_label_resolution() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             .GLOBAL _start;\n\
+             _start: NOP;\n\
+             NOP;\n\
+             JUMP _start;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+
+        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found");
+        assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
+
+        let off = shdr.sh_offset as usize;
+        let word = read_word48(&data[off + 12..off + 18]);
+        let decoded = selelf::disasm::decode_instruction(word);
+        assert!(
+            decoded.contains("0x000000"),
+            "JUMP should target address 0 (_start), got: {decoded}"
+        );
+    }
+
+    #[test]
+    fn test_forward_branch_label() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             .GLOBAL _start;\n\
+             _start: JUMP _end;\n\
+             NOP;\n\
+             _end: NOP;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+
+        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found");
+        let off = shdr.sh_offset as usize;
+        let word = read_word48(&data[off..off + 6]);
+        let decoded = selelf::disasm::decode_instruction(word);
+        assert!(
+            decoded.contains("0x000002"),
+            "JUMP should target address 2 (_end), got: {decoded}"
+        );
+    }
+
+    #[test]
+    fn test_do_loop_label() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             LCNTR = 10, DO _end UNTIL LCE;\n\
+             NOP;\n\
+             _end: NOP;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+
+        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found");
+        assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
     }
 }

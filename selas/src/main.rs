@@ -23,8 +23,30 @@ fn main() {
     }
 }
 
+/// Walk up from the executable path to find the selache toolchain root.
+/// The root is identified by containing a `libsel/include` directory.
+fn find_toolchain_root(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = exe_path.parent()?;
+    for _ in 0..5 {
+        let candidate = dir.join("libsel").join("include");
+        if candidate.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
 fn run(args: &[String]) -> error::Result<()> {
-    let opts = cli::parse_args(args)?;
+    let mut opts = cli::parse_args(args)?;
+
+    // Auto-add standard library include path
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(root) = find_toolchain_root(&exe_path) {
+            let lib_include = root.join("libsel").join("include");
+            opts.include_dirs.push(lib_include.to_string_lossy().to_string());
+        }
+    }
 
     if opts.show_version {
         println!("SHARC+ Assembler");
@@ -88,4 +110,28 @@ fn print_usage() {
     eprintln!("    --preprocess-only  Preprocess only, do not assemble");
     eprintln!("    -v                 Verbose output");
     eprintln!("    -version           Print version information");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_toolchain_root() {
+        let tmp = std::env::temp_dir().join("test_selache_root");
+        let _ = std::fs::create_dir_all(tmp.join("libsel/include"));
+        let _ = std::fs::create_dir_all(tmp.join("target/release"));
+        let fake_exe = tmp.join("target/release/selas");
+
+        let root = find_toolchain_root(&fake_exe);
+        assert_eq!(root, Some(tmp.clone()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_find_toolchain_root_not_found() {
+        let fake_exe = std::path::PathBuf::from("/tmp/no_such_root/bin/selas");
+        assert_eq!(find_toolchain_root(&fake_exe), None);
+    }
 }
