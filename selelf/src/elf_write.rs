@@ -30,6 +30,8 @@ struct Section {
     data: Vec<u8>,
     /// For SHT_NOBITS, the logical size (no file data).
     nobits_size: u32,
+    /// Section alignment (sh_addralign). Default is 4.
+    alignment: u32,
 }
 
 /// A symbol to be emitted in the symbol table.
@@ -81,6 +83,19 @@ impl ElfWriter {
         self.add_section(name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, data)
     }
 
+    /// Add a VISA code section (alignment 2 instead of 4).
+    pub fn add_text_section_visa(&mut self, name: &str, data: &[u8]) -> u16 {
+        self.sections.push(Section {
+            name: name.to_string(),
+            sh_type: SHT_PROGBITS,
+            sh_flags: SHF_ALLOC | SHF_EXECINSTR,
+            data: data.to_vec(),
+            nobits_size: 0,
+            alignment: 2,
+        });
+        self.sections.len() as u16
+    }
+
     /// Add a data section (SHT_PROGBITS, SHF_ALLOC|SHF_WRITE).
     pub fn add_data_section(&mut self, name: &str, data: &[u8]) -> u16 {
         self.add_section(name, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, data)
@@ -99,6 +114,7 @@ impl ElfWriter {
             sh_flags: SHF_ALLOC | SHF_WRITE,
             data: Vec::new(),
             nobits_size: size,
+            alignment: 4,
         });
         // Section indices: 0 = NULL, 1..N = user sections
         self.sections.len() as u16
@@ -112,6 +128,7 @@ impl ElfWriter {
             sh_flags,
             data: data.to_vec(),
             nobits_size: 0,
+            alignment: 4,
         });
         self.sections.len() as u16
     }
@@ -386,8 +403,7 @@ impl ElfWriter {
         for sec in &self.sections {
             user_section_offsets.push(offset);
             if sec.sh_type != SHT_NOBITS {
-                // Align to 4 bytes
-                offset = align_up(offset, 4);
+                offset = align_up(offset, sec.alignment as usize);
                 if let Some(o) = user_section_offsets.last_mut() {
                     *o = offset;
                 }
@@ -487,7 +503,7 @@ impl ElfWriter {
                 sh_size,
                 sh_link: 0,
                 sh_info: 0,
-                sh_addralign: 4,
+                sh_addralign: sec.alignment,
                 sh_entsize: 0,
             }, e);
         }

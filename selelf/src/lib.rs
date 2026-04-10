@@ -14,3 +14,4 @@ pub mod symindex;
 pub mod testutil;
 pub mod version;
 pub mod visa;
+pub mod visa_encode;

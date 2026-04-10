@@ -222,6 +222,8 @@ impl Allocator {
             Instruction::Return {
                 interrupt,
                 cond,
+                delayed,
+                lr,
                 compute,
             } => {
                 let new_compute = compute
@@ -229,6 +231,8 @@ impl Allocator {
                 Instruction::Return {
                     interrupt,
                     cond,
+                    delayed,
+                    lr,
                     compute: new_compute,
                 }
             }
@@ -748,6 +752,8 @@ mod tests {
                 instr: Instruction::Return {
                     interrupt: false,
                     cond: target::COND_TRUE,
+                    delayed: false,
+                    lr: false,
                     compute: None,
                 },
                 reloc: None,
@@ -789,6 +795,8 @@ mod tests {
                 instr: Instruction::Return {
                     interrupt: false,
                     cond: target::COND_TRUE,
+                    delayed: false,
+                    lr: false,
                     compute: None,
                 },
                 reloc: None,
@@ -827,6 +835,8 @@ mod tests {
             instr: Instruction::Return {
                 interrupt: false,
                 cond: target::COND_TRUE,
+                delayed: false,
+                lr: false,
                 compute: None,
             },
             reloc: None,

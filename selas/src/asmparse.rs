@@ -375,17 +375,26 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<Instruction> {
 // ---------------------------------------------------------------------------
 
 fn try_parse_return(text: &str, line: u32) -> Result<Option<Instruction>> {
-    // Handle: RTS, RTI, RTS(DB), RTI(DB), and with optional compute after comma
+    // Handle: RTS, RTI, RTS(DB), RTI(DB), RTS(LR), RTS(DB,LR), and with
+    // optional compute after comma.
     let (main_part, compute_text) = split_first_comma(text);
     let main_part = main_part.trim();
 
     let main_norm = main_part.replace(' ', "");
-    let (interrupt, matched) = if main_norm == "RTS" || main_norm == "RTS(DB)"
-        || main_norm == "RETURN" || main_norm == "RETURN(DB)"
-    {
-        (false, true)
-    } else if main_norm == "RTI" || main_norm == "RTI(DB)" {
-        (true, true)
+    let (interrupt, matched) = if main_norm.starts_with("RTS") || main_norm.starts_with("RETURN") {
+        if main_norm == "RTS" || main_norm == "RETURN"
+            || main_norm.starts_with("RTS(") || main_norm.starts_with("RETURN(")
+        {
+            (false, true)
+        } else {
+            (false, false)
+        }
+    } else if main_norm.starts_with("RTI") {
+        if main_norm == "RTI" || main_norm.starts_with("RTI(") {
+            (true, true)
+        } else {
+            (false, false)
+        }
     } else {
         (false, false)
     };
@@ -393,6 +402,9 @@ fn try_parse_return(text: &str, line: u32) -> Result<Option<Instruction>> {
     if !matched {
         return Ok(None);
     }
+
+    let delayed = main_norm.contains("DB");
+    let lr = main_norm.contains("LR");
 
     let compute = if let Some(ct) = compute_text {
         Some(parse_compute_op(ct.trim(), line)?)
@@ -403,6 +415,8 @@ fn try_parse_return(text: &str, line: u32) -> Result<Option<Instruction>> {
     Ok(Some(Instruction::Return {
         interrupt,
         cond: 31, // TRUE
+        delayed,
+        lr,
         compute,
     }))
 }
@@ -521,7 +535,10 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
     // IF cond RTS/RTI
     let (rts_part, compute_text) = split_first_comma(rest);
     let rts_part = rts_part.trim();
-    if rts_part == "RTS" || rts_part == "RTS(DB)" {
+    let rts_norm = rts_part.replace(' ', "");
+    if rts_norm.starts_with("RTS") && (rts_norm == "RTS" || rts_norm.starts_with("RTS(")) {
+        let delayed = rts_norm.contains("DB");
+        let lr = rts_norm.contains("LR");
         let compute = if let Some(ct) = compute_text {
             Some(parse_compute_op(ct.trim(), line)?)
         } else {
@@ -530,10 +547,14 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         return Ok(Instruction::Return {
             interrupt: false,
             cond: cond_code,
+            delayed,
+            lr,
             compute,
         });
     }
-    if rts_part == "RTI" || rts_part == "RTI(DB)" {
+    if rts_norm.starts_with("RTI") && (rts_norm == "RTI" || rts_norm.starts_with("RTI(")) {
+        let delayed = rts_norm.contains("DB");
+        let lr = rts_norm.contains("LR");
         let compute = if let Some(ct) = compute_text {
             Some(parse_compute_op(ct.trim(), line)?)
         } else {
@@ -542,6 +563,8 @@ fn parse_conditional(text: &str, line: u32) -> Result<Instruction> {
         return Ok(Instruction::Return {
             interrupt: true,
             cond: cond_code,
+            delayed,
+            lr,
             compute,
         });
     }
@@ -1258,21 +1281,11 @@ fn parse_mem_store(
     }
 
     // Numeric offset: DM(imm, Ii) = dreg or DM(Ii, imm) = dreg
+    // Always use Type 15 for standalone stores with integer offsets.
+    // Type 4 is only used when a parallel compute is present.
     let (i_reg, offset) = parse_ireg_and_offset(op1, op2, line)?;
     let i_field = if pm { i_reg.wrapping_sub(8) } else { i_reg };
-    // Use Type 4 (6-bit offset) for dregs with small offsets,
-    // fall back to Type 15 (32-bit offset) for large offsets or uregs.
     if let Ok(dreg) = parse_dreg(rhs, line) {
-        if (-32..=31).contains(&offset) {
-            return Ok(Instruction::ComputeLoadStore {
-                compute: None,
-                access: MemAccess { pm, write: true, i_reg: i_field },
-                dreg,
-                offset: offset as i8,
-                cond: 31,
-            });
-        }
-        // Large offset: encode as Type 15 using dreg's ureg code
         let ureg = dreg;  // R0-R15 have ureg codes 0x00-0x0F
         return Ok(Instruction::UregMemAccess {
             pm, i_reg: i_field, write: true, lw: is_lw,
@@ -1306,21 +1319,11 @@ fn parse_mem_load(
     }
 
     // Numeric offset: dreg = DM(imm, Ii) or dreg = DM(Ii, imm)
+    // Always use Type 15 for standalone loads with integer offsets.
+    // Type 4 is only used when a parallel compute is present.
     let (i_reg, offset) = parse_ireg_and_offset(op1, op2, line)?;
     let i_field = if pm { i_reg.wrapping_sub(8) } else { i_reg };
-    // Use Type 4 (6-bit offset) for dregs with small offsets,
-    // fall back to Type 15 (32-bit offset) for large offsets or uregs.
     if let Ok(dreg) = parse_dreg(dest, line) {
-        if (-32..=31).contains(&offset) {
-            return Ok(Instruction::ComputeLoadStore {
-                compute: None,
-                access: MemAccess { pm, write: false, i_reg: i_field },
-                dreg,
-                offset: offset as i8,
-                cond: 31,
-            });
-        }
-        // Large offset: encode as Type 15 using dreg's ureg code
         let ureg = dreg;  // R0-R15 have ureg codes 0x00-0x0F
         return Ok(Instruction::UregMemAccess {
             pm, i_reg: i_field, write: false, lw: is_lw,
@@ -3690,6 +3693,8 @@ mod tests {
         roundtrip(&Instruction::Return {
             interrupt: false,
             cond: 31,
+            delayed: false,
+            lr: false,
             compute: None,
         });
     }
@@ -3699,6 +3704,8 @@ mod tests {
         roundtrip(&Instruction::Return {
             interrupt: true,
             cond: 31,
+            delayed: false,
+            lr: false,
             compute: None,
         });
     }
@@ -3708,6 +3715,8 @@ mod tests {
         roundtrip(&Instruction::Return {
             interrupt: false,
             cond: 0, // EQ
+            delayed: false,
+            lr: false,
             compute: None,
         });
     }
@@ -3717,7 +3726,42 @@ mod tests {
         roundtrip(&Instruction::Return {
             interrupt: false,
             cond: 31,
+            delayed: false,
+            lr: false,
             compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
+        });
+    }
+
+    #[test]
+    fn roundtrip_rts_db() {
+        roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: true,
+            lr: false,
+            compute: None,
+        });
+    }
+
+    #[test]
+    fn roundtrip_rts_lr() {
+        roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: false,
+            lr: true,
+            compute: None,
+        });
+    }
+
+    #[test]
+    fn roundtrip_conditional_rts_db() {
+        roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 0,
+            delayed: true,
+            lr: false,
+            compute: None,
         });
     }
 
@@ -3781,35 +3825,37 @@ mod tests {
 
     #[test]
     fn test_parse_dm_load_imm() {
+        // Standalone load with integer offset uses Type 15 (UregMemAccess).
         let instr = parse_instruction("R2 = DM(I6, 1)").unwrap();
         match instr {
-            Instruction::ComputeLoadStore {
-                access, dreg, offset, ..
+            Instruction::UregMemAccess {
+                pm, i_reg, write, ureg, offset, ..
             } => {
-                assert!(!access.pm);
-                assert!(!access.write);
-                assert_eq!(access.i_reg, 6);
-                assert_eq!(dreg, 2);
+                assert!(!pm);
+                assert!(!write);
+                assert_eq!(i_reg, 6);
+                assert_eq!(ureg, 2);
                 assert_eq!(offset, 1);
             }
-            other => panic!("expected ComputeLoadStore, got {other:?}"),
+            other => panic!("expected UregMemAccess, got {other:?}"),
         }
     }
 
     #[test]
     fn test_parse_dm_store_imm() {
+        // Standalone store with integer offset uses Type 15 (UregMemAccess).
         let instr = parse_instruction("DM(I0, 1) = R3").unwrap();
         match instr {
-            Instruction::ComputeLoadStore {
-                access, dreg, offset, ..
+            Instruction::UregMemAccess {
+                pm, i_reg, write, ureg, offset, ..
             } => {
-                assert!(!access.pm);
-                assert!(access.write);
-                assert_eq!(access.i_reg, 0);
-                assert_eq!(dreg, 3);
+                assert!(!pm);
+                assert!(write);
+                assert_eq!(i_reg, 0);
+                assert_eq!(ureg, 3);
                 assert_eq!(offset, 1);
             }
-            other => panic!("expected ComputeLoadStore, got {other:?}"),
+            other => panic!("expected UregMemAccess, got {other:?}"),
         }
     }
 
@@ -3929,36 +3975,36 @@ mod tests {
 
     #[test]
     fn test_parse_dm_load_with_space() {
-        // Disassembler format: "R0=DM (0x1,I0)"
+        // Disassembler format: "R0=DM (0x1,I0)" — Type 15
         let instr = parse_instruction("R0=DM (0x1,I0)").unwrap();
         match instr {
-            Instruction::ComputeLoadStore {
-                access, dreg, offset, ..
+            Instruction::UregMemAccess {
+                pm, write, ureg, offset, ..
             } => {
-                assert!(!access.pm);
-                assert!(!access.write);
-                assert_eq!(dreg, 0);
+                assert!(!pm);
+                assert!(!write);
+                assert_eq!(ureg, 0);
                 assert_eq!(offset, 1);
             }
-            other => panic!("expected ComputeLoadStore, got {other:?}"),
+            other => panic!("expected UregMemAccess, got {other:?}"),
         }
     }
 
     #[test]
     fn test_parse_dm_store_with_space() {
-        // Disassembler format: "DM (-0x1,I3)=R12"
+        // Disassembler format: "DM (-0x1,I3)=R12" — Type 15
         let instr = parse_instruction("DM (-0x1,I3)=R12").unwrap();
         match instr {
-            Instruction::ComputeLoadStore {
-                access, dreg, offset, ..
+            Instruction::UregMemAccess {
+                pm, i_reg, write, ureg, offset, ..
             } => {
-                assert!(!access.pm);
-                assert!(access.write);
-                assert_eq!(access.i_reg, 3);
-                assert_eq!(dreg, 12);
+                assert!(!pm);
+                assert!(write);
+                assert_eq!(i_reg, 3);
+                assert_eq!(ureg, 12);
                 assert_eq!(offset, -1);
             }
-            other => panic!("expected ComputeLoadStore, got {other:?}"),
+            other => panic!("expected UregMemAccess, got {other:?}"),
         }
     }
 

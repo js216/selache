@@ -285,6 +285,8 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                     instr: Instruction::Return {
                         interrupt: false,
                         cond: target::COND_TRUE,
+                        delayed: false,
+                        lr: false,
                         compute: None,
                     },
                     reloc: None,

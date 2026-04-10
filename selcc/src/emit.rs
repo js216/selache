@@ -852,12 +852,16 @@ fn remap_sources(mi: &MachInstr, from: u8, to: u8) -> MachInstr {
         Instruction::Return {
             interrupt,
             cond,
+            delayed,
+            lr,
             compute,
         } => {
             let new_compute = compute.map(|c| remap_compute_sources(&c, from, to));
             Instruction::Return {
                 interrupt,
                 cond,
+                delayed,
+                lr,
                 compute: new_compute,
             }
         }

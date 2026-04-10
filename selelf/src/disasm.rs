@@ -1307,16 +1307,24 @@ fn decode_type10b(word: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn decode_type11a(word: u64) -> String {
-    let j = bit(word, 39); // 0=RTS, 1=RTI
+    let x = bit(word, 39); // 0=RTS, 1=RTI
     let cond = bits(word, 37, 33);
+    let db = bit(word, 26);
+    let lr = bit(word, 25);
     let compute = bits(word, 22, 0);
 
-    let op = if j { "RTI" } else { "RTS" };
+    let op = if x { "RTI" } else { "RTS" };
     let mut out = String::new();
     if cond != 31 {
         write!(out, "IF {} ", cond_name(cond)).unwrap();
     }
     out.push_str(op);
+    match (db, lr) {
+        (true, true) => out.push_str(" (DB,LR)"),
+        (true, false) => out.push_str(" (DB)"),
+        (false, true) => out.push_str(" (LR)"),
+        (false, false) => {}
+    }
     append_compute(&mut out, compute);
     out
 }
@@ -1326,16 +1334,24 @@ fn decode_type11a(word: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn decode_type11b(word: u64) -> String {
-    let j = bit(word, 39);
+    let x = bit(word, 39);
     let cond = bits(word, 37, 33);
+    let db = bit(word, 26);
+    let lr = bit(word, 25);
     let compute = bits(word, 22, 0);
 
-    let op = if j { "RTI" } else { "RTS" };
+    let op = if x { "RTI" } else { "RTS" };
     let mut out = String::new();
     if cond != 31 {
         write!(out, "IF {} ", cond_name(cond)).unwrap();
     }
     out.push_str(op);
+    match (db, lr) {
+        (true, true) => out.push_str(" (DB,LR)"),
+        (true, false) => out.push_str(" (DB)"),
+        (false, true) => out.push_str(" (LR)"),
+        (false, false) => {}
+    }
     append_compute(&mut out, compute);
     out
 }

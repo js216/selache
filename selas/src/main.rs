@@ -60,7 +60,13 @@ fn run(args: &[String]) -> error::Result<()> {
     std::fs::write(&tmp_path, &processed)?;
 
     let tmp_str = tmp_path.to_string_lossy();
-    assemble::assemble_file(&tmp_str, &opts.output)?;
+    let is_visa = opts.proc.as_deref()
+        .is_some_and(|p| p.eq_ignore_ascii_case("ADSP-21569"));
+    if is_visa {
+        assemble::assemble_file_visa(&tmp_str, &opts.output)?;
+    } else {
+        assemble::assemble_file(&tmp_str, &opts.output)?;
+    }
 
     let _ = std::fs::remove_file(&tmp_path);
 

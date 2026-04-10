@@ -306,6 +306,8 @@ pub enum Instruction {
     Return {
         interrupt: bool,
         cond: u8,
+        delayed: bool,
+        lr: bool,
         compute: Option<ComputeOp>,
     },
     /// Type 2: Conditional compute.
@@ -499,7 +501,7 @@ pub fn encode(instr: &Instruction) -> Result<[u8; 6], EncodeError> {
 // Internal: encode to 48-bit u64
 // ---------------------------------------------------------------------------
 
-fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
+pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
     match *instr {
         Instruction::Nop => Ok(0),
         Instruction::Idle => Ok(1u64 << 39),
@@ -507,8 +509,10 @@ fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
         Instruction::Return {
             interrupt,
             cond,
+            delayed,
+            lr,
             compute,
-        } => encode_type11a(interrupt, cond, compute),
+        } => encode_type11a(interrupt, cond, delayed, lr, compute),
         Instruction::Compute { cond, compute } => encode_type2(cond, compute),
         Instruction::Branch { call, cond, target, delayed } => encode_branch(call, cond, target, delayed),
         Instruction::ComputeLoadStore {
@@ -866,14 +870,16 @@ fn encode_type17(ureg: u8, value: u32) -> Result<u64, EncodeError> {
 // bits[22:0] = compute
 // ---------------------------------------------------------------------------
 
-fn encode_type11a(interrupt: bool, cond: u8, compute: Option<ComputeOp>) -> Result<u64, EncodeError> {
+fn encode_type11a(interrupt: bool, cond: u8, delayed: bool, lr: bool, compute: Option<ComputeOp>) -> Result<u64, EncodeError> {
     let comp = encode_compute_opt(&compute)?;
-    let j = if interrupt { 1u64 } else { 0u64 };
-    // Type 11b (sub=0x0B) matches CRT startup fixture data.
-    // (Both 0x0A and 0x0B decode identically.)
-    let word = (0x0Bu64 << 40)
-        | (j << 39)
+    let x = if interrupt { 1u64 } else { 0u64 };
+    let j = if delayed { 1u64 } else { 0u64 };
+    let lr_bit = if lr { 1u64 } else { 0u64 };
+    let word = (0x0Au64 << 40)
+        | (x << 39)
         | ((cond as u64 & 0x1F) << 33)
+        | (j << 26)
+        | (lr_bit << 25)
         | (comp as u64);
     Ok(word)
 }
@@ -997,12 +1003,8 @@ fn encode_type3(
     let d = if write { 1u64 } else { 0 };
     let m_offset = (m_reg - 4) as u64 & 0x3;
 
-    // bit44=1 (I,M order), bit40=1. CRT startup uses bit44=1.
-    // Both bit44=0 and bit44=1 decode identically.
+    // bit44=0 (M,I operand order), matching standard output.
     let word = (0b010u64 << 45)
-        | (1u64 << 44)
-        // bit40=1 to match reference encoding
-        | (1u64 << 40)
         | ((i_reg as u64 & 0x7) << 41)          // bits[43:41]
         | (m_offset << 38)                       // bits[39:38]
         | ((cond as u64 & 0x1F) << 33)           // bits[37:33]
@@ -1361,19 +1363,19 @@ mod tests {
 
     #[test]
     fn roundtrip_rts() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, compute: None });
+        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: false, lr: false, compute: None });
         assert_eq!(text, "RTS");
     }
 
     #[test]
     fn roundtrip_rti() {
-        let text = roundtrip(&Instruction::Return { interrupt: true, cond: 31, compute: None });
+        let text = roundtrip(&Instruction::Return { interrupt: true, cond: 31, delayed: false, lr: false, compute: None });
         assert_eq!(text, "RTI");
     }
 
     #[test]
     fn roundtrip_conditional_rts() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 0, compute: None });
+        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 0, delayed: false, lr: false, compute: None });
         assert_eq!(text, "IF EQ RTS");
     }
 
@@ -1382,9 +1384,29 @@ mod tests {
         let text = roundtrip(&Instruction::Return {
             interrupt: false,
             cond: 31,
+            delayed: false,
+            lr: false,
             compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
         });
         assert_eq!(text, "RTS , R0 = R1 + R2");
+    }
+
+    #[test]
+    fn roundtrip_rts_db() {
+        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: true, lr: false, compute: None });
+        assert_eq!(text, "RTS (DB)");
+    }
+
+    #[test]
+    fn roundtrip_rts_lr() {
+        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: false, lr: true, compute: None });
+        assert_eq!(text, "RTS (LR)");
+    }
+
+    #[test]
+    fn roundtrip_rts_db_lr() {
+        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: true, lr: true, compute: None });
+        assert_eq!(text, "RTS (DB,LR)");
     }
 
     // -- Type 2: Conditional Compute --

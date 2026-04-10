@@ -13,22 +13,35 @@ struct SectionData {
     code: Vec<u8>,
     symbols: Vec<(String, u32)>,
     is_pm: bool,
+    /// Whether this section uses VISA encoding.
+    is_visa: bool,
+    /// Parcel count for VISA mode (each parcel = 1 address unit).
+    /// In ISA mode this is not used; word_offset() uses byte length.
+    parcel_count: u32,
 }
 
 impl SectionData {
-    fn new(is_pm: bool) -> Self {
+    fn new(is_pm: bool, is_visa: bool) -> Self {
         Self {
             code: Vec::new(),
             symbols: Vec::new(),
             is_pm,
+            is_visa: is_visa && is_pm,
+            parcel_count: 0,
         }
     }
 
-    /// Current word offset.  PM instructions are 6 bytes; DM data words are
-    /// 4 bytes.
+    /// Current word offset.  In ISA mode: PM instructions are 6 bytes;
+    /// DM data words are 4 bytes.  In VISA mode: parcel_count tracks
+    /// address units directly.
     fn word_offset(&self) -> u32 {
         let unit = if self.is_pm { 6 } else { 4 };
         (self.code.len() / unit) as u32
+    }
+
+    /// Current address in VISA mode (parcel-based).
+    fn visa_offset(&self) -> u32 {
+        self.parcel_count
     }
 }
 
@@ -108,11 +121,12 @@ fn ensure_section(
     sections: &mut Vec<(String, SectionData)>,
     name: &str,
     is_pm: bool,
+    visa: bool,
 ) -> usize {
     if let Some(idx) = sections.iter().position(|(n, _)| n == name) {
         return idx;
     }
-    sections.push((name.to_string(), SectionData::new(is_pm)));
+    sections.push((name.to_string(), SectionData::new(is_pm, visa)));
     sections.len() - 1
 }
 
@@ -123,17 +137,38 @@ fn current_or_default(
     current: &mut Option<usize>,
     default_name: &str,
     default_pm: bool,
+    visa: bool,
 ) -> usize {
     if let Some(idx) = *current {
         return idx;
     }
-    let idx = ensure_section(sections, default_name, default_pm);
+    let idx = ensure_section(sections, default_name, default_pm, visa);
     *current = Some(idx);
     idx
 }
 
 /// Assemble an input .s file to an output .doj ELF object.
+///
+/// When `visa` is true, PM code sections use VISA variable-width encoding
+/// (16/32/48-bit instructions) targeting ADSP-21569.
 pub fn assemble_file(input: &str, output: &str) -> Result<()> {
+    assemble_file_inner(input, output, false)
+}
+
+/// Assemble with VISA encoding for PM code sections.
+pub fn assemble_file_visa(input: &str, output: &str) -> Result<()> {
+    assemble_file_inner(input, output, true)
+}
+
+/// A pending instruction recorded during pass 1 for re-encoding in pass 2.
+struct PendingInstr {
+    section_idx: usize,
+    byte_offset: usize,
+    byte_len: usize,
+    instr: selelf::encode::Instruction,
+}
+
+fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
     let raw_src = std::fs::read_to_string(input)?;
     let src = preprocess(&raw_src);
     let mut parser = AsmParser::new(&src);
@@ -143,7 +178,9 @@ pub fn assemble_file(input: &str, output: &str) -> Result<()> {
     let mut globals: Vec<String> = Vec::new();
     let mut externs: Vec<String> = Vec::new();
     let mut current_section_idx: Option<usize> = None;
+    let mut pending: Vec<PendingInstr> = Vec::new();
 
+    // Pass 1: encode all instructions, determine sizes, assign label addresses.
     for line in &lines {
         process_directives(
             line,
@@ -151,28 +188,112 @@ pub fn assemble_file(input: &str, output: &str) -> Result<()> {
             &mut globals,
             &mut externs,
             &mut current_section_idx,
+            visa,
         );
 
         if let Some(label) = &line.label {
             let idx = current_or_default(
-                &mut sections, &mut current_section_idx, ".text", true,
+                &mut sections, &mut current_section_idx, ".text", true, visa,
             );
             let sec = &mut sections[idx].1;
-            let word_off = sec.word_offset();
+            let word_off = if visa && sec.is_pm {
+                sec.visa_offset()
+            } else {
+                sec.word_offset()
+            };
             sec.symbols.push((label.clone(), word_off));
         }
 
         if let Some(instr) = &line.instruction {
             let idx = current_or_default(
-                &mut sections, &mut current_section_idx, ".text", true,
+                &mut sections, &mut current_section_idx, ".text", true, visa,
             );
-            let bytes =
-                selelf::encode::encode(instr).expect("instruction encoding failed");
-            sections[idx].1.code.extend_from_slice(&bytes);
+            let sec = &mut sections[idx].1;
+            let byte_offset = sec.code.len();
+            if visa && sec.is_pm {
+                let isa_bytes =
+                    selelf::encode::encode(instr).expect("instruction encoding failed");
+                let encoded = selelf::visa_encode::visa_encode(instr, &isa_bytes);
+                let bytes = encoded.to_bytes();
+                sec.parcel_count += encoded.parcels();
+                sec.code.extend_from_slice(&bytes);
+            } else {
+                let bytes =
+                    selelf::encode::encode(instr).expect("instruction encoding failed");
+                sec.code.extend_from_slice(&bytes);
+            }
+            let byte_len = sec.code.len() - byte_offset;
+            if needs_label_resolution(instr) {
+                pending.push(PendingInstr {
+                    section_idx: idx,
+                    byte_offset,
+                    byte_len,
+                    instr: *instr,
+                });
+            }
+        }
+    }
+
+    // Pass 2: resolve label references in branch and loop instructions.
+    if !pending.is_empty() {
+        let label_map = build_label_map(&sections);
+        for pi in &pending {
+            let resolved = resolve_labels(&pi.instr, &label_map);
+            let sec = &mut sections[pi.section_idx].1;
+            if visa && sec.is_visa {
+                let isa_bytes =
+                    selelf::encode::encode(&resolved).expect("instruction re-encode failed");
+                let encoded = selelf::visa_encode::visa_encode(&resolved, &isa_bytes);
+                let bytes = encoded.to_bytes();
+                sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
+                    .copy_from_slice(&bytes);
+            } else {
+                let bytes =
+                    selelf::encode::encode(&resolved).expect("instruction re-encode failed");
+                sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
+                    .copy_from_slice(&bytes);
+            }
         }
     }
 
     emit_elf(&sections, &globals, &externs, output)
+}
+
+/// Check whether an instruction references an address that may be a label
+/// (address == 0 is the placeholder for unresolved labels).
+fn needs_label_resolution(instr: &selelf::encode::Instruction) -> bool {
+    use selelf::encode::{BranchTarget, Instruction};
+    matches!(
+        *instr,
+        Instruction::Branch { target: BranchTarget::Absolute(0), .. }
+            | Instruction::DoLoop { end_pc: 0, .. }
+            | Instruction::DoUntil { addr: 0, .. }
+            | Instruction::CJump { addr: 0, .. }
+    )
+}
+
+/// Build a label → address map from all section symbols.
+fn build_label_map(sections: &[(String, SectionData)]) -> std::collections::HashMap<String, u32> {
+    let mut map = std::collections::HashMap::new();
+    for (_, sec) in sections {
+        for (name, offset) in &sec.symbols {
+            map.insert(name.clone(), *offset);
+        }
+    }
+    map
+}
+
+/// Resolve label references in an instruction using the label map.
+/// Currently a placeholder: returns the instruction unchanged since the parser
+/// does not yet track which symbolic label an address-0 reference came from.
+/// When the parser gains label tracking, this function will perform the lookup.
+fn resolve_labels(
+    instr: &selelf::encode::Instruction,
+    _label_map: &std::collections::HashMap<String, u32>,
+) -> selelf::encode::Instruction {
+    // TODO: When the parser tracks symbolic label names for branch targets,
+    // look up the label in the map and return a patched instruction.
+    *instr
 }
 
 /// Process directive and section-state effects from a parsed line.
@@ -182,6 +303,7 @@ fn process_directives(
     globals: &mut Vec<String>,
     externs: &mut Vec<String>,
     current_section_idx: &mut Option<usize>,
+    visa: bool,
 ) {
     let directive = match &line.directive {
         Some(d) => d,
@@ -191,7 +313,7 @@ fn process_directives(
     match directive {
         Directive::Section(raw_name) => {
             let (name, is_pm) = parse_section_name(raw_name);
-            let idx = ensure_section(sections, &name, is_pm);
+            let idx = ensure_section(sections, &name, is_pm, visa);
             *current_section_idx = Some(idx);
         }
         Directive::Global(name) => {
@@ -206,7 +328,7 @@ fn process_directives(
         }
         Directive::Var(raw_body) => {
             let idx = current_or_default(
-                sections, current_section_idx, ".data", false,
+                sections, current_section_idx, ".data", false, visa,
             );
             let (var_name, init_val) = parse_var_body(raw_body);
             let sec = &mut sections[idx].1;
@@ -219,7 +341,7 @@ fn process_directives(
         }
         Directive::Byte(data) => {
             let idx = current_or_default(
-                sections, current_section_idx, ".text", true,
+                sections, current_section_idx, ".text", true, visa,
             );
             sections[idx].1.code.extend_from_slice(data);
         }
@@ -254,7 +376,9 @@ fn emit_elf(
     // Add sections and collect their ELF section indices.
     let mut elf_indices: Vec<u16> = Vec::new();
     for (name, sec_data) in sections {
-        let idx = if sec_data.is_pm {
+        let idx = if sec_data.is_visa {
+            writer.add_text_section_visa(name, &sec_data.code)
+        } else if sec_data.is_pm {
             writer.add_text_section(name, &sec_data.code)
         } else {
             writer.add_data_section(name, &sec_data.code)
