@@ -1367,10 +1367,10 @@ fn dump_disasm(
     let symbols = opts.symbols;
     let sym_map = build_symbol_map(symbols);
     if opts.is_visa {
-        let lines = selelf::visa::disassemble_visa(
+        let lines = selinstr::visa::disassemble_visa(
             data,
             base_addr,
-            selelf::disasm::decode_instruction,
+            selinstr::disasm::decode_instruction,
         );
         for line in &lines {
             if show_labels {
@@ -1398,7 +1398,7 @@ fn dump_disasm(
     } else {
         // SHARC+ instructions are always stored in big-endian byte order
         // within ELF sections, regardless of the ELF's EI_DATA field.
-        let lines = selelf::disasm::disassemble(data, base_addr, false);
+        let lines = selinstr::disasm::disassemble(data, base_addr, false);
         for line in &lines {
             if show_labels {
                 for (addr, name, _size, _bind) in symbols {

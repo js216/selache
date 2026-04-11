@@ -6,6 +6,7 @@ members = [
     "seld",
     "seldump",
     "selelf",
+    "selinstr",
     "selload",
     "selhex",
     "selinit",

@@ -4,11 +4,11 @@
 
 //! Assembly text parser for SHARC+ (ADSP-2156x).
 //!
-//! Parses the disassembly text format produced by `selelf::disasm` into
-//! structured `selelf::encode::Instruction` values.
+//! Parses the disassembly text format produced by `selinstr::disasm` into
+//! structured `selinstr::encode::Instruction` values.
 
 use crate::error::{Error, Result};
-use selelf::encode::{
+use selinstr::encode::{
     AluOp, BranchTarget, ComputeOp, DagAccess, FaluOp, Instruction, LoopCounter, MemAccess,
     MemWidth, MulOp, MultiOp, ShiftOp,
 };
@@ -4531,8 +4531,8 @@ fn ureg_code(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selelf::disasm;
-    use selelf::encode;
+    use selinstr::disasm;
+    use selinstr::encode;
 
     /// Round-trip: encode -> disassemble -> parse -> re-encode, assert bytes match.
     fn roundtrip(instr: &Instruction) {

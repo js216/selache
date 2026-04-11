@@ -8,7 +8,7 @@
 //! relocation that must be resolved during the fixup pass (for internal
 //! branch labels) or recorded in the object file (for external symbols).
 
-use selelf::encode::{AluOp, ComputeOp, Instruction};
+use selinstr::encode::{AluOp, ComputeOp, Instruction};
 
 /// A single machine instruction with optional relocation.
 #[derive(Debug, Clone)]

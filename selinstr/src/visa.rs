@@ -15,6 +15,37 @@ pub enum InstrWidth {
     W48,
 }
 
+impl InstrWidth {
+    /// Byte length of this instruction width.
+    pub fn bytes(self) -> usize {
+        match self {
+            InstrWidth::W16 => 2,
+            InstrWidth::W32 => 4,
+            InstrWidth::W48 => 6,
+        }
+    }
+}
+
+/// Return the byte length of the VISA instruction at `code[offset..]`.
+///
+/// Reads one or two 16-bit big-endian parcels to determine whether the
+/// instruction is 16-bit (2 bytes), 32-bit (4 bytes), or 48-bit (6 bytes).
+/// Returns 2 if the offset is at or past the end of the data.
+pub fn instruction_len(code: &[u8], offset: usize) -> usize {
+    if offset + 2 > code.len() {
+        return 2;
+    }
+    let p1 = u16::from_be_bytes([code[offset], code[offset + 1]]);
+    if is_16bit(p1) {
+        return 2;
+    }
+    if offset + 4 > code.len() {
+        return 2;
+    }
+    let p2 = u16::from_be_bytes([code[offset + 2], code[offset + 3]]);
+    visa_width(p1, p2).bytes()
+}
+
 /// One disassembled VISA instruction.
 pub struct VisaLine {
     /// Parcel address.

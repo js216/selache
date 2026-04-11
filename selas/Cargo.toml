@@ -6,3 +6,4 @@ description = "SHARC+ assembler for the Selache toolchain"
 
 [dependencies]
 selelf = { path = "../selelf" }
+selinstr = { path = "../selinstr" }

@@ -5,14 +5,14 @@
 //! Instruction selection: IR to SHARC+ machine instructions.
 //!
 //! Converts each [`IrOp`] into one or more [`MachInstr`]s using the
-//! `selelf::encode` instruction types. Virtual register numbers are
+//! `selinstr::encode` instruction types. Virtual register numbers are
 //! passed through verbatim -- the register allocator resolves them later.
 
 use crate::ir::{Cond, IrOp, Label, VReg};
 use crate::mach::{MachInstr, Reloc, RelocKind};
 use crate::target;
 
-use selelf::encode::{
+use selinstr::encode::{
     AluOp, BranchTarget, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, MulOp, ShiftOp,
 };
 
@@ -91,7 +91,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(selelf::encode::MulOp::MulSsf {
+                        compute: ComputeOp::Mul(selinstr::encode::MulOp::MulSsf {
                             rn: *dst as u8,
                             rx: *lhs as u8,
                             ry: *rhs as u8,
@@ -652,7 +652,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                 // resolved to an absolute address during the fixup pass.
                 instrs.push(MachInstr {
                     instr: Instruction::DoLoop {
-                        counter: selelf::encode::LoopCounter::Immediate(*count as u16),
+                        counter: selinstr::encode::LoopCounter::Immediate(*count as u16),
                         end_pc: *end_label,
                     },
                     reloc: None,

@@ -19,7 +19,7 @@ use crate::lower;
 use crate::mach::{MachInstr, Reloc};
 use crate::regalloc;
 use crate::target;
-use selelf::encode::{self, BranchTarget, Instruction, MemWidth};
+use selinstr::encode::{self, BranchTarget, Instruction, MemWidth};
 
 /// Result of compiling a single function.
 pub struct EmitResult {
@@ -191,8 +191,8 @@ fn instr_uses_reg(instr: &Instruction, reg: u8) -> bool {
     }
 }
 
-fn compute_uses_reg(op: &selelf::encode::ComputeOp, reg: u8) -> bool {
-    use selelf::encode::ComputeOp;
+fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u8) -> bool {
+    use selinstr::encode::ComputeOp;
     match *op {
         ComputeOp::Alu(ref a) => alu_uses_reg(a, reg),
         ComputeOp::Mul(ref m) => mul_uses_reg(m, reg),
@@ -202,8 +202,8 @@ fn compute_uses_reg(op: &selelf::encode::ComputeOp, reg: u8) -> bool {
     }
 }
 
-fn alu_uses_reg(op: &selelf::encode::AluOp, reg: u8) -> bool {
-    use selelf::encode::AluOp::*;
+fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u8) -> bool {
+    use selinstr::encode::AluOp::*;
     match *op {
         Add { rn, rx, ry } | Sub { rn, rx, ry } | And { rn, rx, ry }
         | Or { rn, rx, ry } | Xor { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
@@ -214,24 +214,24 @@ fn alu_uses_reg(op: &selelf::encode::AluOp, reg: u8) -> bool {
     }
 }
 
-fn mul_uses_reg(op: &selelf::encode::MulOp, reg: u8) -> bool {
-    use selelf::encode::MulOp::*;
+fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u8) -> bool {
+    use selinstr::encode::MulOp::*;
     match *op {
         MulSsf { rn, rx, ry } | FMul { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
         _ => false,
     }
 }
 
-fn shift_uses_reg(op: &selelf::encode::ShiftOp, reg: u8) -> bool {
-    use selelf::encode::ShiftOp::*;
+fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u8) -> bool {
+    use selinstr::encode::ShiftOp::*;
     match *op {
         Lshift { rn, rx, ry } | Ashift { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
         _ => false,
     }
 }
 
-fn multi_uses_reg(op: &selelf::encode::MultiOp, reg: u8) -> bool {
-    use selelf::encode::MultiOp::*;
+fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u8) -> bool {
+    use selinstr::encode::MultiOp::*;
     match *op {
         MulAlu { rm, ra, rxm, rym, rxa, rya, .. } => {
             rm == reg || ra == reg || rxm == reg || (rym + 4) == reg
@@ -244,8 +244,8 @@ fn multi_uses_reg(op: &selelf::encode::MultiOp, reg: u8) -> bool {
     }
 }
 
-fn falu_uses_reg(op: &selelf::encode::FaluOp, reg: u8) -> bool {
-    use selelf::encode::FaluOp::*;
+fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u8) -> bool {
+    use selinstr::encode::FaluOp::*;
     match *op {
         Add { rn, rx, ry } | Sub { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
         Pass { rn, rx } | Neg { rn, rx } | Abs { rn, rx }
@@ -295,7 +295,7 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
         instrs.push(MachInstr {
             instr: Instruction::ComputeLoadStore {
                 compute: None,
-                access: selelf::encode::MemAccess {
+                access: selinstr::encode::MemAccess {
                     pm: false,
                     write: true,
                     i_reg: target::FRAME_PTR,
@@ -323,7 +323,7 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
         instrs.push(MachInstr {
             instr: Instruction::ComputeLoadStore {
                 compute: None,
-                access: selelf::encode::MemAccess {
+                access: selinstr::encode::MemAccess {
                     pm: false,
                     write: false,
                     i_reg: target::FRAME_PTR,
@@ -475,8 +475,8 @@ fn adjust_frame_offsets(
 /// a Modify + access-at-0 + un-Modify sequence.
 fn emit_adjusted_access(
     out: &mut Vec<MachInstr>,
-    compute: Option<selelf::encode::ComputeOp>,
-    access: selelf::encode::MemAccess,
+    compute: Option<selinstr::encode::ComputeOp>,
+    access: selinstr::encode::MemAccess,
     dreg: u8,
     new_offset: i32,
     cond: u8,
@@ -677,7 +677,7 @@ fn eliminate_copies(
 /// Rewrite the destination register of a compute instruction from `old_dst`
 /// to `new_dst`. Returns None if the instruction doesn't write to `old_dst`.
 fn rewrite_dest(mi: &MachInstr, old_dst: u8, new_dst: u8) -> Option<MachInstr> {
-    use selelf::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
+    use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
     let new_instr = match mi.instr {
         Instruction::Compute { cond, compute } => {
             let new_compute = match compute {
@@ -730,7 +730,7 @@ fn rewrite_dest(mi: &MachInstr, old_dst: u8, new_dst: u8) -> Option<MachInstr> {
 fn is_pass_copy(instr: &Instruction) -> Option<(u8, u8)> {
     match *instr {
         Instruction::Compute {
-            compute: selelf::encode::ComputeOp::Alu(selelf::encode::AluOp::Pass { rn, rx }),
+            compute: selinstr::encode::ComputeOp::Alu(selinstr::encode::AluOp::Pass { rn, rx }),
             ..
         } => Some((rn, rx)),
         _ => None,
@@ -764,8 +764,8 @@ fn source_regs(instr: &Instruction) -> Vec<u8> {
     regs
 }
 
-fn compute_source_regs(op: &selelf::encode::ComputeOp, regs: &mut Vec<u8>) {
-    use selelf::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
+fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u8>) {
+    use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
     match *op {
         ComputeOp::Alu(ref a) => match *a {
             AluOp::Add { rx, ry, .. }
@@ -806,7 +806,7 @@ fn compute_source_regs(op: &selelf::encode::ComputeOp, regs: &mut Vec<u8>) {
         },
         ComputeOp::Falu(_) => {}
         ComputeOp::Multi(ref mf) => {
-            use selelf::encode::MultiOp;
+            use selinstr::encode::MultiOp;
             match *mf {
                 MultiOp::MulAlu { rxm, rym, rxa, rya, .. } => {
                     regs.push(rxm);
@@ -874,11 +874,11 @@ fn remap_sources(mi: &MachInstr, from: u8, to: u8) -> MachInstr {
 }
 
 fn remap_compute_sources(
-    op: &selelf::encode::ComputeOp,
+    op: &selinstr::encode::ComputeOp,
     from: u8,
     to: u8,
-) -> selelf::encode::ComputeOp {
-    use selelf::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
+) -> selinstr::encode::ComputeOp {
+    use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
     let r = |reg: u8| if reg == from { to } else { reg };
     match *op {
         ComputeOp::Alu(ref a) => ComputeOp::Alu(match *a {
@@ -1011,7 +1011,7 @@ mod tests {
         assert!(!code.is_empty());
         assert_eq!(code.len() % 6, 0);
 
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain R0 = 0x2A (42 decimal) and RTS
         assert!(
@@ -1031,7 +1031,7 @@ mod tests {
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
         assert!(!code.is_empty());
 
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain an ADD instruction.
         let has_add = text.iter().any(|t| {
@@ -1047,7 +1047,7 @@ mod tests {
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
         assert!(!code.is_empty());
 
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain conditional jump.
         let has_branch = text.iter().any(|t| t.contains("JUMP") || t.contains("IF"));
@@ -1059,7 +1059,7 @@ mod tests {
         let src = "int f(int a, int b) { return a - b; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         let has_sub = text.iter().any(|t| t.contains("-"));
         assert!(has_sub, "expected SUB, got: {text:?}");
@@ -1070,7 +1070,7 @@ mod tests {
         let src = "void f() { return; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         assert!(
             text.iter().any(|t| t.contains("RTS")),
@@ -1087,7 +1087,7 @@ mod tests {
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
         let num_instrs = code.len() / 6;
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should be exactly 2 instructions: LoadImm R0, 42 + RTS.
         assert_eq!(
@@ -1116,7 +1116,7 @@ mod tests {
         "#;
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
 
         // Check that at least one callee-saved register (R8-R15) appears
@@ -1147,7 +1147,7 @@ mod tests {
         let src = "int f() { int x = 10; int y = 20; return x + y; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
 
         // Should have DM(I6, ...) accesses for the local variables.
@@ -1176,7 +1176,7 @@ mod tests {
         let src = "int add(int a, int b) { return a + b; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
 
         // Should NOT have any DM(I6, ...) accesses since params are kept
@@ -1194,7 +1194,7 @@ mod tests {
         let src = "int f(int x) { x = x + 1; return x; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
 
         // Should have DM(I6, ...) access for the reassigned param.
@@ -1212,7 +1212,7 @@ mod tests {
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
         assert!(!code.is_empty());
 
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain F-register add (Fn = Fx + Fy).
         let has_fadd = text.iter().any(|t| t.contains("F") && t.contains("+"));
@@ -1224,7 +1224,7 @@ mod tests {
         let src = "float f(float a, float b) { return a * b; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain F-register multiply (Fn = Fx * Fy).
         let has_fmul = text.iter().any(|t| t.contains("F") && t.contains("*"));
@@ -1260,7 +1260,7 @@ mod tests {
         let src = "int f() { return sizeof(int); }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // sizeof(int) = 4 bytes = 0x4.
         assert!(
@@ -1274,7 +1274,7 @@ mod tests {
         let src = "float f(int x) { return (float)x; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain FLOAT instruction.
         let has_float = text.iter().any(|t| t.contains("FLOAT"));
@@ -1294,7 +1294,7 @@ mod tests {
         let src = "float f(float x) { return -x; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain float negate (Fn = -Fx).
         let has_fneg = text.iter().any(|t| t.contains("F") && t.contains("-F"));
@@ -1309,7 +1309,7 @@ mod tests {
         assert!(!code.is_empty());
         // Should load the f32 bit pattern as an immediate.
         let expected_bits = 2.75f32.to_bits();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         let hex_str = format!("0x{expected_bits:08X}");
         assert!(
@@ -1323,7 +1323,7 @@ mod tests {
         let src = "int f() { return 2 + 3; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Constant folding should fold 2+3 into 5.
         assert!(
@@ -1337,7 +1337,7 @@ mod tests {
         let src = "int f() { return 6 * 7; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should fold 6*7 into 42 = 0x2A.
         assert!(
@@ -1353,7 +1353,7 @@ mod tests {
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
         let num_instrs = code.len() / 6;
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             num_instrs, 2,
@@ -1366,7 +1366,7 @@ mod tests {
         let src = "void f() { int i; for (i = 0; i < 10; i++) { } }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         let has_hw_loop = text
             .iter()
@@ -1384,7 +1384,7 @@ mod tests {
         let src = "int f(int a) { return a; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Check that no instruction is a self-copy like "R0 = PASS R0".
         for t in &text {
@@ -1413,7 +1413,7 @@ mod tests {
         let code = emit_function_with_relocs(&unit.functions[0], &unit)
             .map(|r| r.code)
             .unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         assert!(
             text.iter().any(|t| t.contains("CALL")),
@@ -1448,7 +1448,7 @@ mod tests {
         let code = emit_function_with_relocs(&unit.functions[0], &unit)
             .map(|r| r.code)
             .unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         assert!(
             text.iter().any(|t| t.contains("0x5")),
@@ -1471,7 +1471,7 @@ mod tests {
         let src = "int f() { int a = 1; int b = 2; return a + b; }";
         let unit = parse::parse(src).unwrap();
         let code = emit_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).map(|r| r.code).unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         // Should contain MODIFY(I7, ...) for stack allocation.
         assert!(text.iter().any(|t| t.contains("MODIFY") && t.contains("I7")),
@@ -1505,7 +1505,7 @@ mod tests {
         let code = emit_function_with_relocs(&unit.functions[0], &unit)
             .map(|r| r.code)
             .unwrap();
-        let disasm = selelf::disasm::disassemble(&code, 0, false);
+        let disasm = selinstr::disasm::disassemble(&code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         assert!(
             text.iter().any(|t| t.contains("0x2A")),

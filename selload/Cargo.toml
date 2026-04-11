@@ -6,3 +6,4 @@ description = "SHARC+ boot stream (LDR) generator for the Selache toolchain"
 
 [dependencies]
 selelf = { path = "../selelf" }
+selinstr = { path = "../selinstr" }

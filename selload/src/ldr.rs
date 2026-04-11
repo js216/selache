@@ -171,8 +171,8 @@ enum Segment {
 }
 
 /// Compress a section by stripping trailing zeros and splitting at
-/// large interior zero runs (>= 32 bytes).  Small zero runs are kept
-/// in the data payload.
+/// Compress a data section by replacing zero runs with FILL segments.
+///
 /// If `fixed_fill` is Some(n), each fill is clipped to exactly n bytes
 /// placed at the END of the zero run (code sections).  Otherwise the
 /// entire zero run becomes a fill (data sections).
@@ -486,16 +486,13 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
         // Code sections use fixed 68-byte fills at the end of zero runs
         // and 2-byte scan step (half-word alignment).
         // Data sections use variable-length fills and 4-byte scan step.
-        let is_code = matches!(sec.width, WordWidth::SwCode);
-        let fixed = if is_code { Some(68) } else { None };
-        let min_fill = if is_code { 68 } else { 36 };
+        let is_sw_code = matches!(sec.width, WordWidth::SwCode);
+        let fixed = if is_sw_code { Some(68) } else { None };
+        let min_fill = if is_sw_code { 68 } else { 36 };
 
         let segments = if use_fill && sec.compressible {
             compress_zero_runs(&sec.raw, fixed, min_fill)
         } else if opts.max_block_size.is_some() && sec.compressible {
-            // In NoFill+MBS mode, compute FILL boundaries and use them
-            // as MBS restart points.  Fill regions become zero-data
-            // segments so MBS splits each independently.
             compress_zero_runs(&sec.raw, fixed, min_fill)
                 .into_iter()
                 .map(|s| match s {

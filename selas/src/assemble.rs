@@ -154,17 +154,17 @@ struct PendingInstr {
     section_idx: usize,
     byte_offset: usize,
     byte_len: usize,
-    instr: selelf::encode::Instruction,
+    instr: selinstr::encode::Instruction,
     label_ref: String,
 }
 
 /// Resolve a symbolic label reference inside an instruction, replacing the
 /// placeholder address (0) with the actual word offset from `label_map`.
 fn resolve_labels(
-    instr: &selelf::encode::Instruction,
+    instr: &selinstr::encode::Instruction,
     label_name: &str,
     label_map: &std::collections::HashMap<String, u32>,
-) -> selelf::encode::Instruction {
+) -> selinstr::encode::Instruction {
     let addr = match label_map.get(label_name) {
         Some(&a) => a,
         None => {
@@ -173,7 +173,7 @@ fn resolve_labels(
         }
     };
 
-    use selelf::encode::{BranchTarget, Instruction};
+    use selinstr::encode::{BranchTarget, Instruction};
     match *instr {
         Instruction::Branch { call, cond, target: BranchTarget::Absolute(0), delayed } => {
             Instruction::Branch { call, cond, target: BranchTarget::Absolute(addr), delayed }
@@ -262,14 +262,14 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
             let byte_offset = sec.code.len();
             if visa && sec.is_pm {
                 let isa_bytes =
-                    selelf::encode::encode(instr).expect("instruction encoding failed");
-                let encoded = selelf::visa_encode::visa_encode(instr, &isa_bytes);
+                    selinstr::encode::encode(instr).expect("instruction encoding failed");
+                let encoded = selinstr::visa_encode::visa_encode(instr, &isa_bytes);
                 let bytes = encoded.to_bytes();
                 sec.parcel_count += encoded.parcels();
                 sec.code.extend_from_slice(&bytes);
             } else {
                 let bytes =
-                    selelf::encode::encode(instr).expect("instruction encoding failed");
+                    selinstr::encode::encode(instr).expect("instruction encoding failed");
                 sec.code.extend_from_slice(&bytes);
             }
             let byte_len = sec.code.len() - byte_offset;
@@ -293,14 +293,14 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
             let sec = &mut sections[pi.section_idx].1;
             if visa && sec.is_visa {
                 let isa_bytes =
-                    selelf::encode::encode(&resolved).expect("instruction re-encode failed");
-                let encoded = selelf::visa_encode::visa_encode(&resolved, &isa_bytes);
+                    selinstr::encode::encode(&resolved).expect("instruction re-encode failed");
+                let encoded = selinstr::visa_encode::visa_encode(&resolved, &isa_bytes);
                 let bytes = encoded.to_bytes();
                 sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
                     .copy_from_slice(&bytes);
             } else {
                 let bytes =
-                    selelf::encode::encode(&resolved).expect("instruction re-encode failed");
+                    selinstr::encode::encode(&resolved).expect("instruction re-encode failed");
                 sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
                     .copy_from_slice(&bytes);
             }
@@ -791,7 +791,7 @@ mod tests {
 
         let off = shdr.sh_offset as usize;
         let word = read_word48(&data[off + 12..off + 18]);
-        let decoded = selelf::disasm::decode_instruction(word);
+        let decoded = selinstr::disasm::decode_instruction(word);
         assert!(
             decoded.contains("0x000000"),
             "JUMP should target address 0 (_start), got: {decoded}"
@@ -815,7 +815,7 @@ mod tests {
             .expect("seg_pmco section not found");
         let off = shdr.sh_offset as usize;
         let word = read_word48(&data[off..off + 6]);
-        let decoded = selelf::disasm::decode_instruction(word);
+        let decoded = selinstr::disasm::decode_instruction(word);
         assert!(
             decoded.contains("0x000002"),
             "JUMP should target address 2 (_end), got: {decoded}"

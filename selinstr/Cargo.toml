@@ -1,0 +1,7 @@
+[package]
+name = "selinstr"
+version = "0.1.0"
+edition = "2021"
+description = "SHARC+ instruction encoding, decoding, and disassembly"
+
+[dependencies]

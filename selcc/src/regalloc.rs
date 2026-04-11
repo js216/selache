@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::mach::MachInstr;
 use crate::target;
 
-use selelf::encode::{
+use selinstr::encode::{
     AluOp, ComputeOp, FaluOp, Instruction, MemAccess, ShiftOp,
 };
 
@@ -344,10 +344,10 @@ impl Allocator {
 
     fn rewrite_alu(
         &mut self,
-        alu: &selelf::encode::AluOp,
+        alu: &selinstr::encode::AluOp,
         spill: &mut Vec<MachInstr>,
     ) -> AluOp {
-        use selelf::encode::AluOp::*;
+        use selinstr::encode::AluOp::*;
         match *alu {
             Add { rn, rx, ry } => Add {
                 rn: self.get_phys(rn, spill),
@@ -449,10 +449,10 @@ impl Allocator {
 
     fn rewrite_mul(
         &mut self,
-        mul: &selelf::encode::MulOp,
+        mul: &selinstr::encode::MulOp,
         spill: &mut Vec<MachInstr>,
-    ) -> selelf::encode::MulOp {
-        use selelf::encode::MulOp::*;
+    ) -> selinstr::encode::MulOp {
+        use selinstr::encode::MulOp::*;
         match *mul {
             MulSsf { rn, rx, ry } => MulSsf {
                 rn: self.get_phys(rn, spill),
@@ -652,10 +652,10 @@ impl Allocator {
 
     fn rewrite_shift(
         &mut self,
-        shift: &selelf::encode::ShiftOp,
+        shift: &selinstr::encode::ShiftOp,
         spill: &mut Vec<MachInstr>,
     ) -> ShiftOp {
-        use selelf::encode::ShiftOp::*;
+        use selinstr::encode::ShiftOp::*;
         match *shift {
             Lshift { rn, rx, ry } => Lshift {
                 rn: self.get_phys(rn, spill),
