@@ -93,13 +93,16 @@ impl<'a> AsmParser<'a> {
                 u.starts_with(".GLOBAL") || u.starts_with(".EXTERN")
                     || u.starts_with(".WEAK")
             };
-            if trimmed.ends_with(',')
+            let ends_with_comma = trimmed.ends_with(',')
                 && (!trimmed.starts_with('.') || allow_dot_join
                     || (!pending_line.is_empty()
                         && pending_line.trim().to_uppercase().starts_with(".GLOBAL")
                            || pending_line.trim().to_uppercase().starts_with(".EXTERN")
-                           || pending_line.trim().to_uppercase().starts_with(".WEAK")))
-            {
+                           || pending_line.trim().to_uppercase().starts_with(".WEAK")));
+            // Also join lines ending with '|' (bitwise OR in multi-line
+            // register load or BIT expressions like MMASK = (expr | expr |...)
+            let ends_with_pipe = trimmed.ends_with('|');
+            if ends_with_comma || ends_with_pipe {
                 pending_line.push_str(trimmed);
                 pending_line.push(' ');
                 continue;
