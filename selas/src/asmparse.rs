@@ -349,6 +349,12 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
         });
     }
 
+    // Skip orphan continuation lines from multi-line BIT expressions
+    // that were not joined (e.g. "| ((0X00000001))" on its own line).
+    if upper.starts_with("| ") || upper.starts_with("|(") {
+        return Ok((Instruction::Nop, None));
+    }
+
     // NOP
     if upper == "NOP" {
         return Ok((Instruction::Nop, None));
@@ -384,7 +390,8 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
     }
 
     // LCNTR = ..., DO ... UNTIL LCE
-    if upper.starts_with("LCNTR") {
+    // Only match when DO is present; standalone "LCNTR = val" is a ureg load.
+    if upper.starts_with("LCNTR") && upper.contains(" DO ") {
         return parse_do_loop(&upper, line);
     }
 
