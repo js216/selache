@@ -4179,6 +4179,11 @@ fn eval_float_expr(s: &str) -> Option<f64> {
     None
 }
 
+/// Public entry point for the constant expression evaluator (used by preproc).
+pub fn eval_const_expr_pub(s: &str) -> Option<i64> {
+    eval_const_expr(s)
+}
+
 fn eval_const_expr(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     let mut pos = 0;

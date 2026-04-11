@@ -106,6 +106,12 @@ impl Preprocessor {
         };
         self.defines
             .insert("__ADSPSHARC__".to_string(), simple(sharc_ver));
+
+        // 215xx parts have a System Event Controller (SEC).
+        if chip_upper.starts_with("215") {
+            self.defines
+                .insert("__ADI_HAS_SEC__".to_string(), simple("1"));
+        }
         self.defines
             .insert("__ADSP21000__".to_string(), simple("1"));
         self.defines
@@ -426,25 +432,28 @@ impl Preprocessor {
     fn eval_integer(&self, expr: &str) -> i64 {
         let expr = expr.trim();
 
-        // Try macro expansion first
-        if let Some(def) = self.defines.get(expr) {
-            if def.params.is_none() {
-                let expanded = def.body.trim();
-                if expanded != expr {
-                    return self.eval_integer(expanded);
-                }
-            }
-        }
+        // Expand macros in the expression, then evaluate.
+        let expanded = self.expand_macros(expr);
+        let expanded = expanded.trim();
 
         // Hex literal
-        if let Some(hex) = expr.strip_prefix("0x").or_else(|| expr.strip_prefix("0X")) {
+        if let Some(hex) = expanded.strip_prefix("0x").or_else(|| expanded.strip_prefix("0X")) {
             let hex = hex.trim_end_matches(['u', 'U', 'l', 'L']);
             return i64::from_str_radix(hex, 16).unwrap_or(0);
         }
 
         // Decimal literal
-        let cleaned = expr.trim_end_matches(['u', 'U', 'l', 'L']);
-        cleaned.parse::<i64>().unwrap_or(0)
+        let cleaned = expanded.trim_end_matches(['u', 'U', 'l', 'L']);
+        if let Ok(v) = cleaned.parse::<i64>() {
+            return v;
+        }
+
+        // Try constant expression evaluation for "(326)", "1 + 2", etc.
+        if let Some(v) = crate::asmparse::eval_const_expr_pub(expanded) {
+            return v;
+        }
+
+        0
     }
 
     fn handle_define(&mut self, rest: &str) {
