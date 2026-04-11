@@ -349,9 +349,14 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
         });
     }
 
-    // Skip orphan continuation lines from multi-line BIT expressions
-    // that were not joined (e.g. "| ((0X00000001))" on its own line).
-    if upper.starts_with("| ") || upper.starts_with("|(") {
+    // Skip orphan continuation lines from multi-line expressions in
+    // included system headers that were not joined with the preceding line.
+    // These start with operators, nested parens, or the % modulo operator.
+    if upper.starts_with("| ") || upper.starts_with("|(")
+        || upper.starts_with("- (") || upper.starts_with("+ (")
+        || upper.starts_with("% (")
+        || (upper.starts_with("((") && (upper.contains('|') || upper.ends_with(')')))
+    {
         return Ok((Instruction::Nop, None));
     }
 
