@@ -2212,7 +2212,23 @@ fn extract_mem_inner(expr: &str, line: u32) -> Result<(bool, &str)> {
             msg: format!("expected DM( or PM(: {expr}"),
         });
     };
-    let close = rest.find(')').ok_or_else(|| Error::Parse {
+    // Find the matching close paren, accounting for nested parens.
+    let mut depth = 1i32;
+    let mut close = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.ok_or_else(|| Error::Parse {
         line,
         msg: format!("missing ')' in memory expression: {expr}"),
     })?;
