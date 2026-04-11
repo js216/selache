@@ -315,6 +315,9 @@ impl Allocator {
                     compute: new_compute,
                 }
             }
+
+            // Assembly-only instruction types not produced by selcc
+            Instruction::ImmShiftMem { .. } => mi.instr,
         };
 
         // Emit any spill/reload instructions before the main instruction.

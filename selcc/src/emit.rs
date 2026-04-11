@@ -284,7 +284,7 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::STACK_PTR,
-                value: -(frame_size as i32), width: MemWidth::Normal, },
+                value: -(frame_size as i32), width: MemWidth::Normal, bitrev: false, },
             reloc: None,
         });
     }
@@ -341,7 +341,7 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::STACK_PTR,
-                value: frame_size as i32, width: MemWidth::Normal, },
+                value: frame_size as i32, width: MemWidth::Normal, bitrev: false, },
             reloc: None,
         });
     }
@@ -457,7 +457,7 @@ fn adjust_frame_offsets(
                 result.push(MachInstr {
                     instr: Instruction::Modify {
                         i_reg,
-                        value: new_value, width: MemWidth::Normal, },
+                        value: new_value, width: MemWidth::Normal, bitrev: false, },
                     reloc: instrs[i].reloc.clone(),
                 });
             }
@@ -498,7 +498,7 @@ fn emit_adjusted_access(
         out.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: new_offset, width: MemWidth::Normal, },
+                value: new_offset, width: MemWidth::Normal, bitrev: false, },
             reloc: None,
         });
         out.push(MachInstr {
@@ -514,7 +514,7 @@ fn emit_adjusted_access(
         out.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: -new_offset, width: MemWidth::Normal, },
+                value: -new_offset, width: MemWidth::Normal, bitrev: false, },
             reloc: None,
         });
     }

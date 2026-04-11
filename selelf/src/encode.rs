@@ -345,8 +345,8 @@ pub enum Instruction {
         dm: DagAccess,
         pm: DagAccess,
     },
-    /// Type 19: MODIFY(Ii, immediate32) -- add signed immediate to I register.
-    Modify { i_reg: u8, value: i32, width: MemWidth },
+    /// Type 19: MODIFY(Ii, immediate32) / BITREV(Ii, immediate32).
+    Modify { i_reg: u8, value: i32, width: MemWidth, bitrev: bool },
     /// Type 9a: Indirect JUMP/CALL through PM register pair (Ii, Mm).
     IndirectBranch {
         call: bool,
@@ -464,6 +464,31 @@ pub enum Instruction {
         /// Condition code (31 = TRUE = unconditional), at bits[37:33]
         cond: u8,
     },
+    /// Type 6a: Immediate shift (FEXT/FDEP) + DM memory access.
+    ImmShiftMem {
+        /// Shift type (1=FEXT/FDEP)
+        shift_type: u8,
+        /// Sub-operation code (0=FEXT, 1=OR FDEP, 2=OR FEXT, 3=FDEP)
+        sub_op: u8,
+        /// 8-bit immediate (pos[5:0] | len_lo[1:0]<<6)
+        imm: u8,
+        /// Shift destination register (0-15)
+        rn: u8,
+        /// Shift source register (0-15)
+        rx: u8,
+        /// High 4 bits of length (bits[30:27])
+        len_hi: u8,
+        /// I-register index (0-7)
+        i_reg: u8,
+        /// M-register index (0-7)
+        m_reg: u8,
+        /// true = store (DM=dreg), false = load (dreg=DM)
+        write: bool,
+        /// Data register for memory access (0-15)
+        dreg: u8,
+        /// Condition code (31 = TRUE = unconditional)
+        cond: u8,
+    },
     /// Type 16: DM(Ii,Mm) = imm32 (immediate data store to memory).
     DmImmStore {
         /// I-register index (0-7)
@@ -542,7 +567,7 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             Ok(word)
         }
         Instruction::DualMove { compute, dm, pm } => encode_type1(compute, dm, pm),
-        Instruction::Modify { i_reg, value, width } => encode_type19(i_reg, value, width),
+        Instruction::Modify { i_reg, value, width, bitrev } => encode_type19(i_reg, value, width, bitrev),
         Instruction::IndirectBranch { call, cond, pm_i, pm_m, delayed, .. } => {
             encode_type9a(call, cond, pm_i, pm_m, delayed)
         }
@@ -617,6 +642,24 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
         }
         Instruction::ImmShift { shift_type, sub_op, imm, rn, rx, data_hi, cond } => {
             encode_type6b(shift_type, sub_op, imm, rn, rx, data_hi, cond)
+        }
+        Instruction::ImmShiftMem {
+            shift_type, sub_op, imm, rn, rx, len_hi,
+            i_reg, m_reg, write, dreg, cond,
+        } => {
+            let op_field = ((shift_type as u64 & 0x7) << 4) | (sub_op as u64 & 3);
+            let d = if write { 1u64 } else { 0 };
+            Ok((0b100u64 << 45)
+                | ((i_reg as u64 & 0xF) << 41)
+                | ((m_reg as u64 & 0x7) << 38)
+                | ((cond as u64 & 0x1F) << 33)
+                | (d << 31)
+                | ((len_hi as u64 & 0xF) << 27)
+                | ((dreg as u64 & 0xF) << 23)
+                | (op_field << 16)
+                | ((imm as u64) << 8)
+                | ((rn as u64 & 0xF) << 4)
+                | (rx as u64 & 0xF))
         }
         Instruction::DmImmStore { i_reg, m_reg, value } => {
             encode_type16(i_reg, m_reg, value)
@@ -1008,19 +1051,19 @@ fn encode_type3(
             msg: format!("Type 3 I register index {} out of range (0-7)", i_reg),
         });
     }
-    if !(4..=7).contains(&m_reg) {
+    if m_reg > 7 {
         return Err(EncodeError {
-            msg: format!("Type 3 M register {} out of range (M4-M7)", m_reg),
+            msg: format!("Type 3 M register {} out of range (0-7)", m_reg),
         });
     }
     let comp = encode_compute_opt(compute)?;
     let d = if write { 1u64 } else { 0 };
-    let m_offset = (m_reg - 4) as u64 & 0x3;
+    let m_field = m_reg as u64 & 0x7;
 
     // bit44=0 (M,I operand order), matching standard output.
     let word = (0b010u64 << 45)
         | ((i_reg as u64 & 0x7) << 41)          // bits[43:41]
-        | (m_offset << 38)                       // bits[39:38]
+        | (m_field << 38)                        // bits[40:38]
         | ((cond as u64 & 0x1F) << 33)           // bits[37:33]
         | (d << 31)                              // bit[31]
         | ((ureg as u64 & 0x7F) << 23)           // bits[29:23]
@@ -1180,7 +1223,7 @@ fn encode_type1(
 // bits[31:0] = data32 (32-bit immediate, treated as unsigned in encoding)
 // ---------------------------------------------------------------------------
 
-fn encode_type19(i_reg: u8, value: i32, width: MemWidth) -> Result<u64, EncodeError> {
+fn encode_type19(i_reg: u8, value: i32, width: MemWidth, bitrev: bool) -> Result<u64, EncodeError> {
     if i_reg > 15 {
         return Err(EncodeError {
             msg: format!("I register index {i_reg} out of range (0-15)"),
@@ -1193,8 +1236,11 @@ fn encode_type19(i_reg: u8, value: i32, width: MemWidth) -> Result<u64, EncodeEr
     match width {
         MemWidth::Normal => {
             // Standard Type 19 (sub=0x16): i_src at bits[34:32]
+            // bit[38] = BREV (1 for BITREV, 0 for MODIFY)
+            let brev = if bitrev { 1u64 } else { 0 };
             let word = (0x16u64 << 40)
                 | (g << 39)
+                | (brev << 38)
                 | (i_field << 32)
                 | data32;
             Ok(word)
@@ -2151,7 +2197,7 @@ mod tests {
 
     #[test]
     fn roundtrip_modify() {
-        let instr = Instruction::Modify { i_reg: 7, value: -4, width: MemWidth::Normal };
+        let instr = Instruction::Modify { i_reg: 7, value: -4, width: MemWidth::Normal, bitrev: false };
         let bytes = encode(&instr).expect("encode failed");
         let lines = disasm::disassemble(&bytes, 0, false);
         assert!(lines[0].text.contains("MODIFY"));
@@ -2160,14 +2206,14 @@ mod tests {
 
     #[test]
     fn roundtrip_modify_positive() {
-        let instr = Instruction::Modify { i_reg: 0, value: 16, width: MemWidth::Normal };
+        let instr = Instruction::Modify { i_reg: 0, value: 16, width: MemWidth::Normal, bitrev: false };
         let text = roundtrip(&instr);
         assert_eq!(text, "I0=MODIFY (I0,0x10)");
     }
 
     #[test]
     fn roundtrip_modify_dag2() {
-        let instr = Instruction::Modify { i_reg: 10, value: 0x100, width: MemWidth::Normal };
+        let instr = Instruction::Modify { i_reg: 10, value: 0x100, width: MemWidth::Normal, bitrev: false };
         let text = roundtrip(&instr);
         assert_eq!(text, "I10=MODIFY (I10,0x100)");
     }

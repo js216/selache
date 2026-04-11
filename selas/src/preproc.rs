@@ -89,11 +89,19 @@ impl Preprocessor {
         if chip_upper.starts_with("2156") {
             self.defines
                 .insert("__ADSP2156x__".to_string(), simple("1"));
+            self.defines
+                .insert("__ADSP215xx__".to_string(), simple("1"));
         }
 
         // Generic SHARC macros
         self.defines
             .insert("__ADSPSHARC__".to_string(), simple("1"));
+        self.defines
+            .insert("__ADSP21000__".to_string(), simple("1"));
+        self.defines
+            .insert("__SIMDSHARC__".to_string(), simple("1"));
+        self.defines
+            .insert("__BA_SHARC__".to_string(), simple("1"));
         self.defines
             .insert("__BYTE_ADDRESSING__".to_string(), simple("1"));
         self.defines
@@ -845,7 +853,7 @@ fn find_top_level_op(expr: &str, op: &str) -> Option<usize> {
 }
 
 fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
 /// Parse macro arguments from an opening paren, handling nested parens.

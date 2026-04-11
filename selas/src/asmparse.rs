@@ -77,7 +77,8 @@ impl<'a> AsmParser<'a> {
                 pending_line.push(' ');
                 continue;
             }
-            let effective_line = if pending_line.is_empty() {
+            let was_joined = !pending_line.is_empty();
+            let effective_line = if !was_joined {
                 raw_line.to_string()
             } else {
                 pending_line.push_str(raw_line);
@@ -85,7 +86,44 @@ impl<'a> AsmParser<'a> {
                 pending_line.clear();
                 joined
             };
-            let parsed = self.parse_line(&effective_line)?;
+            let parsed = match self.parse_line(&effective_line) {
+                Ok(p) => p,
+                Err(e) if was_joined => {
+                    // A multi-line join failed to parse as a single instruction.
+                    // Split at commas outside parens and parse each part
+                    // independently (e.g. immediate LSHIFT + PUTS on one line).
+                    let stripped = strip_comment(&effective_line).trim().to_string();
+                    let upper = stripped.to_uppercase();
+                    let commas = find_all_commas_outside_parens(&upper);
+                    if commas.is_empty() {
+                        return Err(e);
+                    }
+                    let mut parts = Vec::new();
+                    let mut prev = 0;
+                    for &c in &commas {
+                        parts.push(stripped[prev..c].trim());
+                        prev = c + 1;
+                    }
+                    parts.push(stripped[prev..].trim());
+                    let mut all_ok = true;
+                    let mut sub_results = Vec::new();
+                    for part in &parts {
+                        if part.is_empty() { continue; }
+                        match self.parse_line(part) {
+                            Ok(p) if p.instruction.is_some() || p.directive.is_some() => {
+                                sub_results.push(p);
+                            }
+                            _ => { all_ok = false; break; }
+                        }
+                    }
+                    if !all_ok || sub_results.is_empty() {
+                        return Err(e);
+                    }
+                    results.extend(sub_results);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             // Detect start of multi-line .VAR: has '=' but no ';' terminator
             if let Some(Directive::Var(ref body)) = parsed.directive {
                 if body.contains('=') && !raw_line.contains(';') {
@@ -239,7 +277,13 @@ pub fn parse_instruction(text: &str) -> Result<Instruction> {
 }
 
 fn parse_instruction_at_line(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
-    let text = text.trim();
+    let text = text.trim().trim_end_matches(',');
+    // Strip FETCH_RETURN (NOP) from compound instructions
+    let text = if let Some(pos) = text.to_uppercase().find(", FETCH_RETURN") {
+        &text[..pos]
+    } else {
+        text
+    };
     // Normalize spacing: insert spaces around +/- between register operands
     let normalized = normalize_compute_spacing(text);
     let (instr, label_ref) = parse_instruction_inner(&normalized, line)?;
@@ -251,6 +295,17 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<(Instruction, Opti
 
 fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     let upper = normalized.to_uppercase();
+
+    // ELSE compute — strip ELSE prefix and parse as regular compute.
+    // Used in SIMD mode for complementary PEx operations.
+    if let Some(rest_upper) = upper.strip_prefix("ELSE ") {
+        let rest_upper = rest_upper.trim();
+        if !rest_upper.is_empty() {
+            let compute = parse_compute_op(rest_upper, line)?;
+            return Ok((Instruction::Compute { cond: 31, compute }, None));
+        }
+    }
+
     let tokens: Vec<&str> = upper.split_whitespace().collect();
 
     if tokens.is_empty() {
@@ -321,16 +376,20 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
         return parse_cjump(&upper, line);
     }
 
-    // MODIFY(Ii, Mm) — DAG register modify
+    // MODIFY(Ii, Mm) or BITREV(Ii, data32) — DAG register modify/bitrev
     if upper.starts_with("MODIFY(") || upper.starts_with("MODIFY (") {
         let instr = parse_dag_modify(&upper, line)?;
         return Ok((instr, None));
     }
+    if upper.starts_with("BITREV(") || upper.starts_with("BITREV (") {
+        let instr = parse_dag_modify(&upper, line)?;
+        return Ok((instr, None));
+    }
 
-    // Ii=MODIFY (Ii, Mm)(NW) — enhanced Type 7 MODIFY or Type 19 MODIFY
-    // Match when "=MODIFY" appears (e.g. "I4=MODIFY (I4,0x4)")
+    // Ii=MODIFY (Ii, Mm)(NW) or Ii=BITREV (Ii, data32) — enhanced Type 7/19
+    // Match when "=MODIFY" or "=BITREV" appears
     // Also handles compound: "compute , I7=MODIFY (I7,M6)(NW)"
-    if upper.contains("=MODIFY") {
+    if upper.contains("=MODIFY") || upper.contains("=BITREV") {
         let instr = parse_modify_assign(&upper, line)?;
         return Ok((instr, None));
     }
@@ -387,7 +446,10 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
     }
 
     // Compound: "compute , ureg = ureg" (Type 5a with compute)
-    if let Some(comma) = find_comma_outside_parens(&upper) {
+    // Try the LAST comma first (for multifunction compute + ureg transfer)
+    {
+        let all_commas = find_all_commas_outside_parens(&upper);
+        for &comma in all_commas.iter().rev() {
         let before = upper[..comma].trim();
         let after = upper[comma + 1..].trim();
         if !before.is_empty() && !after.is_empty() && after.contains('=') {
@@ -403,6 +465,28 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
                         compute: Some(compute),
                     }, None));
                 }
+            }
+        }
+        }
+    }
+
+    // ureg = symbol — load immediate with symbolic reference
+    // Must not match ureg transfers (rhs is also a register) or compute ops
+    if let Some(eq) = upper.find('=') {
+        let lhs = upper[..eq].trim();
+        let rhs = upper[eq + 1..].trim();
+        if let Some(ureg) = ureg_code(lhs) {
+            if !rhs.is_empty()
+                && (rhs.starts_with('_') || rhs.starts_with('.')
+                    || rhs.as_bytes()[0].is_ascii_alphabetic())
+                && !rhs.contains(' ')
+                && !rhs.contains('*')
+                && !rhs.contains('+')
+                && !rhs.contains('-')
+                && !rhs.contains('(')
+                && ureg_code(rhs).is_none()
+            {
+                return Ok((Instruction::LoadImm { ureg, value: 0 }, Some(rhs.to_string())));
             }
         }
     }
@@ -623,19 +707,15 @@ fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<Strin
 
     let rest = rest.trim();
 
-    // IF cond JUMP/CALL
+    // IF cond JUMP/CALL — delegate to parse_branch and override the condition
     if rest.starts_with("JUMP") || rest.starts_with("CALL") {
-        let call = rest.starts_with("CALL");
-        let branch_rest = rest[4..].trim();
-        let delayed = branch_rest.contains("(DB)");
-        let target_text = branch_rest.replace("(DB)", "").trim().to_string();
-        let (target, label_ref) = parse_branch_target(&target_text, line)?;
-        return Ok((Instruction::Branch {
-            call,
-            cond: cond_code,
-            target,
-            delayed,
-        }, label_ref));
+        let (mut instr, label_ref) = parse_branch(rest, line)?;
+        match &mut instr {
+            Instruction::Branch { cond, .. } => *cond = cond_code,
+            Instruction::IndirectBranch { cond, .. } => *cond = cond_code,
+            _ => {}
+        }
+        return Ok((instr, label_ref));
     }
 
     // IF cond RTS/RTI
@@ -696,6 +776,20 @@ fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<Strin
         // Re-parse as conditional memory instruction
         let instr = parse_conditional_mem(rest, cond_code, line)?;
         return Ok((instr, None));
+    }
+
+    // IF cond MODIFY(Ii, Mm) — direct conditional MODIFY (no comma, no compute)
+    if rest.starts_with("MODIFY(") || rest.starts_with("MODIFY (") {
+        let modify = parse_dag_modify(rest, line)?;
+        if let Instruction::DagModify { pm, i_reg, m_reg, .. } = modify {
+            return Ok((Instruction::DagModify {
+                pm,
+                i_reg,
+                m_reg,
+                cond: cond_code,
+                compute: None,
+            }, None));
+        }
     }
 
     // "IF cond , MODIFY(Ii, Mm)" — comma before MODIFY with empty compute
@@ -767,6 +861,39 @@ fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<Strin
                 }, None));
             }
             other => return Ok((other, None)),
+        }
+    }
+
+    // IF cond compute, ureg = ureg (conditional Type 5a with compute)
+    if let Some(comma) = find_comma_outside_parens(rest) {
+        let before = rest[..comma].trim();
+        let after = rest[comma + 1..].trim();
+        if !before.is_empty() && !after.is_empty() && after.contains('=') {
+            if let Ok(compute) = parse_compute_op(before, line) {
+                let eq_pos = after.find('=').unwrap();
+                let dst = after[..eq_pos].trim();
+                let src = after[eq_pos + 1..].trim();
+                if let (Some(dst_code), Some(src_code)) = (ureg_code(dst), ureg_code(src)) {
+                    return Ok((Instruction::UregTransfer {
+                        src_ureg: src_code,
+                        dst_ureg: dst_code,
+                        compute: Some(compute),
+                    }, None));
+                }
+            }
+        }
+    }
+
+    // IF cond ureg = ureg (conditional transfer without compute)
+    if let Some(eq) = find_eq_outside_parens(rest) {
+        let dst = rest[..eq].trim();
+        let src = rest[eq + 1..].trim();
+        if let (Some(dst_code), Some(src_code)) = (ureg_code(dst), ureg_code(src)) {
+            return Ok((Instruction::UregTransfer {
+                src_ureg: src_code,
+                dst_ureg: dst_code,
+                compute: None,
+            }, None));
         }
     }
 
@@ -909,10 +1036,14 @@ fn parse_do_loop(text: &str, line: u32) -> Result<(Instruction, Option<String>)>
         })?
         .trim();
 
-    // Split on ", DO " or " , DO "
+    // Split on ", DO " or " , DO " or ", DO(" (no space before paren)
     let do_sep = if let Some(pos) = after_eq.find(", DO ") {
         pos
     } else if let Some(pos) = after_eq.find(" , DO ") {
+        pos
+    } else if let Some(pos) = after_eq.find(", DO(") {
+        pos
+    } else if let Some(pos) = after_eq.find(" , DO(") {
         pos
     } else {
         return Err(Error::Parse {
@@ -923,11 +1054,15 @@ fn parse_do_loop(text: &str, line: u32) -> Result<(Instruction, Option<String>)>
 
     let counter_str = after_eq[..do_sep].trim();
     let do_rest = after_eq[do_sep..].trim();
-    // Skip the ", DO " or " , DO " prefix
+    // Skip the ", DO " / " , DO " / ", DO(" prefix
     let do_part = if let Some(r) = do_rest.strip_prefix(", DO ") {
         r
     } else if let Some(r) = do_rest.strip_prefix(" , DO ") {
         r
+    } else if do_rest.starts_with(", DO(") {
+        &do_rest[4..]  // skip ", DO" to keep "(..."
+    } else if do_rest.starts_with(" , DO(") {
+        &do_rest[5..]
     } else {
         do_rest
     };
@@ -1008,7 +1143,7 @@ fn parse_bit_op(text: &str, line: u32) -> Result<Instruction> {
         "SET" => 0,
         "CLR" => 1,
         "TST" => 2,
-        "XOR" => 3,
+        "XOR" | "TGL" => 3,
         _ => {
             return Err(Error::Parse {
                 line,
@@ -1115,10 +1250,11 @@ fn parse_cjump(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
 // ---------------------------------------------------------------------------
 
 fn parse_dag_modify(text: &str, line: u32) -> Result<Instruction> {
-    // "MODIFY(I0, M1)" or "MODIFY (I0, M1)"
+    // "MODIFY(I0, M1)" or "MODIFY (I0, M1)" or "MODIFY(I7, -4)" or "BITREV(I14, 0)"
+    let is_bitrev = text.starts_with("BITREV");
     let open = text.find('(').ok_or_else(|| Error::Parse {
         line,
-        msg: "missing '(' in MODIFY".into(),
+        msg: "missing '(' in MODIFY/BITREV".into(),
     })?;
     let close = text.find(')').ok_or_else(|| Error::Parse {
         line,
@@ -1133,6 +1269,24 @@ fn parse_dag_modify(text: &str, line: u32) -> Result<Instruction> {
         });
     }
     let i_reg_full = parse_reg_index(parts[0], 'I', line)?;
+
+    // Check for immediate offset (Type 19): MODIFY(Ii, <number>)
+    if let Some(imm_val) = parse_signed_number(parts[1]) {
+        // Check for (NW) suffix after the closing paren
+        let after_close = text[close + 1..].trim();
+        let width = if after_close.starts_with("(NW)") || after_close.contains("NWOPT") {
+            MemWidth::Nw
+        } else {
+            MemWidth::Normal
+        };
+        return Ok(Instruction::Modify {
+            i_reg: i_reg_full,
+            value: imm_val as i32,
+            width,
+            bitrev: is_bitrev,
+        });
+    }
+
     let m_reg_full = parse_reg_index(parts[1], 'M', line)?;
 
     // Determine DAG: I0-I7/M0-M7 = DAG1, I8-I15/M8-M15 = DAG2
@@ -1243,10 +1397,12 @@ fn parse_modify_assign_inner(text: &str, line: u32) -> Result<Instruction> {
         } else {
             MemWidth::Normal
         };
+        let bitrev = rhs.starts_with("BITREV");
         Ok(Instruction::Modify {
             i_reg: i_reg_full,
             value,
             width,
+            bitrev,
         })
     }
 }
@@ -1572,6 +1728,63 @@ fn try_parse_compound_mem(text: &str, line: u32) -> Result<Option<Instruction>> 
     let mem_rhs = mem_text[eq_pos + 1..].trim();
     let lhs_has_mem = has_mem_prefix(mem_lhs);
 
+    // Type 6a: immediate shift + DM memory access
+    // Handles FEXT/FDEP (shift_type=1), LSHIFT (0), ASHIFT (2), BSET/BCLR/BTGL/BTST (3)
+    if compute_text.contains(" BY ") {
+        let imm_shift = try_parse_imm_shift(compute_text, line)?;
+        if let Some(Instruction::ImmShift { shift_type, sub_op, imm, rn, rx, data_hi, .. }) = imm_shift {
+            let (pm, inner) = if lhs_has_mem {
+                extract_mem_inner(mem_lhs, line)?
+            } else {
+                extract_mem_inner(mem_rhs, line)?
+            };
+            if pm {
+                return Err(Error::Parse {
+                    line,
+                    msg: "Type 6a (immediate shift + memory) only supports DM".into(),
+                });
+            }
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            if parts.len() != 2 {
+                return Err(Error::Parse {
+                    line,
+                    msg: format!("expected two operands in memory expression: {inner}"),
+                });
+            }
+            let (i_str, m_str) = if parts[0].starts_with('I') && parts[1].starts_with('M') {
+                (parts[0], parts[1])
+            } else if parts[0].starts_with('M') && parts[1].starts_with('I') {
+                (parts[1], parts[0])
+            } else {
+                return Err(Error::Parse {
+                    line,
+                    msg: format!("expected I,M register pair in memory expression: {inner}"),
+                });
+            };
+            let i_reg = parse_reg_index(i_str, 'I', line)?;
+            let m_reg = parse_reg_index(m_str, 'M', line)?;
+            let (write, dreg_str) = if lhs_has_mem {
+                (true, mem_rhs)
+            } else {
+                (false, mem_lhs)
+            };
+            let dreg = parse_dreg(dreg_str, line)?;
+            return Ok(Some(Instruction::ImmShiftMem {
+                shift_type,
+                sub_op,
+                imm,
+                rn,
+                rx,
+                len_hi: data_hi,
+                i_reg,
+                m_reg,
+                write,
+                dreg,
+                cond: 31,
+            }));
+        }
+    }
+
     let compute = parse_compute_op(compute_text, line)?;
 
     if lhs_has_mem {
@@ -1652,27 +1865,62 @@ fn try_parse_dual_move(
         return Ok(None);
     }
 
-    // Split mem_text at the comma between DM and PM parts
+    // Split mem_text at commas to find the DM and PM parts.
+    // When compute_text is empty, the first comma-separated part might be
+    // a compute operation (not a memory access), so we need to identify
+    // which parts are DM, which are PM, and which is compute.
     let mem_commas = find_all_commas_outside_parens(mem_text);
     if mem_commas.is_empty() {
         return Ok(None);
     }
 
-    // Find the comma that separates DM from PM
-    let split_comma = mem_commas[0]; // first comma separates the two
-    let part1 = mem_text[..split_comma].trim();
-    let part2 = mem_text[split_comma + 1..].trim();
+    // Find the two parts that contain DM and PM references.
+    // Split at each comma and identify roles.
+    let mut parts: Vec<&str> = Vec::new();
+    let mut prev = 0;
+    for &c in &mem_commas {
+        parts.push(mem_text[prev..c].trim());
+        prev = c + 1;
+    }
+    parts.push(mem_text[prev..].trim());
+
+    let mut dm_part = None;
+    let mut pm_part = None;
+    let mut compute_part = compute_text;
+    let mut found_compute = !compute_text.is_empty();
+
+    for &p in &parts {
+        if has_mem_prefix_anywhere(p) && (p.contains("DM(") || p.contains("DM (")) && dm_part.is_none() {
+            dm_part = Some(p);
+        } else if has_mem_prefix_anywhere(p) && (p.contains("PM(") || p.contains("PM (")) && pm_part.is_none() {
+            pm_part = Some(p);
+        } else if !found_compute {
+            compute_part = p;
+            found_compute = true;
+        } else {
+            return Ok(None);
+        }
+    }
+
+    let dm_part = match dm_part {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let pm_part = match pm_part {
+        Some(p) => p,
+        None => return Ok(None),
+    };
 
     // Parse compute (may be empty)
-    let compute = if compute_text.is_empty() {
+    let compute = if compute_part.is_empty() {
         None
     } else {
-        Some(parse_compute_op(compute_text, line)?)
+        Some(parse_compute_op(compute_part, line)?)
     };
 
     // Parse each part as a DAG access
-    let dm_access = parse_dag_access(part1, false, line)?;
-    let pm_access = parse_dag_access(part2, true, line)?;
+    let dm_access = parse_dag_access(dm_part, false, line)?;
+    let pm_access = parse_dag_access(pm_part, true, line)?;
 
     Ok(Some(Instruction::DualMove {
         compute,
@@ -1956,15 +2204,24 @@ fn parse_mf_alu_part(text: &str, fp: bool, line: u32) -> Result<(u8, u8, u8, u8)
     let rhs = text[eq + 1..].trim();
     let ra = parse_dreg(dst, line)?;
 
-    // Check for (Rxa + Rya)/2 form
-    if rhs.starts_with('(') && rhs.ends_with("/2") {
-        let inner = &rhs[1..rhs.len() - 2];
+    // Check for (Rxa + Rya)/2 or (Rxa + Rya) / 2
+    let avg_end = if rhs.ends_with("/2") {
+        Some(2) // strip "/2"
+    } else if rhs.ends_with("/ 2") {
+        Some(3) // strip "/ 2"
+    } else {
+        None
+    };
+    if let Some(trim_len) = avg_end {
+        if rhs.starts_with('(') {
+        let inner = &rhs[1..rhs.len() - trim_len];
         let inner = inner.trim().strip_suffix(')').unwrap_or(inner).trim();
         if let Some((lhs_str, rhs_str)) = split_at_str(inner, " + ") {
             let rxa = parse_dreg(lhs_str.trim(), line)?;
             let rya = parse_dreg(rhs_str.trim(), line)?;
             let (rxa_2, rya_2) = check_mf_alu_regs(rxa, rya, fp, line)?;
             return Ok((2, ra, rxa_2, rya_2));
+        }
         }
     }
 
@@ -2087,6 +2344,16 @@ fn parse_compute_or_load(text: &str, line: u32) -> Result<Instruction> {
             }
         }
 
+        // Float constant expressions: "F8 = 1.5 * 2", "F2 = 1.647E-1"
+        if rhs.contains('.') || rhs.contains('E') {
+            if let Some(fval) = eval_float_expr(rhs) {
+                if let Some(ureg) = ureg_code(lhs) {
+                    let value = (fval as f32).to_bits();
+                    return Ok(Instruction::LoadImm { ureg, value });
+                }
+            }
+        }
+
         // Check if RHS is a pure number (immediate load), including negative
         let is_numeric_rhs = rhs.starts_with("0X")
             || rhs.starts_with("-0X")
@@ -2180,7 +2447,8 @@ fn parse_compute_or_load(text: &str, line: u32) -> Result<Instruction> {
     Ok(Instruction::Compute { cond: 31, compute })
 }
 
-/// Try to parse an immediate shift: Rn = LSHIFT/ASHIFT Rx BY <imm>.
+/// Try to parse an immediate shift: Rn = LSHIFT/ASHIFT Rx BY <imm>,
+/// Rn = BSET/BCLR/BTGL Rx BY <imm>, or BTST Rx BY <imm>.
 /// Returns None if the BY operand is a register.
 fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
     // Check for FEXT/FDEP with pos:len notation first
@@ -2188,11 +2456,47 @@ fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
         return try_parse_imm_fext_fdep(text, line);
     }
 
-    // Check for LSHIFT or ASHIFT with BY
-    let (shift_type, keyword) = if text.contains("LSHIFT") && text.contains(" BY ") {
-        (0u8, "LSHIFT")
+    // BTST Rx BY <imm> — no destination register
+    if text.starts_with("BTST ") && text.contains(" BY ") {
+        let rest = text.strip_prefix("BTST ").unwrap().trim();
+        let (rx_str, by_str) = match split_at_str(rest, " BY ") {
+            Some(pair) => pair,
+            None => return Ok(None),
+        };
+        let rx = match parse_dreg(rx_str.trim(), line) {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+        if let Some(imm_val) = parse_signed_number(by_str.trim()) {
+            return Ok(Some(Instruction::ImmShift {
+                shift_type: 3,
+                sub_op: 3,
+                imm: imm_val as u8,
+                rn: 0,
+                rx,
+                data_hi: 0,
+                cond: 31,
+            }));
+        }
+        return Ok(None);
+    }
+
+    // Check for LSHIFT, ASHIFT, BSET, BCLR, BTGL with BY
+    // Also handle OR LSHIFT / OR ASHIFT immediate forms
+    let (shift_type, sub_op, keyword) = if text.contains("OR LSHIFT") && text.contains(" BY ") {
+        (0u8, 4u8, "LSHIFT")  // sub_op=4 for OR LSHIFT
+    } else if text.contains("OR ASHIFT") && text.contains(" BY ") {
+        (2u8, 4u8, "ASHIFT")  // sub_op=4 for OR ASHIFT
+    } else if text.contains("LSHIFT") && text.contains(" BY ") {
+        (0u8, 0u8, "LSHIFT")
     } else if text.contains("ASHIFT") && text.contains(" BY ") {
-        (2u8, "ASHIFT")
+        (2u8, 0u8, "ASHIFT")
+    } else if text.contains("BSET") && text.contains(" BY ") {
+        (3u8, 0u8, "BSET")
+    } else if text.contains("BCLR") && text.contains(" BY ") {
+        (3u8, 1u8, "BCLR")
+    } else if text.contains("BTGL") && text.contains(" BY ") {
+        (3u8, 2u8, "BTGL")
     } else {
         return Ok(None);
     };
@@ -2210,10 +2514,6 @@ fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
 
     // Extract Rx and BY operand
     let rhs = text[eq + 1..].trim();
-    // Handle "Rn OR LSHIFT" form (skip — that's register-based)
-    if rhs.contains("OR LSHIFT") || rhs.contains("OR ASHIFT") {
-        return Ok(None);
-    }
 
     let kw_pos = match rhs.find(keyword) {
         Some(p) => p,
@@ -2234,7 +2534,7 @@ fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
     if let Some(imm_val) = parse_signed_number(by_trimmed) {
         return Ok(Some(Instruction::ImmShift {
             shift_type,
-            sub_op: 0,
+            sub_op,
             imm: imm_val as u8,
             rn,
             rx,
@@ -2247,7 +2547,18 @@ fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
 }
 
 /// Try to parse FEXT/FDEP with pos:len notation: Rn = FEXT Rx BY pos:len
-fn try_parse_imm_fext_fdep(text: &str, line: u32) -> Result<Option<Instruction>> {
+/// Parsed fields from an immediate FEXT/FDEP expression.
+struct ImmFextFields {
+    sub_op: u8,
+    rn: u8,
+    rx: u8,
+    imm: u8,
+    len_hi: u8,
+}
+
+/// Parse "Rn = [Rn OR] FEXT/FDEP Rx BY pos:len" into its fields.
+/// Returns None if the text is not an immediate FEXT/FDEP.
+fn try_parse_imm_fext_fields(text: &str, line: u32) -> Result<Option<ImmFextFields>> {
     let eq = match text.find('=') {
         Some(pos) => pos,
         None => return Ok(None),
@@ -2255,15 +2566,14 @@ fn try_parse_imm_fext_fdep(text: &str, line: u32) -> Result<Option<Instruction>>
     let dst = text[..eq].trim();
     let rhs = text[eq + 1..].trim();
 
-    // Detect OR prefix: "Rn = Rn OR FEXT/FDEP Rx BY pos:len"
     let (keyword, sub_op) = if rhs.contains("OR FEXT") {
-        ("FEXT", 2u8) // sub_op=2: OR FEXT
+        ("FEXT", 2u8)
     } else if rhs.contains("OR FDEP") {
-        ("FDEP", 1u8) // sub_op=1: OR FDEP
+        ("FDEP", 1u8)
     } else if rhs.contains("FEXT") {
-        ("FEXT", 0u8) // sub_op=0: plain FEXT
+        ("FEXT", 0u8)
     } else if rhs.contains("FDEP") {
-        ("FDEP", 3u8) // sub_op=3: plain FDEP
+        ("FDEP", 3u8)
     } else {
         return Ok(None);
     };
@@ -2288,13 +2598,17 @@ fn try_parse_imm_fext_fdep(text: &str, line: u32) -> Result<Option<Instruction>>
     };
     let by_trimmed = by_str.trim();
 
-    // Must contain colon (pos:len notation)
     let colon = match by_trimmed.find(':') {
         Some(c) => c,
         None => return Ok(None),
     };
     let pos_str = by_trimmed[..colon].trim();
-    let len_str = by_trimmed[colon + 1..].trim();
+    let mut len_str = by_trimmed[colon + 1..].trim();
+    // Handle (SE) suffix: sign-extending FEXT → sub_op=2
+    let se_suffix = len_str.ends_with("(SE)");
+    if se_suffix {
+        len_str = len_str.strip_suffix("(SE)").unwrap().trim();
+    }
     let pos = match parse_number(pos_str) {
         Some(v) => v as u8,
         None => return Ok(None),
@@ -2303,17 +2617,27 @@ fn try_parse_imm_fext_fdep(text: &str, line: u32) -> Result<Option<Instruction>>
         Some(v) => v as u8,
         None => return Ok(None),
     };
+    // (SE) forces sub_op=2 (sign-extending FEXT)
+    let sub_op = if se_suffix { 2 } else { sub_op };
 
     let imm = (pos & 0x3F) | ((len & 0x3) << 6);
     let len_hi = (len >> 2) & 0x1F;
 
+    Ok(Some(ImmFextFields { sub_op, rn, rx, imm, len_hi }))
+}
+
+fn try_parse_imm_fext_fdep(text: &str, line: u32) -> Result<Option<Instruction>> {
+    let fields = match try_parse_imm_fext_fields(text, line)? {
+        Some(f) => f,
+        None => return Ok(None),
+    };
     Ok(Some(Instruction::ImmShift {
         shift_type: 1,
-        sub_op,
-        imm,
-        rn,
-        rx,
-        data_hi: len_hi,
+        sub_op: fields.sub_op,
+        imm: fields.imm,
+        rn: fields.rn,
+        rx: fields.rx,
+        data_hi: fields.len_hi,
         cond: 31,
     }))
 }
@@ -2702,33 +3026,35 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
     }
 
     // Single operand with CI, +1, -1 (check before general add/sub)
+    // Only match when the remaining prefix is a plain register, otherwise
+    // fall through to binary operators (e.g. "Rx - Ry + CI - 1" is SubCi).
     if rhs.ends_with("+ CI - 1") {
         let rx_str = rhs.strip_suffix("+ CI - 1").unwrap().trim();
-        let rx = parse_dreg(rx_str, line)?;
-        return Ok(ComputeOp::Alu(AluOp::PassCiMinus1 { rn, rx }));
+        if let Ok(rx) = parse_dreg(rx_str, line) {
+            return Ok(ComputeOp::Alu(AluOp::PassCiMinus1 { rn, rx }));
+        }
     }
     if rhs.ends_with("+ CI") {
         let rx_str = rhs.strip_suffix("+ CI").unwrap().trim();
-        let rx = parse_dreg(rx_str, line)?;
-        return Ok(ComputeOp::Alu(AluOp::PassCi { rn, rx }));
+        if let Ok(rx) = parse_dreg(rx_str, line) {
+            return Ok(ComputeOp::Alu(AluOp::PassCi { rn, rx }));
+        }
     }
     if rhs.ends_with("+ 1") {
         let rx_str = rhs.strip_suffix("+ 1").unwrap().trim();
-        let rx = parse_dreg(rx_str, line)?;
-        return Ok(ComputeOp::Alu(AluOp::Inc { rn, rx }));
+        if let Ok(rx) = parse_dreg(rx_str, line) {
+            return Ok(ComputeOp::Alu(AluOp::Inc { rn, rx }));
+        }
     }
     if rhs.ends_with("- 1") {
         let rx_str = rhs.strip_suffix("- 1").unwrap().trim();
-        let rx = parse_dreg(rx_str, line)?;
-        return Ok(ComputeOp::Alu(AluOp::Dec { rn, rx }));
-    }
-
-    // ALU binary: Rn = Rx OP Ry
-    if let Some(plus) = rhs.find('+') {
-        return parse_alu_binary(rn, rhs, plus, is_float, line);
+        if let Ok(rx) = parse_dreg(rx_str, line) {
+            return Ok(ComputeOp::Alu(AluOp::Dec { rn, rx }));
+        }
     }
 
     // Subtraction: Rn = Rx - Ry or Rn = -Rx
+    // Must come before addition check since "Rx - Ry + CI - 1" contains '+'
     if let Some(rest) = rhs.strip_prefix('-') {
         // Negation: Rn = -Rx
         let rx = parse_dreg(rest.trim(), line)?;
@@ -2744,6 +3070,11 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
         }
         let ry = parse_dreg(rest_after, line)?;
         return Ok(ComputeOp::Alu(AluOp::Sub { rn, rx, ry }));
+    }
+
+    // ALU binary: Rn = Rx OP Ry
+    if let Some(plus) = rhs.find('+') {
+        return parse_alu_binary(rn, rhs, plus, is_float, line);
     }
 
     // Logical: AND, OR, XOR, NOT
@@ -2776,13 +3107,14 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
         return Ok(ComputeOp::Alu(AluOp::Pass { rn, rx }));
     }
     if let Some(rest) = rhs.strip_prefix("ABS ") {
-        let rx = parse_dreg(rest.trim(), line)?;
+        let rest = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
+        let rx = parse_dreg(rest, line)?;
         return Ok(ComputeOp::Alu(AluOp::Abs { rn, rx }));
     }
-    if rhs.starts_with("MIN(") {
+    if rhs.starts_with("MIN(") || rhs.starts_with("MIN (") {
         return parse_min_max_clip(rn, rhs, "MIN", is_float, line);
     }
-    if rhs.starts_with("MAX(") {
+    if rhs.starts_with("MAX(") || rhs.starts_with("MAX (") {
         return parse_min_max_clip(rn, rhs, "MAX", is_float, line);
     }
     if rhs.starts_with("CLIP ") {
@@ -2818,7 +3150,8 @@ fn parse_float_unary(rn: u8, rhs: &str, line: u32) -> Result<ComputeOp> {
         return Ok(ComputeOp::Falu(FaluOp::Pass { rn, rx }));
     }
     if let Some(rest) = rhs.strip_prefix("ABS ") {
-        let rx = parse_dreg(rest.trim(), line)?;
+        let rest = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
+        let rx = parse_dreg(rest, line)?;
         return Ok(ComputeOp::Falu(FaluOp::Abs { rn, rx }));
     }
 
@@ -2960,10 +3293,20 @@ fn parse_alu_binary(
     let lhs_str = rhs[..plus_pos].trim();
     let rhs_str = rhs[plus_pos + 1..].trim();
 
-    // Check for (Rx + Ry)/2
-    if lhs_str.starts_with('(') && rhs_str.ends_with(")/2") {
+    // Check for (Rx + Ry)/2 or (Rx + Ry) / 2
+    let avg_suffix = if rhs_str.ends_with(")/2") {
+        Some(")/2")
+    } else if rhs_str.ends_with(") / 2") {
+        Some(") / 2")
+    } else if rhs_str.ends_with(") /2") {
+        Some(") /2")
+    } else {
+        None
+    };
+    if let Some(suffix) = avg_suffix {
+        if lhs_str.starts_with('(') {
         let inner_lhs = lhs_str.strip_prefix('(').unwrap().trim();
-        let inner_rhs = rhs_str.strip_suffix(")/2").unwrap().trim();
+        let inner_rhs = rhs_str.strip_suffix(suffix).unwrap().trim();
         let rx = parse_dreg(inner_lhs, line)?;
         let ry = parse_dreg(inner_rhs, line)?;
         return if is_float {
@@ -2971,6 +3314,7 @@ fn parse_alu_binary(
         } else {
             Ok(ComputeOp::Alu(AluOp::Avg { rn, rx, ry }))
         };
+        }
     }
 
     // Check for Rx + Ry + CI
@@ -3134,8 +3478,8 @@ fn parse_min_max_clip(
     is_float: bool,
     line: u32,
 ) -> Result<ComputeOp> {
-    let prefix_len = kind.len() + 1; // "MIN(" or "MAX("
-    let inner = rhs[prefix_len..]
+    let paren_pos = rhs.find('(').unwrap();
+    let inner = rhs[paren_pos + 1..]
         .strip_suffix(')')
         .ok_or_else(|| Error::Parse {
             line,
@@ -3185,24 +3529,43 @@ fn parse_clip(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp>
 
 fn normalize_compute_spacing(text: &str) -> String {
     // Insert spaces around +/- operators between operands
-    // e.g. "R0-R0" -> "R0 - R0", "R4-1" -> "R4 - 1"
+    // e.g. "R0-R0" -> "R0 - R0", "R4-1" -> "R4 - 1", "R2 -1" -> "R2 - 1"
     // But don't touch hex numbers: "-0x10", "0X100"
     let mut result = String::with_capacity(text.len() + 10);
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if (chars[i] == '-' || chars[i] == '+')
-            && i > 0
-            && i + 1 < chars.len()
-            && chars[i - 1].is_ascii_alphanumeric()
-            && chars[i + 1].is_ascii_alphanumeric()
+        let is_op = chars[i] == '-' || chars[i] == '+';
+        if is_op && i > 0 && i + 1 < chars.len() {
+            let prev_alnum = chars[i - 1].is_ascii_alphanumeric();
+            let next_alnum = chars[i + 1].is_ascii_alphanumeric();
             // Don't split hex prefixes: 0x, 0X
-            && !(chars[i] == '+' && i + 2 < chars.len()
-                && (chars[i + 1] == '0') && (chars[i + 2] == 'x' || chars[i + 2] == 'X'))
-        {
-            result.push(' ');
-            result.push(chars[i]);
-            result.push(' ');
+            let is_hex_prefix = chars[i] == '+'
+                && i + 2 < chars.len()
+                && chars[i + 1] == '0'
+                && (chars[i + 2] == 'x' || chars[i + 2] == 'X');
+            // Don't split scientific notation: 1.5E-1, 2.0E+3
+            let is_sci_notation = prev_alnum
+                && (chars[i - 1] == 'E' || chars[i - 1] == 'e');
+            // Case 1: "R0-R1" or "R4-1" — both sides alphanumeric
+            // Case 2: "R2 -1" — space before, alphanumeric after; check that
+            // two chars back is alphanumeric (to catch "Rx -N" but not "= -0x")
+            let space_before = chars[i - 1] == ' '
+                && i >= 2
+                && chars[i - 2].is_ascii_alphanumeric();
+            if !is_hex_prefix && !is_sci_notation && next_alnum && (prev_alnum || space_before) {
+                if !prev_alnum {
+                    // Already have space before; just add space after
+                    result.push(chars[i]);
+                    result.push(' ');
+                } else {
+                    result.push(' ');
+                    result.push(chars[i]);
+                    result.push(' ');
+                }
+            } else {
+                result.push(chars[i]);
+            }
         } else {
             result.push(chars[i]);
         }
@@ -3375,6 +3738,50 @@ fn parse_reg_index(name: &str, prefix: char, line: u32) -> Result<u8> {
 /// unary minus, and parentheses. Operands are hex (`0x...`) or decimal
 /// integer literals. Returns `None` if the string is not a valid constant
 /// expression (e.g. contains register names).
+/// Evaluate a float constant expression: "1.5 * 2", "1.6470993291652860E-1".
+/// Returns the f64 value, or None if the string isn't a valid float expression.
+fn eval_float_expr(s: &str) -> Option<f64> {
+    let s = s.trim();
+    // Try parsing as a single float literal first (including scientific notation)
+    // Handle trailing UL/L suffixes from preprocessor macro expansion
+    let clean = s.trim_end_matches("UL").trim_end_matches('L').trim();
+    if let Ok(v) = clean.parse::<f64>() {
+        return Some(v);
+    }
+    // Try simple binary: "a * b", "a + b", "a - b", "a / b"
+    for op in ['*', '+', '/'] {
+        if let Some(pos) = s.rfind(op) {
+            if pos > 0 {
+                let lhs = eval_float_expr(s[..pos].trim())?;
+                let rhs = eval_float_expr(s[pos + 1..].trim())?;
+                return match op {
+                    '*' => Some(lhs * rhs),
+                    '+' => Some(lhs + rhs),
+                    '/' => {
+                        if rhs == 0.0 { None } else { Some(lhs / rhs) }
+                    }
+                    _ => None,
+                };
+            }
+        }
+    }
+    // Handle subtraction carefully (avoid matching negative exponent)
+    if let Some(pos) = s.rfind(" - ") {
+        let lhs = eval_float_expr(s[..pos].trim())?;
+        let rhs = eval_float_expr(s[pos + 3..].trim())?;
+        return Some(lhs - rhs);
+    }
+    // Strip outer parens
+    if s.starts_with('(') && s.ends_with(')') {
+        return eval_float_expr(&s[1..s.len() - 1]);
+    }
+    // Try as integer
+    if let Some(v) = parse_number(s) {
+        return Some(v as f64);
+    }
+    None
+}
+
 fn eval_const_expr(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     let mut pos = 0;
@@ -3611,12 +4018,19 @@ fn parse_signed_number(s: &str) -> Option<i64> {
 
 fn parse_address_or_label(s: &str, line: u32) -> Result<(u32, Option<String>)> {
     let s = s.trim();
+    // Strip outer parentheses: "(___LABEL)" → "___LABEL"
+    let s = if s.starts_with('(') && s.ends_with(')') {
+        s[1..s.len() - 1].trim()
+    } else {
+        s
+    };
     if let Some(val) = parse_number(s) {
         return Ok((val, None));
     }
     // Symbolic label — return 0 placeholder + the label name
+    // Labels may start with '_', '.', or an alphabetic character.
     if !s.is_empty()
-        && (s.starts_with('_') || s.as_bytes()[0].is_ascii_alphabetic())
+        && (s.starts_with('_') || s.starts_with('.') || s.as_bytes()[0].is_ascii_alphabetic())
     {
         return Ok((0, Some(s.to_string())));
     }
@@ -3658,7 +4072,7 @@ fn ureg_code(name: &str) -> Option<u8> {
         "IRPTL" => Some(0x78),
         "IMASK" => Some(0x79),
         "IMASKP" => Some(0x7A),
-        "LRPTL" => Some(0x7B),
+        "LRPTL" | "LIRPTL" => Some(0x7B),
         "MMASK" => Some(0x7C),
         "MODE1STK" => Some(0x7D),
         // User status registers group 0x8x
@@ -3698,7 +4112,10 @@ fn ureg_code(name: &str) -> Option<u8> {
     if let Some(rest) = name.strip_prefix('B') {
         return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x40 + n);
     }
-    // Shadow registers: S0-S15
+    // Shadow/complementary registers: S0-S15 and SF0-SF15 (float alias)
+    if let Some(rest) = name.strip_prefix("SF") {
+        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x50 + n);
+    }
     if let Some(rest) = name.strip_prefix('S') {
         return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x50 + n);
     }

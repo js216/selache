@@ -761,7 +761,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                     instrs.push(MachInstr {
                         instr: Instruction::Modify {
                             i_reg: target::FRAME_PTR,
-                            value: frame_offset, width: MemWidth::Normal, },
+                            value: frame_offset, width: MemWidth::Normal, bitrev: false, },
                         reloc: None,
                     });
                     instrs.push(MachInstr {
@@ -775,7 +775,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                     instrs.push(MachInstr {
                         instr: Instruction::Modify {
                             i_reg: target::FRAME_PTR,
-                            value: -frame_offset, width: MemWidth::Normal, },
+                            value: -frame_offset, width: MemWidth::Normal, bitrev: false, },
                         reloc: None,
                     });
                 }
@@ -1306,7 +1306,7 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: offset, width: MemWidth::Normal, },
+                value: offset, width: MemWidth::Normal, bitrev: false, },
             reloc: None,
         });
         instrs.push(MachInstr {
@@ -1326,7 +1326,7 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: -offset, width: MemWidth::Normal, },
+                value: -offset, width: MemWidth::Normal, bitrev: false, },
             reloc: None,
         });
     }
