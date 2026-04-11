@@ -55,6 +55,7 @@ impl<'a> AsmParser<'a> {
     pub fn parse_all(&mut self) -> Result<Vec<ParsedLine>> {
         let mut results = Vec::new();
         let mut in_var_init = false;
+        let mut struct_depth: u32 = 0;
         let mut pending_line = String::new();
         let lines: Vec<&str> = self.src.lines().collect();
         let mut i = 0;
@@ -67,6 +68,18 @@ impl<'a> AsmParser<'a> {
                 let trimmed = strip_comment(raw_line).trim();
                 if trimmed.ends_with(';') {
                     in_var_init = false;
+                }
+                continue;
+            }
+            // Skip .STRUCT body lines (brace-delimited)
+            if struct_depth > 0 {
+                let trimmed = strip_comment(raw_line).trim();
+                for c in trimmed.chars() {
+                    match c {
+                        '{' => struct_depth += 1,
+                        '}' => struct_depth = struct_depth.saturating_sub(1),
+                        _ => {}
+                    }
                 }
                 continue;
             }
@@ -128,6 +141,21 @@ impl<'a> AsmParser<'a> {
             if let Some(Directive::Var(ref body)) = parsed.directive {
                 if body.contains('=') && !raw_line.contains(';') {
                     in_var_init = true;
+                }
+            }
+            // Detect start of .STRUCT body (brace-delimited block)
+            {
+                let trimmed_upper = strip_comment(&effective_line).trim().to_uppercase();
+                if trimmed_upper.starts_with(".STRUCT") {
+                    let trimmed = strip_comment(&effective_line).trim();
+                    for c in trimmed.chars() {
+                        match c {
+                            '{' => struct_depth += 1,
+                            '}' => struct_depth = struct_depth.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
+                    // If we opened a brace but didn't close, skip subsequent lines
                 }
             }
             if parsed.label.is_some()
@@ -400,6 +428,19 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
         return Ok((instr, None));
     }
 
+    // IF PEx/PEy — SIMD processing element condition. Strip the PE
+    // selector and parse the remaining instruction (the compute/mem op
+    // is the same, just targeted at a specific processing element).
+    if upper.starts_with("IF PEX ") || upper.starts_with("IF PEY ") {
+        let rest = upper[7..].trim();
+        // If the rest starts with another IF, parse it as conditional
+        if rest.starts_with("IF ") {
+            return parse_conditional(rest, line);
+        }
+        // Otherwise parse as a standalone instruction
+        return parse_instruction_inner(rest, line);
+    }
+
     // IF cond ...
     if upper.starts_with("IF ") {
         return parse_conditional(&upper, line);
@@ -494,12 +535,66 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
             {
                 return Ok((Instruction::LoadImm { ureg, value: 0 }, Some(rhs.to_string())));
             }
+
+            // ureg = label_expr — load immediate with label arithmetic
+            // Handles: "R0 = (label1 - label2)", "R0 = label - 1", etc.
+            // Detect by checking if the expression contains identifiers that
+            // are not register names (labels start with '.', '_', or alpha
+            // and are not in the ureg table).
+            if !rhs.is_empty() && has_label_ident(rhs) {
+                let first_label = extract_first_label(rhs);
+                return Ok((Instruction::LoadImm { ureg, value: 0 },
+                    first_label.map(|l| l.to_string())));
+            }
         }
     }
 
     // Compute or load-immediate
     let instr = parse_compute_or_load(&upper, line)?;
     Ok((instr, None))
+}
+
+/// Check if a token looks like a label (not a register, not a compute keyword).
+fn is_label_token(tok: &str) -> bool {
+    if tok.is_empty() { return false; }
+    // Must start with '.', '_', or alphabetic
+    if !(tok.starts_with('.') || tok.starts_with('_')
+         || tok.as_bytes()[0].is_ascii_alphabetic()) {
+        return false;
+    }
+    // Not a register
+    if ureg_code(tok).is_some() { return false; }
+    // Not a number
+    if tok.parse::<u64>().is_ok() || tok.starts_with("0X") { return false; }
+    // Not a compute mnemonic or keyword
+    !matches!(tok,
+        "ABS" | "PASS" | "LSHIFT" | "ASHIFT" | "ROT" | "FEXT" | "FDEP"
+        | "BSET" | "BCLR" | "BTGL" | "BTST" | "AND" | "OR" | "XOR" | "NOT"
+        | "MIN" | "MAX" | "CLIP" | "FIX" | "FLOAT" | "TRUNC" | "RECIPS"
+        | "RSQRTS" | "LOGB" | "MANT" | "SCALB" | "COPYSIGN" | "EXP"
+        | "LEFTZ" | "LEFTO" | "FPACK" | "FUNPACK" | "SAT" | "TRNC"
+        | "MRF" | "MRB" | "MR0F" | "MR1F" | "MR2F" | "MR0B" | "MR1B" | "MR2B"
+        | "COMP" | "COMPU" | "CI" | "BY" | "SSF" | "SSI" | "SUI" | "USI"
+        | "UUI" | "UUF" | "SUF" | "USF" | "ELSE" | "IF" | "TRUE"
+        | "DM" | "PM" | "LW" | "BW" | "SW" | "NW"
+    )
+}
+
+/// Check if an expression string contains at least one label-like identifier
+/// (starts with '.', '_', or alpha) that is not a known register name.
+fn has_label_ident(expr: &str) -> bool {
+    split_identifiers(expr).any(is_label_token)
+}
+
+/// Extract the first label-like identifier from an expression.
+fn extract_first_label(expr: &str) -> Option<&str> {
+    split_identifiers(expr).find(|tok| is_label_token(tok))
+}
+
+/// Split a string into identifier-like tokens (alphanumeric, '_', '.').
+fn split_identifiers(s: &str) -> impl Iterator<Item = &str> {
+    s.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+        .filter(|tok| !tok.is_empty())
 }
 
 /// Recover the original-case label name from the source text.
@@ -1224,7 +1319,7 @@ fn bit_op_sreg_code(name: &str) -> Option<u8> {
         "FLAGS" => Some(0x05),
         "ASTAT" | "ASTATX" | "ASTATx" => Some(0x06),
         "ASTATY" | "ASTATy" => Some(0x07),
-        "STKYX" | "STKYx" => Some(0x08),
+        "STKY" | "STKYX" | "STKYx" => Some(0x08),
         "STKYY" | "STKYy" => Some(0x09),
         "IRPTL" => Some(0x0A),
         "IMASK" => Some(0x0B),
@@ -1574,15 +1669,17 @@ fn parse_mem_store(
     // Type 16: DM(Ii, Mm) = imm32 — immediate data store (both operands
     // are I+M registers and the RHS is a numeric literal, not a register name).
     // Must check before try_build_dag_move, which would error on numeric rhs.
-    if (op1.starts_with('I') && op2.starts_with('M')
-        || op1.starts_with('M') && op2.starts_with('I'))
-        && parse_signed_number(rhs).is_some()
+    if op1.starts_with('I') && op2.starts_with('M')
+        || op1.starts_with('M') && op2.starts_with('I')
     {
-        let (i_str, m_str) = if op1.starts_with('I') { (op1, op2) } else { (op2, op1) };
-        let i_reg = parse_reg_index(i_str, 'I', line)?;
-        let m_reg = parse_reg_index(m_str, 'M', line)?;
-        let value = parse_signed_number(rhs).unwrap() as u32;
-        return Ok(Instruction::DmImmStore { i_reg, m_reg, value });
+        let is_imm = parse_signed_number(rhs).is_some() || has_label_ident(rhs);
+        if is_imm {
+            let (i_str, m_str) = if op1.starts_with('I') { (op1, op2) } else { (op2, op1) };
+            let i_reg = parse_reg_index(i_str, 'I', line)?;
+            let m_reg = parse_reg_index(m_str, 'M', line)?;
+            let value = parse_signed_number(rhs).unwrap_or(0) as u32;
+            return Ok(Instruction::DmImmStore { i_reg, m_reg, value });
+        }
     }
 
     if let Some(dag_move) = try_build_dag_move(op1, op2, rhs, true, None, line)? {
@@ -2857,12 +2954,8 @@ fn parse_mr_op(text: &str, line: u32) -> Result<ComputeOp> {
             return Ok(ComputeOp::Mul(MulOp::TrncMrb));
         }
 
-        // MRF = Rx * Ry (SSF) etc.
-        if rhs.contains('*') {
-            return parse_mr_mul(lhs, rhs, line);
-        }
-
-        // MRF = MRF + Rx * Ry (SSF)
+        // MRF = MRF + Rx * Ry (SSF) — accumulate must precede plain multiply
+        // since the accumulate form also contains '*'.
         if rhs.starts_with("MRF + ") || rhs.starts_with("MRB + ") {
             let mul_part = &rhs[6..];
             return parse_mr_mul_acc_sub(lhs, mul_part, true, line);
@@ -2870,6 +2963,11 @@ fn parse_mr_op(text: &str, line: u32) -> Result<ComputeOp> {
         if rhs.starts_with("MRF - ") || rhs.starts_with("MRB - ") {
             let mul_part = &rhs[6..];
             return parse_mr_mul_acc_sub(lhs, mul_part, false, line);
+        }
+
+        // MRF = Rx * Ry (SSF) etc.
+        if rhs.contains('*') {
+            return parse_mr_mul(lhs, rhs, line);
         }
     }
 
@@ -4309,9 +4407,9 @@ fn ureg_code(name: &str) -> Option<u8> {
         "MODE1" => Some(0x70),
         "MODE2" => Some(0x71),
         "FLAGS" => Some(0x72),
-        "ASTATX" | "ASTATx" => Some(0x73),
+        "ASTAT" | "ASTATX" | "ASTATx" => Some(0x73),
         "ASTATY" | "ASTATy" => Some(0x74),
-        "STKYX" | "STKYx" => Some(0x75),
+        "STKY" | "STKYX" | "STKYx" => Some(0x75),
         "STKYY" | "STKYy" => Some(0x76),
         "IRPTL" => Some(0x78),
         "IMASK" => Some(0x79),

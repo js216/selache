@@ -95,9 +95,17 @@ impl Preprocessor {
                 .insert("__ADSPSC5xx__".to_string(), simple("1"));
         }
 
-        // Generic SHARC macros
+        // Generic SHARC macros — value encodes processor generation
+        // (0x220 for 2156x/215xx).
+        let sharc_ver = if chip_upper.starts_with("215") {
+            "0x220"
+        } else if chip_upper.starts_with("214") {
+            "0x100"
+        } else {
+            "1"
+        };
         self.defines
-            .insert("__ADSPSHARC__".to_string(), simple("1"));
+            .insert("__ADSPSHARC__".to_string(), simple(sharc_ver));
         self.defines
             .insert("__ADSP21000__".to_string(), simple("1"));
         self.defines
