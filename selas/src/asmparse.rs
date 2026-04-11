@@ -83,9 +83,23 @@ impl<'a> AsmParser<'a> {
                 }
                 continue;
             }
-            // Join multi-line instructions (lines ending with comma)
+            // Join multi-line instructions (lines ending with comma).
+            // Directives starting with '.' are excluded from joining UNLESS
+            // they are symbol-list directives (.GLOBAL, .EXTERN, .WEAK) or
+            // the pending buffer already holds a partial directive.
             let trimmed = strip_comment(raw_line).trim();
-            if trimmed.ends_with(',') && !trimmed.starts_with('.') {
+            let allow_dot_join = {
+                let u = trimmed.to_uppercase();
+                u.starts_with(".GLOBAL") || u.starts_with(".EXTERN")
+                    || u.starts_with(".WEAK")
+            };
+            if trimmed.ends_with(',')
+                && (!trimmed.starts_with('.') || allow_dot_join
+                    || (!pending_line.is_empty()
+                        && pending_line.trim().to_uppercase().starts_with(".GLOBAL")
+                           || pending_line.trim().to_uppercase().starts_with(".EXTERN")
+                           || pending_line.trim().to_uppercase().starts_with(".WEAK")))
+            {
                 pending_line.push_str(trimmed);
                 pending_line.push(' ');
                 continue;
