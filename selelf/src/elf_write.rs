@@ -9,7 +9,7 @@
 
 use crate::elf::{
     Endian, ELFDATA2LSB, ELF_MAGIC, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS,
-    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, STB_GLOBAL, STB_LOCAL, STT_FUNC,
+    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, SHT_SHARC_ALIGN, STB_GLOBAL, STB_LOCAL, STT_FUNC,
     STT_NOTYPE, STT_OBJECT, STT_SECTION,
 };
 
@@ -32,6 +32,13 @@ struct Section {
     nobits_size: u32,
     /// Section alignment (sh_addralign). Default is 4.
     alignment: u32,
+    /// Entry size (sh_entsize). 0 for most sections; 1 for SW code.
+    entsize: u32,
+    /// Section link (sh_link). Written as-is; 0 means "use symtab"
+    /// when the `link_to_symtab` flag is set.
+    link_to_symtab: bool,
+    /// Section info (sh_info). Points to another user section index.
+    info_section: u16,
 }
 
 /// A symbol to be emitted in the symbol table.
@@ -83,6 +90,23 @@ impl ElfWriter {
         self.add_section(name, SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, data)
     }
 
+    /// Add a short-word code section (alignment 1, entsize 1) matching
+    /// the standard `seg_swco` layout.
+    pub fn add_text_section_sw(&mut self, name: &str, data: &[u8]) -> u16 {
+        self.sections.push(Section {
+            name: name.to_string(),
+            sh_type: SHT_PROGBITS,
+            sh_flags: SHF_ALLOC | SHF_EXECINSTR,
+            data: data.to_vec(),
+            nobits_size: 0,
+            alignment: 1,
+            entsize: 1,
+            link_to_symtab: false,
+            info_section: 0,
+        });
+        self.sections.len() as u16
+    }
+
     /// Add a VISA code section (alignment 2 instead of 4).
     pub fn add_text_section_visa(&mut self, name: &str, data: &[u8]) -> u16 {
         self.sections.push(Section {
@@ -92,6 +116,9 @@ impl ElfWriter {
             data: data.to_vec(),
             nobits_size: 0,
             alignment: 2,
+            entsize: 0,
+            link_to_symtab: false,
+            info_section: 0,
         });
         self.sections.len() as u16
     }
@@ -115,6 +142,9 @@ impl ElfWriter {
             data: Vec::new(),
             nobits_size: size,
             alignment: 4,
+            entsize: 0,
+            link_to_symtab: false,
+            info_section: 0,
         });
         // Section indices: 0 = NULL, 1..N = user sections
         self.sections.len() as u16
@@ -129,6 +159,32 @@ impl ElfWriter {
             data: data.to_vec(),
             nobits_size: 0,
             alignment: 4,
+            entsize: 0,
+            link_to_symtab: false,
+            info_section: 0,
+        });
+        self.sections.len() as u16
+    }
+
+    /// Add an alignment section (`.align.<name>`) that the linker
+    /// uses for section placement metadata.
+    pub fn add_align_section(&mut self, code_section_name: &str, code_section_idx: u16) -> u16 {
+        let name = format!(".align.{code_section_name}");
+        // Single entry: offset=0, info=0, addend=0x001000c0
+        let mut data = Vec::with_capacity(12);
+        data.extend_from_slice(&0u32.to_le_bytes()); // offset
+        data.extend_from_slice(&0u32.to_le_bytes()); // info
+        data.extend_from_slice(&0x001000c0u32.to_le_bytes()); // addend
+        self.sections.push(Section {
+            name,
+            sh_type: SHT_SHARC_ALIGN,
+            sh_flags: 0,
+            data,
+            nobits_size: 0,
+            alignment: 1,
+            entsize: 12,
+            link_to_symtab: true,
+            info_section: code_section_idx,
         });
         self.sections.len() as u16
     }
@@ -495,16 +551,26 @@ impl ElfWriter {
             } else {
                 user_section_offsets[i] as u32
             };
+            let sh_link = if sec.link_to_symtab {
+                symtab_shidx as u32
+            } else {
+                0
+            };
+            let sh_info = if sec.info_section > 0 {
+                sec.info_section as u32
+            } else {
+                0
+            };
             write_shdr(&mut out, base, &ShdrFields {
                 sh_name: shstrtab_offsets[i],
                 sh_type: sec.sh_type,
                 sh_flags: sec.sh_flags,
                 sh_offset,
                 sh_size,
-                sh_link: 0,
-                sh_info: 0,
+                sh_link,
+                sh_info,
                 sh_addralign: sec.alignment,
-                sh_entsize: 0,
+                sh_entsize: sec.entsize,
             }, e);
         }
 

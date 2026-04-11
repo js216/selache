@@ -132,7 +132,8 @@ pub fn emit_object(unit: &TranslationUnit, output: &str) -> Result<()> {
     let data_idx = if !data_bytes.is_empty() {
         let idx = writer.add_data_section(".data", &data_bytes);
         for (name, offset, size) in &data_symbols {
-            writer.add_object(name, idx, *offset, *size);
+            let dotname = format!("{name}.");
+            writer.add_object(&dotname, idx, *offset, *size);
         }
         Some(idx)
     } else {
@@ -165,7 +166,8 @@ pub fn emit_object(unit: &TranslationUnit, output: &str) -> Result<()> {
     if bss_size > 0 {
         let bss_idx = writer.add_bss_section(".bss", bss_size);
         for (name, offset, size) in &bss_symbols {
-            writer.add_object(name, bss_idx, *offset, *size);
+            let dotname = format!("{name}.");
+            writer.add_object(&dotname, bss_idx, *offset, *size);
         }
     }
 
@@ -186,37 +188,136 @@ pub fn emit_object(unit: &TranslationUnit, output: &str) -> Result<()> {
         writer.add_rodata_section(".rodata", &rodata_bytes);
     }
 
-    // Emit .text section.
-    if !text_data.is_empty() {
-        let text_idx = writer.add_text_section(".text", &text_data);
+    // Emit code section (seg_pmco for compatibility with standard LDF scripts).
+    let text_idx = if !text_data.is_empty() {
+        let idx = writer.add_text_section("seg_pmco", &text_data);
 
         for info in &func_infos {
-            writer.add_function(&info.name, text_idx, info.offset, info.size);
+            let dotname = format!("{}.", info.name);
+            writer.add_function(&dotname, idx, info.offset, info.size);
         }
 
         // Emit external symbol references and relocations.
         for (offset, reloc) in &relocs {
-            writer.add_undefined(&reloc.symbol);
+            let dotname = format!("{}.", reloc.symbol);
+            writer.add_undefined(&dotname);
             writer.add_relocation(
-                text_idx,
+                idx,
                 *offset,
-                &reloc.symbol,
+                &dotname,
                 mach::rela_type(reloc.kind),
                 0,
             );
         }
-    }
+        Some(idx)
+    } else {
+        None
+    };
 
     // Add extern symbols.
     for global in &unit.globals {
         if global.is_extern {
-            writer.add_undefined(&global.name);
+            let dotname = format!("{}.", global.name);
+            writer.add_undefined(&dotname);
         }
     }
+
+    // Emit .align section (required by the linker for section placement).
+    if let Some(idx) = text_idx {
+        writer.add_align_section("seg_pmco", idx);
+    }
+
+    // Emit .attributes section (function names and encoding metadata
+    // used by the linker to classify code sections as SW/NW/PM).
+    if !text_data.is_empty() {
+        let mut attrs = Vec::new();
+        attrs.push(0u8); // leading null
+        for info in &func_infos {
+            attrs.extend_from_slice(b"FuncName\t");
+            attrs.extend_from_slice(info.name.as_bytes());
+            attrs.extend_from_slice(b".\0");
+        }
+        attrs.extend_from_slice(b"Encoding\tNW\0");
+        attrs.extend_from_slice(b"Content\tCode\0");
+        writer.add_section(".attributes", selelf::elf::SHT_STRTAB, 0, &attrs);
+    }
+
+    // Emit .adi.attributes section (processor attributes required by the
+    // linker to accept this object file).
+    writer.add_section(
+        ".adi.attributes",
+        selelf::elf::SHT_SHARC_ATTR,
+        0,
+        &build_adi_attributes(text_idx.is_some(), text_idx.unwrap_or(0) as u8),
+    );
 
     let elf_bytes = writer.finish();
     std::fs::write(output, elf_bytes)?;
     Ok(())
+}
+
+/// Build the `.adi.attributes` blob for ADSP-21569.
+///
+/// The format follows the ARM build-attributes convention:
+///   'A'  format version
+///   u32  total size (of everything after 'A')
+///   "AnonADI\0"  producer name
+///   0x01  Tag_File (file-scope attributes)
+///   u32  file-attributes block size (including this u32)
+///   tagged values (ULEB128-encoded)
+///
+/// The file-level tags encode:
+///   Tag 4: processor name (null-terminated string)
+///   Tag 5: short-word mode (0x0b = enabled)
+///   Tag 6: char size (0x64 = 100 → 8-bit)
+///   Tag 7: silicon revision (0xffff = any)
+///   Tag 8: build tool version (1)
+///
+/// Per-section subsections (tag 0x02) follow, one per code section,
+/// encoding section index and attributes.
+fn build_adi_attributes(has_code: bool, code_section_idx: u8) -> Vec<u8> {
+    let proc_name = b"ADSP-21569\0";
+
+    // File-level attributes (tags 4-8).
+    let mut file_attrs = Vec::new();
+    file_attrs.push(0x04);
+    file_attrs.extend_from_slice(proc_name);
+    file_attrs.extend_from_slice(&[0x05, 0x0b]); // short-word mode
+    file_attrs.extend_from_slice(&[0x06, 0x64]); // char size 8-bit
+    file_attrs.extend_from_slice(&[0x08, 0x01]); // build tool version
+
+    // File attributes block: tag_file(1) + u32 size + content.
+    // The size field counts the tag byte + size field + content.
+    let file_block_size = 1 + 4 + file_attrs.len() as u32;
+    let mut file_block = Vec::new();
+    file_block.push(0x01); // Tag_File
+    file_block.extend_from_slice(&file_block_size.to_le_bytes());
+    file_block.extend_from_slice(&file_attrs);
+
+    // Per-section subsection (tag 0x02): encodes the code section's
+    // index and its encoding type (NW = normal-word, 48-bit ISA).
+    let mut sec_content = Vec::new();
+    if has_code {
+        sec_content.push(code_section_idx);
+        sec_content.push(0x00); // end of section index list
+        sec_content.push(0x12); // Tag_Encoding
+        sec_content.push(0x03); // NW (normal-word, 48-bit ISA)
+
+        let sec_block_size = 1 + 4 + sec_content.len() as u32;
+        file_block.push(0x02); // Tag_Section
+        file_block.extend_from_slice(&sec_block_size.to_le_bytes());
+        file_block.extend_from_slice(&sec_content);
+    }
+
+    // Outer envelope: 'A' + u32 total_size + typical + file_block.
+    let producer = b"AnonADI\0";
+    let total_size = 4 + producer.len() as u32 + file_block.len() as u32;
+    let mut blob = Vec::new();
+    blob.push(b'A');
+    blob.extend_from_slice(&total_size.to_le_bytes());
+    blob.extend_from_slice(producer);
+    blob.extend_from_slice(&file_block);
+    blob
 }
 
 /// Evaluate a constant expression at compile time (for initializers).
