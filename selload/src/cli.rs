@@ -4,10 +4,17 @@
 
 use crate::error::{Error, Result};
 
-/// Known ADSP-2156x processor variants.
+/// Known SHARC+ processor variants.
 const KNOWN_PROCESSORS: &[&str] = &[
     "ADSP-21562", "ADSP-21563", "ADSP-21565", "ADSP-21566",
     "ADSP-21567", "ADSP-21568", "ADSP-21569",
+    "ADSP-21571", "ADSP-21573",
+    "ADSP-21583", "ADSP-21584", "ADSP-21587",
+    "ADSP-21593",
+    "ADSP-SC570", "ADSP-SC571", "ADSP-SC572", "ADSP-SC573",
+    "ADSP-SC582", "ADSP-SC583", "ADSP-SC584", "ADSP-SC587",
+    "ADSP-SC588", "ADSP-SC589",
+    "ADSP-SC594", "ADSP-SC598",
 ];
 
 /// Supported boot modes.
@@ -295,6 +302,14 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         return Err(Error::Usage(format!("unknown processor: {processor}")));
     }
 
+    // Default bcode: SPI and OSPI use bcode=1, all other modes use bcode=0.
+    if bcode.is_none() {
+        bcode = Some(match boot_mode {
+            BootMode::Spi | BootMode::Ospi => 1,
+            _ => 0,
+        });
+    }
+
     Ok(Options {
         processor,
         boot_mode,
@@ -330,9 +345,42 @@ mod tests {
         assert_eq!(opts.processor, "ADSP-21569");
         assert_eq!(opts.input_file, "input.dxe");
         assert_eq!(opts.boot_mode, BootMode::Spi);
+        assert_eq!(opts.bcode, Some(1)); // SPI defaults to bcode=1
         assert_eq!(opts.format, OutputFormat::Binary);
         assert!(!opts.crc32_enabled);
         assert!(!opts.verbose);
+    }
+
+    #[test]
+    fn test_spi_default_bcode() {
+        let opts = parse_args(&args(&[
+            "-proc", "ADSP-21569", "-b", "SPI", "input.dxe",
+        ])).unwrap();
+        assert_eq!(opts.bcode, Some(1));
+    }
+
+    #[test]
+    fn test_ospi_default_bcode() {
+        let opts = parse_args(&args(&[
+            "-proc", "ADSP-21569", "-b", "OSPI", "input.dxe",
+        ])).unwrap();
+        assert_eq!(opts.bcode, Some(1));
+    }
+
+    #[test]
+    fn test_spihost_default_bcode() {
+        let opts = parse_args(&args(&[
+            "-proc", "ADSP-21569", "-b", "SPIHOST", "input.dxe",
+        ])).unwrap();
+        assert_eq!(opts.bcode, Some(0));
+    }
+
+    #[test]
+    fn test_explicit_bcode_overrides_default() {
+        let opts = parse_args(&args(&[
+            "-proc", "ADSP-21569", "-bcode", "5", "input.dxe",
+        ])).unwrap();
+        assert_eq!(opts.bcode, Some(5));
     }
 
     #[test]

@@ -3,7 +3,21 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 use crate::error::Result;
+use crate::ldr::Block;
+use std::collections::HashSet;
 use std::io::Write;
+
+/// Compute byte offsets where each block header starts in the serialized
+/// stream.  Used by `write_hex` to align records to block boundaries.
+pub fn block_offsets(blocks: &[Block]) -> HashSet<usize> {
+    let mut offsets = HashSet::new();
+    let mut pos = 0usize;
+    for block in blocks {
+        offsets.insert(pos);
+        pos += block.wire_size();
+    }
+    offsets
+}
 
 /// Write raw binary output.
 pub fn write_binary(data: &[u8], out: &mut dyn Write) -> Result<()> {
@@ -13,10 +27,13 @@ pub fn write_binary(data: &[u8], out: &mut dyn Write) -> Result<()> {
 
 /// Write Intel HEX32 format (type 04 extended linear address + type 00
 /// data records + type 01 EOF).
-pub fn write_hex(data: &[u8], out: &mut dyn Write) -> Result<()> {
+pub fn write_hex(data: &[u8], breaks: &HashSet<usize>, out: &mut dyn Write) -> Result<()> {
     let mut addr: usize = 0;
     let mut current_upper: u16 = 0;
-    let bytes_per_line = 16;
+    let bytes_per_line = 32;
+
+    // Always emit initial extended address record.
+    write_hex_extended_address(out, 0)?;
 
     while addr < data.len() {
         let upper = (addr >> 16) as u16;
@@ -26,7 +43,17 @@ pub fn write_hex(data: &[u8], out: &mut dyn Write) -> Result<()> {
         }
 
         let remaining = data.len() - addr;
-        let count = remaining.min(bytes_per_line);
+
+        // If a block boundary falls within the next line, truncate
+        // the record so the block header starts a new record.
+        let mut count = remaining.min(bytes_per_line);
+        for off in 1..count {
+            if breaks.contains(&(addr + off)) {
+                count = off;
+                break;
+            }
+        }
+
         let offset = (addr & 0xFFFF) as u16;
 
         // If this record would cross a 64K boundary, truncate it
@@ -38,7 +65,7 @@ pub fn write_hex(data: &[u8], out: &mut dyn Write) -> Result<()> {
     }
 
     // EOF record
-    writeln!(out, ":00000001FF")?;
+    write!(out, ":00000001FF\r\n")?;
     Ok(())
 }
 
@@ -46,7 +73,7 @@ pub fn write_hex(data: &[u8], out: &mut dyn Write) -> Result<()> {
 fn write_hex_extended_address(out: &mut dyn Write, upper: u16) -> Result<()> {
     let bytes = upper.to_be_bytes();
     let checksum = ext_addr_checksum(bytes[0], bytes[1]);
-    writeln!(out, ":02000004{:02X}{:02X}{:02X}", bytes[0], bytes[1], checksum)?;
+    write!(out, ":02000004{:02X}{:02X}{:02X}\r\n", bytes[0], bytes[1], checksum)?;
     Ok(())
 }
 
@@ -71,34 +98,30 @@ fn write_hex_data_record(out: &mut dyn Write, offset: u16, data: &[u8]) -> Resul
         sum += u16::from(byte);
     }
     let checksum = 0u8.wrapping_sub(sum as u8);
-    writeln!(out, "{:02X}", checksum)?;
+    write!(out, "{:02X}\r\n", checksum)?;
     Ok(())
 }
 
-/// Write one hex byte per line (ASCII format).
+/// Write one hex byte per line (ASCII format, `0xHH` with CRLF).
 pub fn write_ascii(data: &[u8], out: &mut dyn Write) -> Result<()> {
     for &byte in data {
-        writeln!(out, "{:02X}", byte)?;
+        write!(out, "0x{:02X}\r\n", byte)?;
     }
     Ok(())
 }
 
 /// Write comma-separated hex values suitable for a C include file.
+///
+/// Each byte is emitted as `0xHH,` on its own line (CRLF), except for the
+/// last byte which has no trailing comma.
 pub fn write_include(data: &[u8], out: &mut dyn Write) -> Result<()> {
-    let values_per_line = 16;
+    let last = data.len().saturating_sub(1);
     for (i, &byte) in data.iter().enumerate() {
-        if i > 0 {
-            write!(out, ",")?;
-            if i % values_per_line == 0 {
-                writeln!(out)?;
-            } else {
-                write!(out, " ")?;
-            }
+        if i < last {
+            write!(out, "0x{:02X},\r\n", byte)?;
+        } else {
+            write!(out, "0x{:02X}", byte)?;
         }
-        write!(out, "0x{:02X}", byte)?;
-    }
-    if !data.is_empty() {
-        writeln!(out)?;
     }
     Ok(())
 }
@@ -121,7 +144,7 @@ mod tests {
         let mut out = Vec::new();
         write_ascii(&data, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text, "AB\nCD\n00\n");
+        assert_eq!(text, "0xAB\r\n0xCD\r\n0x00\r\n");
     }
 
     #[test]
@@ -130,41 +153,44 @@ mod tests {
         let mut out = Vec::new();
         write_include(&data, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text, "0x01, 0x02, 0x03\n");
+        assert_eq!(text, "0x01,\r\n0x02,\r\n0x03");
     }
 
     #[test]
-    fn test_write_include_wrapping() {
-        let data: Vec<u8> = (0..20).collect();
+    fn test_write_include_single() {
+        let data = vec![0xFF];
         let mut out = Vec::new();
         write_include(&data, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        // Should wrap after 16 values
-        assert!(text.contains('\n'));
-        let lines: Vec<&str> = text.trim_end().split('\n').collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(text, "0xFF");
     }
 
     #[test]
     fn test_write_hex_simple() {
         let data = vec![0x01, 0x02, 0x03, 0x04];
+        let no_breaks = HashSet::new();
         let mut out = Vec::new();
-        write_hex(&data, &mut out).unwrap();
+        write_hex(&data, &no_breaks, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        // One data record + EOF
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with(":04000000"));
-        assert_eq!(lines[1], ":00000001FF");
+        let lines: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
+        // Extended addr + one data record + EOF
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with(":02000004"));
+        assert!(lines[1].starts_with(":04000000"));
+        assert_eq!(lines[2], ":00000001FF");
     }
 
     #[test]
     fn test_write_hex_eof_only() {
         let data: Vec<u8> = Vec::new();
+        let no_breaks = HashSet::new();
         let mut out = Vec::new();
-        write_hex(&data, &mut out).unwrap();
+        write_hex(&data, &no_breaks, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text.trim(), ":00000001FF");
+        let lines: Vec<&str> = text.split("\r\n").filter(|l| !l.is_empty()).collect();
+        // Extended addr + EOF
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], ":00000001FF");
     }
 
     #[test]

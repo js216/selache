@@ -124,7 +124,11 @@ fn run(opts: &cli::Options) -> error::Result<()> {
     let mut out_file = std::fs::File::create(&output_file)?;
     match opts.format {
         cli::OutputFormat::Binary => format::write_binary(&raw, &mut out_file)?,
-        cli::OutputFormat::Hex => format::write_hex(&raw, &mut out_file)?,
+        cli::OutputFormat::Hex => {
+            // Compute block boundary offsets for record alignment.
+            let breaks = format::block_offsets(&blocks);
+            format::write_hex(&raw, &breaks, &mut out_file)?;
+        }
         cli::OutputFormat::Ascii => format::write_ascii(&raw, &mut out_file)?,
         cli::OutputFormat::Include => format::write_include(&raw, &mut out_file)?,
     }

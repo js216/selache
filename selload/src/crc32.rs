@@ -36,13 +36,16 @@ impl Crc32 {
     }
 
     /// Compute CRC32 over `data` using the precomputed table.
+    ///
+    /// Uses init=0 and no final inversion, matching the SHARC+ boot ROM
+    /// CRC engine.
     pub fn checksum(&self, data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
+        let mut crc = 0u32;
         for &byte in data {
             let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
             crc = (crc >> 8) ^ self.table[idx];
         }
-        crc ^ 0xFFFF_FFFF
+        crc
     }
 }
 
@@ -96,9 +99,8 @@ mod tests {
         let ctx = Crc32::new(DEFAULT_POLYNOMIAL);
         let a = ctx.checksum(&[0x00]);
         let b = ctx.checksum(&[0xFF]);
-        assert_ne!(a, b);
-        // Both should be non-zero for non-trivial polynomials
-        assert_ne!(a, 0);
+        // CRC(0x00) with init=0 is 0 (identity), CRC(0xFF) is non-zero
+        assert_eq!(a, 0);
         assert_ne!(b, 0);
     }
 }
