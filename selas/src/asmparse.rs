@@ -694,16 +694,26 @@ fn try_parse_return(text: &str, line: u32) -> Result<Option<Instruction>> {
 
 fn parse_register_swap(text: &str, line: u32) -> Result<Instruction> {
     // May be compound: "compute , Rn<->Sm"
-    let (swap_text, compute) = if let Some(comma) = find_comma_outside_parens(text) {
-        let before = text[..comma].trim();
-        let after = text[comma + 1..].trim();
+    // Use the LAST comma to split compute from swap, since the compute
+    // part itself may contain commas (e.g. dual add/sub).
+    let all_commas = find_all_commas_outside_parens(text);
+    let (swap_text, compute) = if !all_commas.is_empty() {
+        // Find the comma that separates compute from swap. The swap part
+        // is always "Rn<->Sm" (no commas), so use the last comma.
+        let last_comma = *all_commas.last().unwrap();
+        let before = text[..last_comma].trim();
+        let after = text[last_comma + 1..].trim();
         if after.contains("<->") {
             // "compute , Rn<->Sm"
             let comp = parse_compute_op(before, line)?;
             (after, Some(comp))
         } else if before.contains("<->") {
-            let comp = parse_compute_op(after, line)?;
-            (before, Some(comp))
+            // "Rn<->Sm , compute" — use first comma instead
+            let first_comma = all_commas[0];
+            let b = text[..first_comma].trim();
+            let a = text[first_comma + 1..].trim();
+            let comp = parse_compute_op(a, line)?;
+            (b, Some(comp))
         } else {
             return Err(Error::Parse {
                 line,
