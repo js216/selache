@@ -513,6 +513,18 @@ impl Allocator {
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
+            ReadMr0f { rn } => ReadMr0f { rn: self.get_phys(rn, spill) },
+            ReadMr1f { rn } => ReadMr1f { rn: self.get_phys(rn, spill) },
+            ReadMr2f { rn } => ReadMr2f { rn: self.get_phys(rn, spill) },
+            ReadMr0b { rn } => ReadMr0b { rn: self.get_phys(rn, spill) },
+            ReadMr1b { rn } => ReadMr1b { rn: self.get_phys(rn, spill) },
+            ReadMr2b { rn } => ReadMr2b { rn: self.get_phys(rn, spill) },
+            WriteMr0f { rn } => WriteMr0f { rn: self.get_phys(rn, spill) },
+            WriteMr1f { rn } => WriteMr1f { rn: self.get_phys(rn, spill) },
+            WriteMr2f { rn } => WriteMr2f { rn: self.get_phys(rn, spill) },
+            WriteMr0b { rn } => WriteMr0b { rn: self.get_phys(rn, spill) },
+            WriteMr1b { rn } => WriteMr1b { rn: self.get_phys(rn, spill) },
+            WriteMr2b { rn } => WriteMr2b { rn: self.get_phys(rn, spill) },
         }
     }
 

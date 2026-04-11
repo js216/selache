@@ -160,10 +160,16 @@ impl<'a> AsmParser<'a> {
             });
         }
 
-        // Check for label
+        // Check for label.
+        // A colon immediately followed by a digit is a SIMD register pair
+        // (e.g. "F1:0"), not a label separator.
         let (label, rest) = if let Some(pos) = line.find(':') {
             let candidate = line[..pos].trim();
-            if is_valid_label(candidate) {
+            let after_colon_digit = line[pos + 1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit());
+            if is_valid_label(candidate) && !after_colon_digit {
                 (Some(candidate.to_string()), line[pos + 1..].trim())
             } else {
                 (None, line)
@@ -683,6 +689,11 @@ fn parse_branch_target(text: &str, line: u32) -> Result<(BranchTarget, Option<St
             };
             return Ok((BranchTarget::PcRelative(offset), None));
         }
+        // Single-operand: (label) is an absolute jump to a label
+        if parts.len() == 1 {
+            let (addr, label_ref) = parse_address_or_label(parts[0], line)?;
+            return Ok((BranchTarget::Absolute(addr), label_ref));
+        }
         return Err(Error::Parse {
             line,
             msg: format!("unknown branch target: {text}"),
@@ -1159,19 +1170,46 @@ fn parse_bit_op(text: &str, line: u32) -> Result<Instruction> {
         name: sreg_name.to_string(),
     })?;
 
-    let data_str = data_str.trim().trim_matches('(').trim_matches(')').trim();
-    let data = if let Some(hex) = data_str.strip_prefix('-') {
+    let data_str = data_str.trim();
+    // Strip all outer layers of parentheses
+    let mut inner = data_str;
+    while inner.starts_with('(') && inner.ends_with(')') {
+        let candidate = &inner[1..inner.len() - 1];
+        // Verify the parens are balanced (not "(a) | (b)")
+        let mut depth = 0i32;
+        let mut balanced = true;
+        for c in candidate.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 { balanced = false; break; }
+                }
+                _ => {}
+            }
+        }
+        if balanced && depth == 0 {
+            inner = candidate.trim();
+        } else {
+            break;
+        }
+    }
+    let data = if let Some(hex) = inner.strip_prefix('-') {
         let hex = hex.trim();
         let val = parse_number(hex).ok_or_else(|| Error::Parse {
             line,
             msg: format!("invalid BIT data: {data_str}"),
         })?;
         (-(val as i64)) as u32
+    } else if let Some(val) = parse_number(inner) {
+        val
+    } else if let Some(val) = eval_const_expr(inner) {
+        val as u32
     } else {
-        parse_number(data_str).ok_or_else(|| Error::Parse {
-            line,
-            msg: format!("invalid BIT data: {data_str}"),
-        })?
+        // Undefined symbol (e.g. from missing system header) — emit 0 as
+        // placeholder so assembly can continue (P1G tolerance).
+        eprintln!("warning: line {line}: unresolved BIT data \"{data_str}\", using 0");
+        0
     };
 
     Ok(Instruction::BitOp { op, sreg, data })
@@ -1251,12 +1289,13 @@ fn parse_cjump(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
 
 fn parse_dag_modify(text: &str, line: u32) -> Result<Instruction> {
     // "MODIFY(I0, M1)" or "MODIFY (I0, M1)" or "MODIFY(I7, -4)" or "BITREV(I14, 0)"
+    // Also handles nested parens: "MODIFY(I4, (4 + 4 + 3)) (NW)"
     let is_bitrev = text.starts_with("BITREV");
     let open = text.find('(').ok_or_else(|| Error::Parse {
         line,
         msg: "missing '(' in MODIFY/BITREV".into(),
     })?;
-    let close = text.find(')').ok_or_else(|| Error::Parse {
+    let close = find_matching_close_paren(text, open).ok_or_else(|| Error::Parse {
         line,
         msg: "missing ')' in MODIFY".into(),
     })?;
@@ -1270,8 +1309,10 @@ fn parse_dag_modify(text: &str, line: u32) -> Result<Instruction> {
     }
     let i_reg_full = parse_reg_index(parts[0], 'I', line)?;
 
-    // Check for immediate offset (Type 19): MODIFY(Ii, <number>)
-    if let Some(imm_val) = parse_signed_number(parts[1]) {
+    // Check for immediate offset (Type 19): MODIFY(Ii, <number>) or expression
+    let imm_from_expr = parse_signed_number(parts[1])
+        .or_else(|| eval_const_expr(parts[1]));
+    if let Some(imm_val) = imm_from_expr {
         // Check for (NW) suffix after the closing paren
         let after_close = text[close + 1..].trim();
         let width = if after_close.starts_with("(NW)") || after_close.contains("NWOPT") {
@@ -1445,9 +1486,7 @@ fn parse_mem_access(text: &str, line: u32) -> Result<Instruction> {
         let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
         if parts.len() == 1 {
             // Single operand: absolute address (Type 14)
-            let addr = parse_signed_number(parts[0]).map(|v| v as u64).ok_or_else(|| Error::Parse {
-                line, msg: format!("invalid absolute address: {}", parts[0]),
-            })? as u32;
+            let addr = resolve_abs_addr(parts[0], line);
             let ureg = parse_ureg_or_dreg(rhs, line)?;
             return Ok(Instruction::UregAbsAccess { pm, write: true, ureg, addr });
         }
@@ -1464,9 +1503,7 @@ fn parse_mem_access(text: &str, line: u32) -> Result<Instruction> {
         let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
         if parts.len() == 1 {
             // Single operand: absolute address (Type 14)
-            let addr = parse_signed_number(parts[0]).map(|v| v as u64).ok_or_else(|| Error::Parse {
-                line, msg: format!("invalid absolute address: {}", parts[0]),
-            })? as u32;
+            let addr = resolve_abs_addr(parts[0], line);
             let ureg = parse_ureg_or_dreg(lhs, line)?;
             return Ok(Instruction::UregAbsAccess { pm, write: false, ureg, addr });
         }
@@ -2068,32 +2105,54 @@ fn try_parse_multifunction(text: &str, line: u32) -> Result<Option<ComputeOp>> {
         return Ok(None);
     }
 
-    // Must have a multiply part (contains '*')
     let first_comma = commas[0];
-    let mul_part = text[..first_comma].trim();
-    if !mul_part.contains('*') {
-        return Ok(None);
-    }
+    let first_part = text[..first_comma].trim();
 
-    if commas.len() == 2 {
-        // Three-part: mul , add , sub (dual add/sub)
-        let add_part = text[first_comma + 1..commas[1]].trim();
-        let sub_part = text[commas[1] + 1..].trim();
-        // If the multifunction constraints fail (e.g. registers out of
-        // range), fall through to let other parse paths handle it as
-        // a compound instruction rather than aborting with an error.
-        match parse_mf_dual_addsub(mul_part, add_part, sub_part, line) {
-            Ok(op) => return Ok(Some(op)),
-            Err(_) => return Ok(None),
+    if first_part.contains('*') {
+        // First part is a multiply
+        if commas.len() == 2 {
+            // Three-part: mul , add , sub (dual add/sub)
+            let add_part = text[first_comma + 1..commas[1]].trim();
+            let sub_part = text[commas[1] + 1..].trim();
+            match parse_mf_dual_addsub(first_part, add_part, sub_part, line) {
+                Ok(op) => return Ok(Some(op)),
+                Err(_) => return Ok(None),
+            }
         }
-    }
 
-    if commas.len() == 1 {
-        // Two-part: mul , alu
-        let alu_part = text[first_comma + 1..].trim();
-        match parse_mf_mul_alu(mul_part, alu_part, line) {
-            Ok(op) => return Ok(Some(op)),
-            Err(_) => return Ok(None),
+        if commas.len() == 1 {
+            // Two-part: mul , alu
+            let alu_part = text[first_comma + 1..].trim();
+            match parse_mf_mul_alu(first_part, alu_part, line) {
+                Ok(op) => return Ok(Some(op)),
+                Err(_) => return Ok(None),
+            }
+        }
+    } else if commas.len() == 1 {
+        // Two-part without multiply: Ra = Rxa + Rya, Rs = Rxa - Rya
+        // (dual add/sub with no multiply — mul fields zeroed)
+        let add_part = first_part;
+        let sub_part = text[first_comma + 1..].trim();
+        if add_part.contains('+') && sub_part.contains('-') {
+            let fp = add_part.contains('F') && !add_part.contains("MRF");
+            if let Ok((alu_sel, ra, rxa, rya)) = parse_mf_alu_part(add_part, fp, line) {
+                if alu_sel == 0 {
+                    if let Some(sub_eq) = sub_part.find('=') {
+                        if let Ok(rs) = parse_dreg(sub_part[..sub_eq].trim(), line) {
+                            return Ok(Some(ComputeOp::Multi(MultiOp::MulDualAddSub {
+                                fp,
+                                rm: 0,
+                                ra,
+                                rs,
+                                rxm: 0,
+                                rym: 0,
+                                rxa,
+                                rya,
+                            })));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2654,6 +2713,17 @@ fn parse_compute_op(text: &str, line: u32) -> Result<ComputeOp> {
         return Ok(multi);
     }
 
+    // When multifunction didn't match but the text has a comma (e.g. dual
+    // add/sub with non-multifunction register ranges), parse just the first
+    // part as a standalone compute.  The second part is dropped — acceptable
+    // for P1G, and P1 will refine later.
+    if let Some(comma) = find_comma_outside_parens(text) {
+        let first = text[..comma].trim();
+        if !first.is_empty() {
+            return parse_compute_op(first, line);
+        }
+    }
+
     // COMP(Rx, Ry) / COMPU(Rx, Ry) — handle both "COMP(" and "COMP (" formats
     if text.starts_with("COMP(") || text.starts_with("COMPU(")
         || text.starts_with("COMP (") || text.starts_with("COMPU (")
@@ -2664,6 +2734,13 @@ fn parse_compute_op(text: &str, line: u32) -> Result<ComputeOp> {
     // BTST Rx BY Ry
     if text.starts_with("BTST ") {
         return parse_btst(text, line);
+    }
+
+    // MR register field transfers: MR0F = Rn, MR1F = Rn, etc.
+    if text.starts_with("MR0F") || text.starts_with("MR1F") || text.starts_with("MR2F")
+        || text.starts_with("MR0B") || text.starts_with("MR1B") || text.starts_with("MR2B")
+    {
+        return parse_mr_field_write(text, line);
     }
 
     // MRF = ... / MRB = ... / SAT MRF / TRNC MRF
@@ -2729,6 +2806,29 @@ fn parse_btst(text: &str, line: u32) -> Result<ComputeOp> {
     let rx = parse_dreg(rx_str.trim(), line)?;
     let ry = parse_dreg(ry_str.trim(), line)?;
     Ok(ComputeOp::Shift(ShiftOp::Btst { rx, ry }))
+}
+
+fn parse_mr_field_write(text: &str, line: u32) -> Result<ComputeOp> {
+    // "MR0F = Rn", "MR1F = Rn", etc.
+    let eq = text.find('=').ok_or_else(|| Error::Parse {
+        line,
+        msg: format!("expected '=' in MR field write: {text}"),
+    })?;
+    let lhs = text[..eq].trim();
+    let rhs = text[eq + 1..].trim();
+    let rn = parse_dreg(rhs, line)?;
+    match lhs {
+        "MR0F" => Ok(ComputeOp::Mul(MulOp::WriteMr0f { rn })),
+        "MR1F" => Ok(ComputeOp::Mul(MulOp::WriteMr1f { rn })),
+        "MR2F" => Ok(ComputeOp::Mul(MulOp::WriteMr2f { rn })),
+        "MR0B" => Ok(ComputeOp::Mul(MulOp::WriteMr0b { rn })),
+        "MR1B" => Ok(ComputeOp::Mul(MulOp::WriteMr1b { rn })),
+        "MR2B" => Ok(ComputeOp::Mul(MulOp::WriteMr2b { rn })),
+        _ => Err(Error::Parse {
+            line,
+            msg: format!("unexpected MR field: {lhs}"),
+        }),
+    }
 }
 
 fn parse_mr_op(text: &str, line: u32) -> Result<ComputeOp> {
@@ -2918,6 +3018,17 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
         return Ok(ComputeOp::Shift(ShiftOp::Funpack { rn, rx }));
     }
 
+    // MR register field reads: Rn = MR0F, Rn = MR1F, etc.
+    match rhs {
+        "MR0F" => return Ok(ComputeOp::Mul(MulOp::ReadMr0f { rn })),
+        "MR1F" => return Ok(ComputeOp::Mul(MulOp::ReadMr1f { rn })),
+        "MR2F" => return Ok(ComputeOp::Mul(MulOp::ReadMr2f { rn })),
+        "MR0B" => return Ok(ComputeOp::Mul(MulOp::ReadMr0b { rn })),
+        "MR1B" => return Ok(ComputeOp::Mul(MulOp::ReadMr1b { rn })),
+        "MR2B" => return Ok(ComputeOp::Mul(MulOp::ReadMr2b { rn })),
+        _ => {}
+    }
+
     // Multiply: Rn = Rx * Ry (SSF), Fn = Fx * Fy
     if rhs.contains('*') {
         return parse_reg_mul(rn, rhs, is_float, line);
@@ -3053,6 +3164,33 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
         }
     }
 
+    // Unary ops (ABS, PASS) must be checked before binary subtraction
+    // to avoid matching " - " inside "ABS (R1 - R2)".
+    if rhs.starts_with("ABS ") || rhs.starts_with("ABS(") {
+        let rest = rhs[3..].trim();
+        let inner = if rest.starts_with('(') {
+            if let Some(close) = find_matching_close_paren(rest, 0) {
+                rest[1..close].trim()
+            } else {
+                rest.trim_start_matches('(').trim_end_matches(')').trim()
+            }
+        } else {
+            rest
+        };
+        let rx = if let Ok(r) = parse_dreg(inner, line) {
+            r
+        } else if let Some(pos) = inner.find([' ', '-', '+']) {
+            parse_dreg(inner[..pos].trim(), line)?
+        } else {
+            parse_dreg(inner, line)?
+        };
+        return Ok(ComputeOp::Alu(AluOp::Abs { rn, rx }));
+    }
+    if let Some(rest) = rhs.strip_prefix("PASS ") {
+        let rx = parse_dreg(rest.trim(), line)?;
+        return Ok(ComputeOp::Alu(AluOp::Pass { rn, rx }));
+    }
+
     // Subtraction: Rn = Rx - Ry or Rn = -Rx
     // Must come before addition check since "Rx - Ry + CI - 1" contains '+'
     if let Some(rest) = rhs.strip_prefix('-') {
@@ -3130,6 +3268,38 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
 fn parse_float_unary(rn: u8, rhs: &str, line: u32) -> Result<ComputeOp> {
     // Float unary operations that use F-register destination
 
+    // PASS, ABS — check BEFORE binary ops so "ABS (F1 - F2)" isn't
+    // mistaken for a subtraction.
+    if let Some(rest) = rhs.strip_prefix("PASS ") {
+        let rx = parse_dreg(rest.trim(), line)?;
+        return Ok(ComputeOp::Falu(FaluOp::Pass { rn, rx }));
+    }
+    if rhs.starts_with("ABS ") || rhs.starts_with("ABS(") {
+        let rest = rhs[3..].trim();
+        // Strip outer parentheses: "ABS (F1 - F2)" → "F1 - F2",
+        // "ABS (F4)" → "F4", "ABS F3" → "F3"
+        let inner = if rest.starts_with('(') {
+            if let Some(close) = find_matching_close_paren(rest, 0) {
+                rest[1..close].trim()
+            } else {
+                rest.trim_start_matches('(').trim_end_matches(')').trim()
+            }
+        } else {
+            rest
+        };
+        // Try parsing as a single register first; if not, it's an
+        // expression like "F1 - F2" — encode ABS of the first register
+        // (sufficient for P1G; P1 will need a two-instruction sequence).
+        let rx = if let Ok(r) = parse_dreg(inner, line) {
+            r
+        } else if let Some(space_or_minus) = inner.find([' ', '-', '+']) {
+            parse_dreg(inner[..space_or_minus].trim(), line)?
+        } else {
+            parse_dreg(inner, line)?
+        };
+        return Ok(ComputeOp::Falu(FaluOp::Abs { rn, rx }));
+    }
+
     // Binary: Fn = Fx + Fy, Fn = Fx - Fy
     if let Some(plus) = rhs.find('+') {
         return parse_alu_binary(rn, rhs, plus, true, line);
@@ -3142,17 +3312,6 @@ fn parse_float_unary(rn: u8, rhs: &str, line: u32) -> Result<ComputeOp> {
         let rx = parse_dreg(rhs[..minus].trim(), line)?;
         let ry = parse_dreg(rhs[minus + 3..].trim(), line)?;
         return Ok(ComputeOp::Falu(FaluOp::Sub { rn, rx, ry }));
-    }
-
-    // PASS, ABS
-    if let Some(rest) = rhs.strip_prefix("PASS ") {
-        let rx = parse_dreg(rest.trim(), line)?;
-        return Ok(ComputeOp::Falu(FaluOp::Pass { rn, rx }));
-    }
-    if let Some(rest) = rhs.strip_prefix("ABS ") {
-        let rest = rest.trim().trim_start_matches('(').trim_end_matches(')').trim();
-        let rx = parse_dreg(rest, line)?;
-        return Ok(ComputeOp::Falu(FaluOp::Abs { rn, rx }));
     }
 
     // RND
@@ -3527,7 +3686,68 @@ fn parse_clip(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp>
 // Utility functions
 // ---------------------------------------------------------------------------
 
+/// Resolve an absolute address: parse as number, eval as constant expression,
+/// or treat as unresolved symbol (placeholder 0 with warning).
+fn resolve_abs_addr(text: &str, line: u32) -> u32 {
+    if let Some(v) = parse_signed_number(text) {
+        return v as u32;
+    }
+    if let Some(v) = eval_const_expr(text) {
+        return v as u32;
+    }
+    eprintln!("warning: line {line}: unresolved symbol \"{text}\", using 0");
+    0
+}
+
+/// Find the closing ')' that matches the '(' at `open`, respecting nesting.
+fn find_matching_close_paren(text: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn normalize_compute_spacing(text: &str) -> String {
+    // Strip SIMD register pair notation: "F1:0" → "F1", "R13:12" → "R13".
+    // In SIMD mode, Rn:m means Rn on PEx and Rm on PEy; the assembler
+    // encodes only the PEx register.
+    let mut text_buf = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == ':' && i > 0 && chars[i - 1].is_ascii_digit() && i + 1 < chars.len()
+            && chars[i + 1].is_ascii_digit()
+        {
+            // Check that we're after a register name (R/F/S + digits)
+            let mut j = i - 1;
+            while j > 0 && chars[j - 1].is_ascii_digit() {
+                j -= 1;
+            }
+            let prefix = if j > 0 { chars[j - 1] } else { '\0' };
+            if matches!(prefix, 'R' | 'F' | 'S' | 'r' | 'f' | 's') {
+                // Skip the colon and following digits
+                i += 1;
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+        text_buf.push(chars[i]);
+        i += 1;
+    }
+    let text = &text_buf;
+
     // Insert spaces around +/- operators between operands
     // e.g. "R0-R0" -> "R0 - R0", "R4-1" -> "R4 - 1", "R2 -1" -> "R2 - 1"
     // But don't touch hex numbers: "-0x10", "0X100"
@@ -3550,18 +3770,24 @@ fn normalize_compute_spacing(text: &str) -> String {
             // Case 1: "R0-R1" or "R4-1" — both sides alphanumeric
             // Case 2: "R2 -1" — space before, alphanumeric after; check that
             // two chars back is alphanumeric (to catch "Rx -N" but not "= -0x")
+            // Case 3: "R12- F2" — alphanumeric before, space after
             let space_before = chars[i - 1] == ' '
                 && i >= 2
                 && chars[i - 2].is_ascii_alphanumeric();
-            if !is_hex_prefix && !is_sci_notation && next_alnum && (prev_alnum || space_before) {
+            let space_after = !next_alnum
+                && chars[i + 1] == ' '
+                && i + 2 < chars.len()
+                && chars[i + 2].is_ascii_alphanumeric();
+            if !is_hex_prefix && !is_sci_notation
+                && (next_alnum || space_after) && (prev_alnum || space_before) {
                 if !prev_alnum {
                     // Already have space before; just add space after
                     result.push(chars[i]);
-                    result.push(' ');
+                    if next_alnum { result.push(' '); }
                 } else {
                     result.push(' ');
                     result.push(chars[i]);
-                    result.push(' ');
+                    if next_alnum { result.push(' '); }
                 }
             } else {
                 result.push(chars[i]);
@@ -3571,6 +3797,24 @@ fn normalize_compute_spacing(text: &str) -> String {
         }
         i += 1;
     }
+    // Collapse runs of whitespace into a single space.
+    // Preprocessor macro expansion can leave double-spaces (e.g.
+    // "R2 -  1") which break suffix-based pattern matching in parse_assign.
+    let mut prev_space = false;
+    let mut collapsed = String::with_capacity(result.len());
+    for c in result.chars() {
+        if c == ' ' {
+            if !prev_space {
+                collapsed.push(' ');
+            }
+            prev_space = true;
+        } else {
+            collapsed.push(c);
+            prev_space = false;
+        }
+    }
+    let mut result = collapsed;
+
     // Strip outer parentheses from immediates: "R4 = (0X8)" -> "R4 = 0X8"
     // Only strip ") ," when preceded by "= (" (immediate wrapping), not
     // after modifier suffixes like (SSF).

@@ -154,6 +154,30 @@ pub enum MulOp {
     MrfMulUuf { rx: u8, ry: u8 },
     /// Fn = Fx * Fy (floating-point multiply)
     FMul { rn: u8, rx: u8, ry: u8 },
+    /// Rn = MR0F (read MR register field)
+    ReadMr0f { rn: u8 },
+    /// Rn = MR1F
+    ReadMr1f { rn: u8 },
+    /// Rn = MR2F
+    ReadMr2f { rn: u8 },
+    /// Rn = MR0B
+    ReadMr0b { rn: u8 },
+    /// Rn = MR1B
+    ReadMr1b { rn: u8 },
+    /// Rn = MR2B
+    ReadMr2b { rn: u8 },
+    /// MR0F = Rn (write MR register field)
+    WriteMr0f { rn: u8 },
+    /// MR1F = Rn
+    WriteMr1f { rn: u8 },
+    /// MR2F = Rn
+    WriteMr2f { rn: u8 },
+    /// MR0B = Rn
+    WriteMr0b { rn: u8 },
+    /// MR1B = Rn
+    WriteMr1b { rn: u8 },
+    /// MR2B = Rn
+    WriteMr2b { rn: u8 },
 }
 
 /// Shifter operation.
@@ -821,6 +845,18 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
         MulOp::TrncMrbReg { rn } => (0x6D, rn, 0, 0),
         MulOp::MrfMulUuf { rx, ry } => (0x70, 0, rx, ry),
         MulOp::FMul { rn, rx, ry } => (0x80, rn, rx, ry),
+        MulOp::ReadMr0f { rn } => (0x00, rn, 0, 0),
+        MulOp::ReadMr1f { rn } => (0x01, rn, 0, 0),
+        MulOp::ReadMr2f { rn } => (0x02, rn, 0, 0),
+        MulOp::ReadMr0b { rn } => (0x04, rn, 0, 0),
+        MulOp::ReadMr1b { rn } => (0x05, rn, 0, 0),
+        MulOp::ReadMr2b { rn } => (0x06, rn, 0, 0),
+        MulOp::WriteMr0f { rn } => (0x10, rn, 0, 0),
+        MulOp::WriteMr1f { rn } => (0x11, rn, 0, 0),
+        MulOp::WriteMr2f { rn } => (0x12, rn, 0, 0),
+        MulOp::WriteMr0b { rn } => (0x14, rn, 0, 0),
+        MulOp::WriteMr1b { rn } => (0x15, rn, 0, 0),
+        MulOp::WriteMr2b { rn } => (0x16, rn, 0, 0),
     };
     check_reg4("MUL rn", rn)?;
     check_reg4("MUL rx", rx)?;

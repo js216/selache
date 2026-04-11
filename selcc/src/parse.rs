@@ -392,7 +392,15 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            let name = self.expect_ident()?;
+            // Handle parenthesized declarator name: type (name)(params)
+            let name = if self.current == Token::LParen && !self.is_fnptr_declarator() {
+                self.advance()?; // skip (
+                let n = self.expect_ident()?;
+                self.expect(&Token::RParen)?;
+                n
+            } else {
+                self.expect_ident()?
+            };
 
             if self.current == Token::LParen {
                 // Function definition.
@@ -412,7 +420,12 @@ impl<'a> Parser<'a> {
                         if self.current == Token::LParen && self.is_fnptr_declarator() {
                             self.advance()?; // (
                             self.expect(&Token::Star)?;
-                            let pname = self.expect_ident()?;
+                            // Name is optional: void (*)(void) vs void (*fp)(void)
+                            let pname = if let Token::Ident(_) = &self.current {
+                                self.expect_ident()?
+                            } else {
+                                format!("__param{}", params.len())
+                            };
                             self.expect(&Token::RParen)?;
                             let fp_params = self.parse_fnptr_params()?;
                             let fnptr_ty = Type::FunctionPtr {

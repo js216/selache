@@ -91,6 +91,8 @@ impl Preprocessor {
                 .insert("__ADSP2156x__".to_string(), simple("1"));
             self.defines
                 .insert("__ADSP215xx__".to_string(), simple("1"));
+            self.defines
+                .insert("__ADSPSC5xx__".to_string(), simple("1"));
         }
 
         // Generic SHARC macros
@@ -357,13 +359,6 @@ impl Preprocessor {
             }
         }
 
-        // Handle logical NOT
-        if let Some(inner) = expr.strip_prefix('!') {
-            let inner = inner.trim();
-            // !DEFINED(sym) or !(expr)
-            return !self.eval_expr(inner);
-        }
-
         // Split on || (lowest precedence)
         if let Some(pos) = find_top_level_op(expr, "||") {
             let left = &expr[..pos];
@@ -376,6 +371,13 @@ impl Preprocessor {
             let left = &expr[..pos];
             let right = &expr[pos + 2..];
             return self.eval_expr(left) && self.eval_expr(right);
+        }
+
+        // Handle logical NOT (higher precedence than && / ||)
+        if let Some(inner) = expr.strip_prefix('!') {
+            let inner = inner.trim();
+            // !DEFINED(sym) or !(expr)
+            return !self.eval_expr(inner);
         }
 
         // DEFINED(sym) or defined(sym)
