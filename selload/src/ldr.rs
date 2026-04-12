@@ -687,17 +687,33 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
             }
         }
 
+        // Check if the section's end is within another section's
+        // address range.  If so, the section overlaps with a
+        // lower-priority one and writing 2 bytes past its natural
+        // end would corrupt valid data that will be loaded later.
+        let sec_end = sec.addr + sec.raw.len() as u32;
+        let overlaps_other = sections.iter().any(|other| {
+            other.addr != sec.addr
+                && other.addr <= sec_end
+                && sec_end < other.addr + other.raw.len() as u32
+        });
+
         // Medium-sized SwCode sections in MBS+NoFill mode require an
         // internal split at section offset 4608 with a -2 address
         // shift and +4 byte extension for the second half.  Only
-        // applies to single-segment (no fills) SwCode sections in a
-        // specific size range.
+        // applies to isolated single-segment SwCode sections with a
+        // 4-byte-aligned base address in a specific size range.
+        // Overlapping sections skip the split because extending past
+        // the section end would overwrite valid data in another
+        // section.
         let sw_split_at: Option<usize> = if !use_fill
             && opts.max_block_size.is_some()
             && is_sw_code
+            && sec.addr % 4 == 0
             && sec.raw.len() > 11000
             && sec.raw.len() < 20000
             && segments.len() == 1
+            && !overlaps_other
         {
             Some(4608)
         } else {
