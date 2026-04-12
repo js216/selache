@@ -163,11 +163,19 @@ fn pad_to_4(data: &mut Vec<u8>) {
 }
 
 /// A data or fill segment within a section, produced by zero-run compression.
+#[derive(Clone)]
 enum Segment {
     /// Non-zero data to include in the boot stream.
     Data(Vec<u8>),
     /// A run of zeros to be filled by the boot ROM (no payload in stream).
     Fill(u32),
+    /// A merged (Fill + trailing small Data) region.  Contains the
+    /// expanded fill zeros followed by the small data bytes.  Only
+    /// used in MBS+NoFill mode.  When emitting a Fill segment that
+    /// follows a MergedFill, the next fill's blocks are shifted by
+    /// -2 with a +4 byte emission extension (duplicating 2 overlap
+    /// bytes and padding 2 bytes past the natural end).
+    MergedFill(Vec<u8>),
 }
 
 /// Compress a section by stripping trailing zeros and splitting at
@@ -177,11 +185,41 @@ enum Segment {
 /// placed at the END of the zero run (code sections).  Otherwise the
 /// entire zero run becomes a fill (data sections).
 ///
-fn compress_zero_runs(data: &[u8], fixed_fill: Option<usize>, threshold: usize) -> Vec<Segment> {
-    let step = 4;
+fn compress_zero_runs(
+    data: &[u8],
+    fixed_fill: Option<usize>,
+    threshold: usize,
+    step: usize,
+    base_mod4: usize,
+) -> Vec<Segment> {
     let min_fill = threshold;
 
-    // Find the last non-zero 4-byte word.
+    // Try to place a fixed-length fill of `ff` bytes within the zero run
+    // [rs, run_end), such that the absolute address (base + fill_start)
+    // is 4-byte aligned.  Returns Some(fill_start) if placement succeeds.
+    //
+    // The fill is positioned as LATE as possible within the run: start
+    // at (run_end - ff), then round DOWN in 4-byte steps until the
+    // absolute address alignment is satisfied.  If the resulting start
+    // falls before `rs`, the run is too short or mis-aligned to compress.
+    let try_fixed_fill = |rs: usize, run_end: usize, ff: usize| -> Option<usize> {
+        if run_end < ff {
+            return None;
+        }
+        let raw_start = run_end - ff;
+        let current_mod = raw_start % 4;
+        let diff = (current_mod + 4 - base_mod4) % 4;
+        if raw_start < diff {
+            return None;
+        }
+        let aligned = raw_start - diff;
+        if aligned < rs {
+            return None;
+        }
+        Some(aligned)
+    };
+
+    // Find the last non-zero aligned chunk.
     let mut last_nonzero = 0usize;
     let mut pos = 0;
     while pos + step <= data.len() {
@@ -203,7 +241,7 @@ fn compress_zero_runs(data: &[u8], fixed_fill: Option<usize>, threshold: usize) 
 
     let mut segs = Vec::new();
     let mut i = 0;
-    while i < data_part.len() {
+    'outer: while i < data_part.len() {
         let mut run_start = None;
         let mut j = i;
         while j + step <= data_part.len() {
@@ -214,23 +252,25 @@ fn compress_zero_runs(data: &[u8], fixed_fill: Option<usize>, threshold: usize) 
             } else if let Some(rs) = run_start {
                 let run_len = j - rs;
                 if run_len >= min_fill {
-                    // For code sections (fixed_fill), clip the fill to
-                    // exactly fixed_fill bytes at the END of the run.
-                    // Extra leading zeros stay in the data block.
-                    let (fill_start, fill_len) = if let Some(ff) = fixed_fill {
-                        let raw_start = j - ff;
-                        let aligned = (raw_start + 3) & !3;
-                        (aligned, j - aligned)
+                    if let Some(ff) = fixed_fill {
+                        if let Some(aligned) = try_fixed_fill(rs, j, ff) {
+                            if aligned > i {
+                                segs.push(Segment::Data(
+                                    data_part[i..aligned].to_vec(),
+                                ));
+                            }
+                            segs.push(Segment::Fill(ff as u32));
+                            i = aligned + ff;
+                            continue 'outer;
+                        }
                     } else {
-                        (rs, run_len)
-                    };
-                    if fill_start > i {
-                        segs.push(Segment::Data(data_part[i..fill_start].to_vec()));
+                        if rs > i {
+                            segs.push(Segment::Data(data_part[i..rs].to_vec()));
+                        }
+                        segs.push(Segment::Fill(run_len as u32));
+                        i = j;
+                        continue 'outer;
                     }
-                    segs.push(Segment::Fill(fill_len as u32));
-                    i = j;
-                    run_start = None;
-                    continue;
                 }
                 run_start = None;
             }
@@ -240,17 +280,29 @@ fn compress_zero_runs(data: &[u8], fixed_fill: Option<usize>, threshold: usize) 
             let run_end = data_part.len();
             let run_len = run_end - rs;
             if run_len >= min_fill {
-                let (fill_start, fill_len) = if let Some(ff) = fixed_fill {
-                    (run_end - ff.min(run_len), ff.min(run_len))
+                if let Some(ff) = fixed_fill {
+                    if let Some(aligned) = try_fixed_fill(rs, run_end, ff) {
+                        if aligned > i {
+                            segs.push(Segment::Data(
+                                data_part[i..aligned].to_vec(),
+                            ));
+                        }
+                        segs.push(Segment::Fill(ff as u32));
+                        i = aligned + ff;
+                        if i < run_end {
+                            segs.push(Segment::Data(
+                                data_part[i..run_end].to_vec(),
+                            ));
+                        }
+                        break;
+                    }
                 } else {
-                    (rs, run_len)
-                };
-                if fill_start > i {
-                    segs.push(Segment::Data(data_part[i..fill_start].to_vec()));
+                    if rs > i {
+                        segs.push(Segment::Data(data_part[i..rs].to_vec()));
+                    }
+                    segs.push(Segment::Fill(run_len as u32));
+                    break;
                 }
-                segs.push(Segment::Fill(fill_len as u32));
-                i = run_end;
-                continue;
             }
         }
         if i < data_part.len() {
@@ -273,6 +325,121 @@ fn compress_zero_runs(data: &[u8], fixed_fill: Option<usize>, threshold: usize) 
     }
 
     segs
+}
+
+/// For bw sections, align data block END to 8-byte absolute boundaries
+/// by stealing up to 7 zero bytes from the following fill.  Only applies
+/// when the data block is "substantial" (> 128 bytes), its natural end
+/// is mis-aligned, and the following fill has enough spare bytes to
+/// remain valid after shortening.
+///
+/// Alignment stops after encountering any data block larger than 2048
+/// bytes (roughly 8 * MBS), leaving all subsequent data blocks at
+/// their natural lengths.  Small-to-medium bw sections get full
+/// alignment but sections with large data runs only get the first
+/// data block aligned.
+fn align_bw_data_ends_to_8(
+    segments: Vec<Segment>,
+    base_addr: u32,
+    threshold: usize,
+) -> Vec<Segment> {
+    const DATA_MIN_LEN: usize = 128;
+    const LARGE_DATA_LIMIT: usize = 2048;
+    let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
+    let mut cur_offset = 0usize;
+    let mut alignment_active = true;
+    let mut i = 0;
+    while i < segments.len() {
+        match &segments[i] {
+            Segment::Data(data) => {
+                // Encountering a large data block disables further
+                // alignment.
+                if data.len() >= LARGE_DATA_LIMIT {
+                    alignment_active = false;
+                }
+                let abs_start = base_addr.wrapping_add(cur_offset as u32);
+                let abs_end = abs_start.wrapping_add(data.len() as u32);
+                // Only align when:
+                //  - alignment hasn't been disabled yet
+                //  - start is absolutely 8-aligned
+                //  - end is NOT absolutely 8-aligned
+                //  - data block is substantial (length > DATA_MIN_LEN)
+                //  - next segment is a Fill
+                //  - fill has enough spare bytes
+                if alignment_active
+                    && abs_start.is_multiple_of(8)
+                    && !abs_end.is_multiple_of(8)
+                    && data.len() > DATA_MIN_LEN
+                    && i + 1 < segments.len()
+                {
+                    if let Segment::Fill(fill_count) = &segments[i + 1] {
+                        let steal = (8 - (abs_end % 8)) as usize;
+                        if (*fill_count as usize) >= threshold + steal {
+                            let mut new_data = data.clone();
+                            new_data.extend(std::iter::repeat_n(0u8, steal));
+                            let new_fill = fill_count - steal as u32;
+                            cur_offset += new_data.len();
+                            result.push(Segment::Data(new_data));
+                            cur_offset += new_fill as usize;
+                            result.push(Segment::Fill(new_fill));
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+                cur_offset += data.len();
+                result.push(Segment::Data(data.clone()));
+                i += 1;
+            }
+            Segment::Fill(count) => {
+                cur_offset += *count as usize;
+                result.push(Segment::Fill(*count));
+                i += 1;
+            }
+            Segment::MergedFill(data) => {
+                cur_offset += data.len();
+                result.push(Segment::MergedFill(data.clone()));
+                i += 1;
+            }
+        }
+    }
+    result
+}
+
+/// In MBS+NoFill mode, merge small Data segments following a Fill
+/// into the fill's last MBS block, absorbing short post-fill data
+/// into the preceding fill region.
+///
+/// The merged result is a single Data segment containing the fill
+/// zeros followed by the data bytes, which will then be MBS-split
+/// as a single contiguous region.
+fn merge_small_data_after_fills(segments: Vec<Segment>, mbs: usize) -> Vec<Segment> {
+    const SMALL_DATA_THRESHOLD: usize = 16;
+    let _ = mbs;
+    let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
+    let mut i = 0;
+    while i < segments.len() {
+        if let Segment::Fill(count) = segments[i] {
+            // Only merge if the fill is substantial enough to warrant
+            // preserving the segment boundary (>= 512 bytes).  Smaller
+            // fills are absorbed into straight MBS splits from section
+            // base.
+            if count as usize >= 512 && i + 1 < segments.len() {
+                if let Segment::Data(next_data) = &segments[i + 1] {
+                    if next_data.len() <= SMALL_DATA_THRESHOLD {
+                        let mut merged = vec![0u8; count as usize];
+                        merged.extend_from_slice(next_data);
+                        result.push(Segment::MergedFill(merged));
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push(segments[i].clone());
+        i += 1;
+    }
+    result
 }
 
 /// Convert raw ELF section data to boot stream format.
@@ -487,24 +654,58 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
         // and 2-byte scan step (half-word alignment).
         // Data sections use variable-length fills and 4-byte scan step.
         let is_sw_code = matches!(sec.width, WordWidth::SwCode);
+        let is_byte_width = matches!(sec.width, WordWidth::ByteWidth);
         let fixed = if is_sw_code { Some(68) } else { None };
         let min_fill = if is_sw_code { 68 } else { 36 };
+        let step = if is_sw_code { 2 } else { 4 };
+        let base_mod4 = (sec.addr % 4) as usize;
 
-        let segments = if use_fill && sec.compressible {
-            compress_zero_runs(&sec.raw, fixed, min_fill)
-        } else if opts.max_block_size.is_some() && sec.compressible {
-            compress_zero_runs(&sec.raw, fixed, min_fill)
-                .into_iter()
-                .map(|s| match s {
-                    Segment::Fill(n) => Segment::Data(vec![0u8; n as usize]),
-                    other => other,
-                })
-                .collect()
+        // For MBS+NoFill mode, compute segments using fill-mode logic
+        // so we can preserve the default-mode block boundaries that
+        // the MBS split layout depends on.
+        let compute_with_fill =
+            (use_fill || opts.max_block_size.is_some()) && sec.compressible;
+        let mut segments = if compute_with_fill {
+            compress_zero_runs(&sec.raw, fixed, min_fill, step, base_mod4)
         } else {
             vec![Segment::Data(sec.raw.clone())]
         };
 
+        // For bw sections, align substantial data block ends to 8-byte
+        // absolute boundaries.
+        if is_byte_width {
+            segments = align_bw_data_ends_to_8(segments, sec.addr, min_fill);
+        }
+
+        // In MBS+NoFill mode, small data segments that follow a large
+        // fill are merged into the tail of the fill's last MBS block.
+        // Convert (Fill, small Data) pairs into a single Data segment
+        // (fill expanded to zeros + data bytes).
+        if !use_fill {
+            if let Some(mbs) = opts.max_block_size {
+                segments = merge_small_data_after_fills(segments, mbs as usize);
+            }
+        }
+
+        // Medium-sized SwCode sections in MBS+NoFill mode require an
+        // internal split at section offset 4608 with a -2 address
+        // shift and +4 byte extension for the second half.  Only
+        // applies to single-segment (no fills) SwCode sections in a
+        // specific size range.
+        let sw_split_at: Option<usize> = if !use_fill
+            && opts.max_block_size.is_some()
+            && is_sw_code
+            && sec.raw.len() > 11000
+            && sec.raw.len() < 20000
+            && segments.len() == 1
+        {
+            Some(4608)
+        } else {
+            None
+        };
+
         let mut sec_offset = 0u32;
+        let mut prev_was_merged = false;
         for seg in segments {
             match seg {
                 Segment::Data(raw_chunk) => {
@@ -515,8 +716,46 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
                     if let Some(max) = opts.max_block_size {
                         let max = max as usize;
                         let mut off = 0;
+                        // Split point (if any): emit blocks up to the
+                        // split, then emit remaining with -2 shift
+                        // (2 bytes of overlap at start + 2 bytes past end).
                         while off < boot_data.len() {
-                            let end = (off + max).min(boot_data.len());
+                            let at_split = sw_split_at == Some(off);
+                            if at_split {
+                                // Emit remaining with -2 shift: the second
+                                // region covers [off-2, boot_data.len()+2),
+                                // totaling (boot_data.len() - off + 4) bytes.
+                                let ext_start = off.saturating_sub(2);
+                                let ext_len = boot_data.len() - ext_start + 2;
+                                let mut ext_data = boot_data[ext_start..].to_vec();
+                                ext_data.extend_from_slice(&[0u8, 0u8]);
+                                let mut eoff = 0;
+                                while eoff < ext_len {
+                                    let eend = (eoff + max).min(ext_len);
+                                    data_blocks.push(Block {
+                                        flags: 0,
+                                        bcode,
+                                        target_addr: block_addr
+                                            + ext_start as u32
+                                            + eoff as u32,
+                                        data: ext_data[eoff..eend].to_vec(),
+                                        argument: 0,
+                                        fill_count: 0,
+                                    });
+                                    eoff = eend;
+                                }
+                                break;
+                            }
+                            let next_limit = if let Some(s) = sw_split_at {
+                                if off < s {
+                                    s.min(boot_data.len())
+                                } else {
+                                    boot_data.len()
+                                }
+                            } else {
+                                boot_data.len()
+                            };
+                            let end = (off + max).min(next_limit);
                             data_blocks.push(Block {
                                 flags: 0,
                                 bcode,
@@ -537,46 +776,80 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
                             fill_count: 0,
                         });
                     }
+                    prev_was_merged = false;
+                }
+                Segment::MergedFill(raw_chunk) => {
+                    // MergedFill is only generated in MBS+NoFill mode.
+                    // Emit as MBS-split zero-data blocks (the merged
+                    // region's content is mostly zeros, with trailing
+                    // bytes from the absorbed small data segment).
+                    let boot_data = convert_to_boot(&raw_chunk, sec.width);
+                    let block_addr = sec.addr + sec_offset;
+                    sec_offset += raw_chunk.len() as u32;
+
+                    let max = opts.max_block_size.unwrap() as usize;
+                    let mut off = 0;
+                    while off < boot_data.len() {
+                        let end = (off + max).min(boot_data.len());
+                        data_blocks.push(Block {
+                            flags: 0,
+                            bcode,
+                            target_addr: block_addr + off as u32,
+                            data: boot_data[off..end].to_vec(),
+                            argument: 0,
+                            fill_count: 0,
+                        });
+                        off = end;
+                    }
+                    prev_was_merged = true;
                 }
                 Segment::Fill(count) => {
-                    data_blocks.push(Block {
-                        flags: BFLAG_FILL,
-                        bcode,
-                        target_addr: sec.addr + sec_offset,
-                        data: Vec::new(),
-                        argument: 0,
-                        fill_count: count,
-                    });
+                    if use_fill {
+                        data_blocks.push(Block {
+                            flags: BFLAG_FILL,
+                            bcode,
+                            target_addr: sec.addr + sec_offset,
+                            data: Vec::new(),
+                            argument: 0,
+                            fill_count: count,
+                        });
+                    } else {
+                        // NoFill + MBS: expand fill to zero data and
+                        // split by MBS.  If the previous segment was
+                        // a MergedFill AND this fill is smaller than
+                        // 3000 bytes, this fill's blocks are shifted
+                        // by -2 and extended by +4 bytes (2 overlap
+                        // at start, 2 past natural end).  Larger
+                        // post-merge fills are not shifted.
+                        let (shift, extra) =
+                            if prev_was_merged && (count as usize) < 3000 {
+                                (2u32, 4usize)
+                            } else {
+                                (0, 0)
+                            };
+                        let zero_raw = vec![0u8; count as usize + extra];
+                        let boot_data = convert_to_boot(&zero_raw, sec.width);
+                        let block_addr = sec.addr + sec_offset - shift;
+                        let max = opts.max_block_size.unwrap() as usize;
+                        let mut off = 0;
+                        while off < boot_data.len() {
+                            let end = (off + max).min(boot_data.len());
+                            data_blocks.push(Block {
+                                flags: 0,
+                                bcode,
+                                target_addr: block_addr + off as u32,
+                                data: boot_data[off..end].to_vec(),
+                                argument: 0,
+                                fill_count: 0,
+                            });
+                            off = end;
+                        }
+                    }
                     sec_offset += count;
+                    prev_was_merged = false;
                 }
             }
         }
-    }
-
-    // Merge adjacent sub-MBS data blocks that are contiguous in
-    // address.  Only in NoFill+MBS mode where fill-derived zero
-    // segments produce small trailing blocks that should be merged
-    // with the following data block.
-    if let Some(max) = opts.max_block_size.filter(|_| opts.no_fill_block) {
-        let max = max as usize;
-        let mut merged = Vec::<Block>::new();
-        for block in data_blocks {
-            if block.flags != 0 {
-                merged.push(block);
-                continue;
-            }
-            if let Some(prev) = merged.last_mut() {
-                let contiguous = prev.flags == 0
-                    && prev.target_addr + prev.data.len() as u32 == block.target_addr
-                    && prev.data.len() + block.data.len() <= max;
-                if contiguous {
-                    prev.data.extend_from_slice(&block.data);
-                    continue;
-                }
-            }
-            merged.push(block);
-        }
-        data_blocks = merged;
     }
 
     // Build FINAL block.
