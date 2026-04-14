@@ -1145,11 +1145,26 @@ fn collect_symbols(ctx: &ElfCtx<'_>) -> Vec<(u32, String, u32, u8)> {
 
 /// Detect byte width for a code section.
 /// Returns 2 for VISA, 6 for ISA.
+///
+/// The short-word-code ("seg_swco") layout used by selas for
+/// VISA-mode output sets `sh_entsize = 1` on the section header, and
+/// that is the authoritative signal: every VISA section emitted by
+/// `ElfWriter::add_text_section_sw` carries it, while plain ISA
+/// sections leave `sh_entsize = 0`. `sh_addralign == 2` is the
+/// signal for the alternative VISA layout
+/// (`add_text_section_visa`). Falling back to "size not a multiple of
+/// 6" only catches VISA sections that happen to contain at least one
+/// compressed parcel whose length is not evenly divisible by 6 -- a
+/// correct VISA loop body of exactly four 48-bit instructions, for
+/// instance, would be 24 bytes and would be misdetected as ISA.
 fn detect_byte_width(sec: &Elf32Shdr) -> u32 {
-    if !sec.sh_size.is_multiple_of(6) && sec.sh_size.is_multiple_of(2) {
+    if sec.sh_entsize == 1 {
         return 2;
     }
     if sec.sh_addralign == 2 {
+        return 2;
+    }
+    if !sec.sh_size.is_multiple_of(6) && sec.sh_size.is_multiple_of(2) {
         return 2;
     }
     6
