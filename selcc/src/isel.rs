@@ -245,16 +245,60 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         });
                     }
                 }
+
+                // SHARC+ C-ABI return sequence. A C caller issues a
+                // delayed CALL whose delay slot stores PC+2 into the
+                // callee's frame at DM(M7, I6), and the callee hands
+                // control back by reloading that slot into I12 and
+                // doing an indirect delayed JUMP through (M14, I12).
+                // A plain Type 11a RTS would pop the PC stack, which
+                // the C-ABI does not push to, so a selcc-compiled
+                // function that returns via RTS jumps into garbage
+                // on the first return and the board hangs.
+                //
+                // Only correct for leaf functions today: a non-leaf
+                // callee clobbers DM(M7, I6) when it makes its own
+                // delayed call, so a general fix needs selcc to save
+                // I12 into its own frame in the prologue and restore
+                // from that slot here. The C backend in this tree
+                // does not yet emit such calls, so the leaf form is
+                // sufficient for now.
+
+                // I12 = DM(M7, I6) -- reload the saved return PC into
+                // the DAG2 index register that the indirect jump uses.
+                // ureg 0x1C = I12 (group 1 = I registers, reg 12).
                 instrs.push(MachInstr {
-                    instr: Instruction::Return {
-                        interrupt: false,
+                    instr: Instruction::UregDagMove {
+                        pm: false,
+                        write: false,
+                        ureg: 0x1C,
+                        i_reg: 6,
+                        m_reg: 7,
                         cond: target::COND_TRUE,
-                        delayed: false,
-                        lr: false,
                         compute: None,
                     },
                     reloc: None,
                 });
+                // JUMP (M14, I12) (DB) -- indirect delayed jump
+                // through the DAG2 register pair. pm_i and pm_m are
+                // DAG2-relative (I8-I15, M8-M15) encoded as 0-7, so
+                // I12 -> 4 and M14 -> 6.
+                instrs.push(MachInstr {
+                    instr: Instruction::IndirectBranch {
+                        call: false,
+                        cond: target::COND_TRUE,
+                        pm_i: 4,
+                        pm_m: 6,
+                        delayed: true,
+                        compute: None,
+                    },
+                    reloc: None,
+                });
+                // Two NOPs fill the delayed branch's delay slots so
+                // no useful work runs after the indirect jump is
+                // latched and before control transfers.
+                instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
+                instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
             }
 
             IrOp::Call(dst, name, args) => {

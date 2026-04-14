@@ -1308,7 +1308,10 @@ mod tests {
     fn rt_return_42() {
         let text = round_trip_disasm("int main() { return 42; }");
         assert!(text.iter().any(|t| t.contains("0x2A")), "got: {text:?}");
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
@@ -1475,7 +1478,10 @@ mod tests {
         "#;
         let text = round_trip_disasm(src);
         assert!(!text.is_empty());
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
@@ -1483,7 +1489,10 @@ mod tests {
         let src = "int f(int a, int b, int c, int d, int e, int f_) \
                    { return a + b + c + d + e + f_; }";
         let text = round_trip_disasm(src);
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
@@ -1537,21 +1546,30 @@ mod tests {
     }
 
     #[test]
-    fn rt_void_return_has_rts() {
+    fn rt_void_return_has_abi_return() {
         let text = round_trip_disasm("void f() { return; }");
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
     fn rt_ternary_compiles() {
         let text = round_trip_disasm("int f(int x) { return x > 0 ? x : 0; }");
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
     fn rt_compound_assign() {
         let text = round_trip_disasm("int f() { int x = 10; x += 5; return x; }");
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
@@ -1559,7 +1577,10 @@ mod tests {
         let text = round_trip_disasm(
             "int f() { int arr[3] = {10, 20, 30}; return arr[1]; }",
         );
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
@@ -1567,7 +1588,10 @@ mod tests {
         let text = round_trip_disasm(
             "int f() { int m[2][3]; m[0][1] = 5; return m[0][1]; }",
         );
-        assert!(text.iter().any(|t| t.contains("RTS")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("JUMP (M14,I12)")),
+            "got: {text:?}"
+        );
     }
 
     #[test]
