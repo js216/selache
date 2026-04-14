@@ -656,6 +656,24 @@ fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u8) -> bool {
     }
 }
 
+/// Number of `DM(-X, I6)` slots the SHARC+ C-ABI leaves unusable at
+/// the top of the callee's frame. `CJUMP (DB)` captures the caller's
+/// I7 into the new I6 *before* its two delay-slot pushes run, so at
+/// callee entry `I6 = caller_I7` and `I7 = I6 - 2`. The slots at
+/// `DM(0, I6)` and `DM(-1, I6)` now hold the caller's delay-slot
+/// pushes (one of them being the return PC that `I12 = DM(M7, I6)`
+/// later reloads), and `DM(-2, I6)` lines up with the callee's entry
+/// I7, which is *above* the region `I7 = MODIFY(I7, -N)` actually
+/// reserves (`[I7-N, I6-3]`). The first selcc-owned slot lives at
+/// `DM(-3, I6)`, so every frame-relative access this backend emits
+/// needs its negative offset nudged by `FRAME_SKIP` before the
+/// instruction is written out. `adjust_frame_offsets` folds this
+/// shift into the same pass that already accounts for the
+/// callee-saved save slots and regalloc spill slots, so
+/// `build_prologue` just emits its raw `-(i+1)` offsets and lets
+/// the adjust pass rewrite them.
+const FRAME_SKIP: i32 = 2;
+
 fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
     debug_assert!(
         callee_saved.iter().all(|r| target::CALLER_SAVED.iter().all(|c| c != r)),
@@ -677,7 +695,7 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
         });
     }
     for (i, &reg) in callee_saved.iter().enumerate() {
-        let slot_offset = -(i as i8) - 1;
+        let slot_offset = -(i as i8) - 1 - (FRAME_SKIP as i8);
         instrs.push(MachInstr {
             instr: Instruction::ComputeLoadStore {
                 compute: None,
@@ -702,7 +720,7 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
     }
     let mut instrs = Vec::new();
     for (i, &reg) in callee_saved.iter().enumerate().rev() {
-        let slot_offset = -(i as i8) - 1;
+        let slot_offset = -(i as i8) - 1 - (FRAME_SKIP as i8);
         instrs.push(MachInstr {
             instr: Instruction::ComputeLoadStore {
                 compute: None,
@@ -772,7 +790,11 @@ fn adjust_frame_offsets(
             return instrs.to_vec();
         }
     }
-    let shift = num_saved as i32;
+    // Leave `FRAME_SKIP` slots below I6 untouched: those hold the
+    // caller's CJUMP delay-slot pushes (return PC, R2 save) plus the
+    // word at the callee's entry I7. All negative offsets land
+    // below that region.
+    let shift = num_saved as i32 + FRAME_SKIP;
     let spill_base = shift + local_slots as i32;
     let mut result = Vec::with_capacity(instrs.len());
     let mut i = 0;
