@@ -154,6 +154,11 @@ struct PendingInstr {
     section_idx: usize,
     byte_offset: usize,
     byte_len: usize,
+    /// Word/parcel offset of this instruction within its section, captured
+    /// at encode time. In VISA mode this cannot be recovered from
+    /// `byte_offset` alone because earlier instructions may be 2, 4, or 6
+    /// bytes. Used by pass 2 to compute correct PC-relative offsets.
+    word_offset: u32,
     instr: selinstr::encode::Instruction,
     label_ref: String,
 }
@@ -170,46 +175,67 @@ struct PendingReloc {
 /// R_SHARC_ADDR24: absolute 24-bit address for CALL / JUMP / LoadImm.
 const R_SHARC_ADDR24: u8 = 0x01;
 
-/// Resolve a symbolic label reference inside an instruction, replacing the
-/// placeholder address (0) with the actual value encoded for this instruction.
-/// For branch and CJump instructions the field is the label's word offset in
-/// the section; for DO/UNTIL instructions the field is the PC-relative offset
-/// from the DO instruction itself to the label (SHARC ISR, Program Flow
-/// Control, Type 12/13 opcode: RELADDR is "the end-of-loop address relative
-/// to the DO LOOP instruction address"). `instr_word_offset` is the word
-/// address of the instruction being resolved within its own section.
+/// Resolve a symbolic label reference inside an instruction.
 ///
-/// Returns `None` when the reference must become an external relocation:
-/// either the label is undefined in this file, or the instruction is a
-/// `LoadImm` (which always loads a runtime address that the linker must
-/// patch regardless of whether the symbol is locally defined).
+/// Returns `Some(new_instr)` when the reference can be rewritten into a
+/// position-independent form: a PC-relative Type 8b direct branch for a
+/// same-section `JUMP`/`CALL`, or a Type 12/13 DO loop whose RELADDR
+/// field is `label_addr - instr_word_offset` (SHARC ISR, Program Flow
+/// Control, Type 12/13: RELADDR is "the end-of-loop address relative
+/// to the DO LOOP instruction address"). The rewritten bytes need no
+/// further linker fixup and the caller patches the encoded instruction
+/// in place.
+///
+/// Returns `None` when the reference must instead become a link-time
+/// relocation:
+///   - `LoadImm`: the immediate is a runtime address that the linker
+///     must patch, regardless of whether the symbol is locally defined.
+///   - `CJump`: Type 25a has no PC-relative variant, so there is no
+///     position-independent rewrite available.
+///   - Any cross-section reference: a PC-relative offset between two
+///     sections is not a fixed constant because the linker is free to
+///     place the sections arbitrarily far apart.
+///   - Any label that is not defined in this file at all.
+///
+/// The caller turns `None` into an R_SHARC_ADDR24 relocation against a
+/// local symbol (if the label is defined somewhere in this file) or an
+/// external symbol (if it is not).
+///
+/// `instr_section_idx` and `instr_word_offset` locate the instruction
+/// being resolved in the section list.
 fn resolve_labels(
     instr: &selinstr::encode::Instruction,
     label_name: &str,
-    label_map: &std::collections::HashMap<String, u32>,
+    label_map: &std::collections::HashMap<String, (usize, u32)>,
+    instr_section_idx: usize,
     instr_word_offset: u32,
 ) -> Option<selinstr::encode::Instruction> {
     use selinstr::encode::{BranchTarget, Instruction};
-    // LoadImm always becomes a relocation — the symbol's final address
-    // is only known at link time, regardless of in-file definition.
     if matches!(*instr, Instruction::LoadImm { value: 0, .. }) {
         return None;
     }
-    let addr = *label_map.get(label_name)?;
+    if matches!(*instr, Instruction::CJump { addr: 0, .. }) {
+        return None;
+    }
+    let (label_section, label_word_offset) = *label_map.get(label_name)?;
+    if label_section != instr_section_idx {
+        return None;
+    }
+    let offset = (label_word_offset as i32) - (instr_word_offset as i32);
     let resolved = match *instr {
         Instruction::Branch { call, cond, target: BranchTarget::Absolute(0), delayed } => {
-            Instruction::Branch { call, cond, target: BranchTarget::Absolute(addr), delayed }
+            Instruction::Branch {
+                call,
+                cond,
+                target: BranchTarget::PcRelative(offset),
+                delayed,
+            }
         }
         Instruction::DoLoop { counter, end_pc: 0 } => {
-            let offset = (addr as i32) - (instr_word_offset as i32);
             Instruction::DoLoop { counter, end_pc: offset as u32 }
         }
         Instruction::DoUntil { addr: 0, term } => {
-            let offset = (addr as i32) - (instr_word_offset as i32);
             Instruction::DoUntil { addr: offset as u32, term }
-        }
-        Instruction::CJump { addr: 0, delayed } => {
-            Instruction::CJump { addr, delayed }
         }
         other => other,
     };
@@ -242,12 +268,17 @@ pub fn assemble_source(src: &str, visa: bool) -> Result<Vec<u8>> {
     assemble_source_inner(src, visa)
 }
 
-/// Build a label -> address map from all section symbols.
-fn build_label_map(sections: &[(String, SectionData)]) -> std::collections::HashMap<String, u32> {
+/// Map every label defined in any section to its `(section_idx, word_offset)`.
+/// Used by the label-resolution pass to decide whether a reference can be
+/// rewritten position-independently (same section) or must become a
+/// relocation (cross-section, external, or ISA-mandated absolute target).
+fn build_label_map(
+    sections: &[(String, SectionData)],
+) -> std::collections::HashMap<String, (usize, u32)> {
     let mut map = std::collections::HashMap::new();
-    for (_, sec) in sections {
+    for (sec_idx, (_, sec)) in sections.iter().enumerate() {
         for (name, offset) in &sec.symbols {
-            map.insert(name.clone(), *offset);
+            map.insert(name.clone(), (sec_idx, *offset));
         }
     }
     map
@@ -297,6 +328,15 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
             );
             let sec = &mut sections[idx].1;
             let byte_offset = sec.code.len();
+            // Capture the word/parcel offset of this instruction *before*
+            // encoding it, so pass 2 can compute PC-relative offsets
+            // correctly even when earlier instructions in the section had
+            // varying widths (VISA: 2/4/6 bytes).
+            let word_offset = if visa && sec.is_pm {
+                sec.visa_offset()
+            } else {
+                sec.word_offset()
+            };
             if visa && sec.is_pm {
                 let isa_bytes =
                     selinstr::encode::encode(instr).expect("instruction encoding failed");
@@ -315,6 +355,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     section_idx: idx,
                     byte_offset,
                     byte_len,
+                    word_offset,
                     instr: *instr,
                     label_ref: label_ref.clone(),
                 });
@@ -323,15 +364,25 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     }
 
     // Pass 2: resolve label references in branch and loop instructions.
-    // Any label that does not appear in the in-file label map becomes a
-    // relocation against an external symbol so that the linker can patch
-    // the final address.
+    // Labels defined in the same section as the referring instruction
+    // become a position-independent rewrite (PC-relative branch or DO
+    // loop RELADDR). Cross-section, external, and ISA-mandated-absolute
+    // targets become R_SHARC_ADDR24 relocations that the linker patches.
+    // Local-label relocations are backed by STB_LOCAL symbols emitted
+    // into the symbol table so the linker can resolve them against the
+    // in-file definition.
     let mut relocs: Vec<PendingReloc> = Vec::new();
+    let mut local_refs: Vec<(String, usize, u32)> = Vec::new();
     if !pending.is_empty() {
         let label_map = build_label_map(&sections);
         for pi in &pending {
-            let instr_word_offset = (pi.byte_offset / 6) as u32;
-            match resolve_labels(&pi.instr, &pi.label_ref, &label_map, instr_word_offset) {
+            match resolve_labels(
+                &pi.instr,
+                &pi.label_ref,
+                &label_map,
+                pi.section_idx,
+                pi.word_offset,
+            ) {
                 Some(resolved) => {
                     let sec = &mut sections[pi.section_idx].1;
                     if visa && sec.is_visa {
@@ -350,11 +401,21 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     }
                 }
                 None => {
-                    // Unresolved label: emit an R_SHARC_ADDR24 relocation
-                    // that the linker will fill in. The placeholder bytes
-                    // (already zero from pass 1) stay put.
-                    if !externs.contains(&pi.label_ref) {
-                        externs.push(pi.label_ref.clone());
+                    match label_map.get(&pi.label_ref) {
+                        Some(&(sec_idx, word_offset)) => {
+                            if !local_refs.iter().any(|(n, _, _)| n == &pi.label_ref) {
+                                local_refs.push((
+                                    pi.label_ref.clone(),
+                                    sec_idx,
+                                    word_offset,
+                                ));
+                            }
+                        }
+                        None => {
+                            if !externs.contains(&pi.label_ref) {
+                                externs.push(pi.label_ref.clone());
+                            }
+                        }
                     }
                     relocs.push(PendingReloc {
                         section_idx: pi.section_idx,
@@ -370,7 +431,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     // Resolve .SET aliases into section symbol tables.
     resolve_aliases(&mut sections, &aliases);
 
-    Ok(emit_elf_bytes(&sections, &globals, &externs, &relocs))
+    Ok(emit_elf_bytes(&sections, &globals, &externs, &local_refs, &relocs))
 }
 
 /// Process directive and section-state effects from a parsed line.
@@ -492,6 +553,7 @@ fn emit_elf_bytes(
     sections: &[(String, SectionData)],
     globals: &[String],
     externs: &[String],
+    local_refs: &[(String, usize, u32)],
     relocs: &[PendingReloc],
 ) -> Vec<u8> {
     let mut writer = selelf::elf_write::ElfWriter::new();
@@ -509,6 +571,14 @@ fn emit_elf_bytes(
             writer.add_data_section(name, &sec_data.code)
         };
         elf_indices.push(idx);
+    }
+
+    // Register locally-defined labels that are the targets of relocations
+    // in this file. These have to appear in the symbol table as STB_LOCAL
+    // so the linker can resolve the relocation against the in-file
+    // definition instead of treating the label as an unresolved external.
+    for (name, sec_idx, word_offset) in local_refs {
+        writer.add_local(name, elf_indices[*sec_idx], *word_offset);
     }
 
     // Register extern (undefined) symbols.
@@ -935,6 +1005,8 @@ mod tests {
 
     #[test]
     fn test_branch_label_resolution() {
+        // `_start` at word 0, JUMP at word 2, so the position-independent
+        // rewrite must produce `JUMP (PC,-0x2)`.
         let data = assemble_str(
             ".SECTION/PM seg_pmco;\n\
              .GLOBAL _start;\n\
@@ -953,14 +1025,16 @@ mod tests {
         let off = shdr.sh_offset as usize;
         let word = read_word48(&data[off + 12..off + 18]);
         let decoded = selinstr::disasm::decode_instruction(word);
-        assert!(
-            decoded.contains("0x000000"),
-            "JUMP should target address 0 (_start), got: {decoded}"
+        assert_eq!(
+            decoded, "JUMP (PC,-0x2)",
+            "JUMP _start at word 2 must become JUMP (PC,-0x2)",
         );
     }
 
     #[test]
     fn test_forward_branch_label() {
+        // JUMP at word 0, `_end` at word 2, so the rewrite must produce
+        // `JUMP (PC,0x2)`.
         let data = assemble_str(
             ".SECTION/PM seg_pmco;\n\
              .GLOBAL _start;\n\
@@ -977,9 +1051,9 @@ mod tests {
         let off = shdr.sh_offset as usize;
         let word = read_word48(&data[off..off + 6]);
         let decoded = selinstr::disasm::decode_instruction(word);
-        assert!(
-            decoded.contains("0x000002"),
-            "JUMP should target address 2 (_end), got: {decoded}"
+        assert_eq!(
+            decoded, "JUMP (PC,0x2)",
+            "JUMP _end at word 0 must become JUMP (PC,0x2)",
         );
     }
 
