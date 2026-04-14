@@ -527,26 +527,27 @@ fn falu_to_23bit(falu: &FaluOp) -> Option<u32> {
 }
 
 fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
+    // Opcodes match the 48-bit `encode_mul`; the 32-bit VISA
+    // short-compute form shares the full 8-bit opcode field with
+    // the 48-bit form.
     let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *mul {
-        MulOp::MrfMulSsf { rx, ry } => (0x40, 0, rx, ry),
-        MulOp::MrbMulSsf { rx, ry } => (0x41, 0, rx, ry),
-        MulOp::MulSsf { rn, rx, ry } => (0x44, rn, rx, ry),
         MulOp::MulSsi { rn, rx, ry } => (0x70, rn, rx, ry),
-        // MrfMulSsi is intentionally omitted from the 32-bit compact
-        // form; the 48-bit encoder handles it.  The 32-bit VISA MUL
-        // opcode map differs from the 48-bit one and opcode 0x74 in
-        // 32-bit space collides with a different instruction form.
-        MulOp::MrfMacSsf { rx, ry } => (0x48, 0, rx, ry),
-        MulOp::MrbMacSsf { rx, ry } => (0x49, 0, rx, ry),
-        MulOp::MacSsf { rn, rx, ry } => (0x4C, rn, rx, ry),
-        MulOp::MrfMsubSsf { rx, ry } => (0x50, 0, rx, ry),
-        MulOp::MrbMsubSsf { rx, ry } => (0x51, 0, rx, ry),
-        MulOp::SatMrf { rn } => (0x60, rn, 0, 0),
-        MulOp::SatMrb { rn } => (0x61, rn, 0, 0),
-        MulOp::ClrMrf => (0x64, 0, 0, 0),
-        MulOp::ClrMrb => (0x65, 0, 0, 0),
-        MulOp::FMul { rn, rx, ry } => (0x80, rn, rx, ry),
-        _ => return None, // TRNC, UUF, SSI etc.
+        MulOp::MulSsf { rn, rx, ry } => (0x78, rn, rx, ry),
+        MulOp::MrfMulSsi { rx, ry } => (0x74, 0, rx, ry),
+        MulOp::MrfMulSsf { rx, ry } => (0x7C, 0, rx, ry),
+        MulOp::MrbMulSsf { rx, ry } => (0x7E, 0, rx, ry),
+        MulOp::MrfMulUuf { rx, ry } => (0x4C, 0, rx, ry),
+        MulOp::MacSsf { rn, rx, ry } => (0xB8, rn, rx, ry),
+        MulOp::MrfMacSsf { rx, ry } => (0xBC, 0, rx, ry),
+        MulOp::MrbMacSsf { rx, ry } => (0xBE, 0, rx, ry),
+        MulOp::MrfMsubSsf { rx, ry } => (0xFC, 0, rx, ry),
+        MulOp::MrbMsubSsf { rx, ry } => (0xFE, 0, rx, ry),
+        MulOp::SatMrf { rn } => (0x08, rn, 0, 0),
+        MulOp::SatMrb { rn } => (0x0A, rn, 0, 0),
+        MulOp::ClrMrf => (0x14, 0, 0, 0),
+        MulOp::ClrMrb => (0x16, 0, 0, 0),
+        MulOp::FMul { rn, rx, ry } => (0x30, rn, rx, ry),
+        _ => return None, // TRNC, MR read/write etc.
     };
     if rn > 15 || rx > 15 || ry > 15 {
         return None;
@@ -562,23 +563,25 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
 }
 
 fn shift_to_23bit(shift: &ShiftOp) -> Option<u32> {
+    // Opcodes match the 48-bit `encode_shift`.
     let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *shift {
         ShiftOp::Lshift { rn, rx, ry } => (0x00, rn, rx, ry),
-        ShiftOp::OrLshift { rn, rx, ry } => (0x04, rn, rx, ry),
-        ShiftOp::Ashift { rn, rx, ry } => (0x08, rn, rx, ry),
-        ShiftOp::OrAshift { rn, rx, ry } => (0x0C, rn, rx, ry),
-        ShiftOp::Btst { rx, ry } => (0xCC, 0, rx, ry),
-        ShiftOp::Bclr { rn, rx, ry } => (0xC4, rn, rx, ry),
-        ShiftOp::Bset { rn, rx, ry } => (0xC0, rn, rx, ry),
-        ShiftOp::Btgl { rn, rx, ry } => (0xC8, rn, rx, ry),
-        ShiftOp::Fext { rn, rx, ry } => (0x60, rn, rx, ry),
-        ShiftOp::Fdep { rn, rx, ry } => (0x64, rn, rx, ry),
+        ShiftOp::Ashift { rn, rx, ry } => (0x04, rn, rx, ry),
+        ShiftOp::Rot { rn, rx, ry } => (0x08, rn, rx, ry),
+        ShiftOp::OrLshift { rn, rx, ry } => (0x20, rn, rx, ry),
+        ShiftOp::OrAshift { rn, rx, ry } => (0x24, rn, rx, ry),
+        ShiftOp::Fext { rn, rx, ry } => (0x40, rn, rx, ry),
+        ShiftOp::Fdep { rn, rx, ry } => (0x44, rn, rx, ry),
         ShiftOp::Exp { rn, rx } => (0x80, rn, rx, 0),
         ShiftOp::ExpEx { rn, rx } => (0x84, rn, rx, 0),
         ShiftOp::Leftz { rn, rx } => (0x88, rn, rx, 0),
         ShiftOp::Lefto { rn, rx } => (0x8C, rn, rx, 0),
-        ShiftOp::Fpack { rn, rx } => (0xD0, rn, rx, 0),
-        ShiftOp::Funpack { rn, rx } => (0xD4, rn, rx, 0),
+        ShiftOp::Fpack { rn, rx } => (0x90, rn, rx, 0),
+        ShiftOp::Funpack { rn, rx } => (0x94, rn, rx, 0),
+        ShiftOp::Bset { rn, rx, ry } => (0xC0, rn, rx, ry),
+        ShiftOp::Bclr { rn, rx, ry } => (0xC4, rn, rx, ry),
+        ShiftOp::Btgl { rn, rx, ry } => (0xC8, rn, rx, ry),
+        ShiftOp::Btst { rx, ry } => (0xCC, 0, rx, ry),
         _ => return None,
     };
     if rn > 15 || rx > 15 || ry > 15 {

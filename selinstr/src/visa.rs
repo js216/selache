@@ -605,53 +605,50 @@ fn decode_32_alu(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
 }
 
 fn decode_32_mul(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
-    // 32-bit MUL opcodes:
-    // 0x70 = Rn = Rx * Ry (SSI) — signed-integer multiply
+    // 32-bit VISA compressed multiplier. The 8-bit MULOP field
+    // mirrors the 48-bit encoder's templates.
     match opcode {
-        0x40 => format!("mrf=r{rx}*r{ry} (ssf)"),
-        0x41 => format!("mrb=r{rx}*r{ry} (ssf)"),
-        0x44 => format!("r{rn}=r{rx}*r{ry} (ssf)"),
-        0x48 => format!("mrf=mrf+r{rx}*r{ry} (ssf)"),
-        0x49 => format!("mrb=mrb+r{rx}*r{ry} (ssf)"),
-        0x4C => format!("r{rn}=mrf+r{rx}*r{ry} (ssf)"),
-        0x50 => format!("mrf=mrf-r{rx}*r{ry} (ssf)"),
-        0x51 => format!("mrb=mrb-r{rx}*r{ry} (ssf)"),
-        0x60 => format!("r{rn}=sat mrf"),
-        0x61 => format!("r{rn}=sat mrb"),
-        0x64 => "mrf=0".into(),
-        0x65 => "mrb=0".into(),
+        0x08 => format!("r{rn}=sat mrf"),
+        0x0A => format!("r{rn}=sat mrb"),
+        0x14 => "mrf=0".into(),
+        0x16 => "mrb=0".into(),
+        0x30 => format!("f{rn}=f{rx}*f{ry}"),
+        0x4C => format!("mrf=r{rx}*r{ry} (uuf)"),
         0x70 => format!("r{rn}=r{rx}*r{ry} (ssi)"),
-        0x74 => format!("r{rn}=r{rx}*r{ry} (sui)"),
-        0x78 => format!("mrf=mrf+r{rx}*r{ry} (ssi)"),
-        0x7C => format!("r{rn}=mrf+r{rx}*r{ry} (ssi)"),
-        0x80 => format!("f{rn}=f{rx}*f{ry}"),
+        0x74 => format!("mrf=r{rx}*r{ry} (ssi)"),
+        0x78 => format!("r{rn}=r{rx}*r{ry} (ssf)"),
+        0x7C => format!("mrf=r{rx}*r{ry} (ssf)"),
+        0x7E => format!("mrb=r{rx}*r{ry} (ssf)"),
+        0xB8 => format!("r{rn}=mrf+r{rx}*r{ry} (ssf)"),
+        0xBC => format!("mrf=mrf+r{rx}*r{ry} (ssf)"),
+        0xBE => format!("mrb=mrb+r{rx}*r{ry} (ssf)"),
+        0xFC => format!("mrf=mrf-r{rx}*r{ry} (ssf)"),
+        0xFE => format!("mrb=mrb-r{rx}*r{ry} (ssf)"),
         _ => format!("mul 0x{opcode:02x} r{rn} r{rx} r{ry}"),
     }
 }
 
 fn decode_32_shift(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
+    // 32-bit VISA compressed shifter. The 8-bit SHIFTOP field
+    // mirrors the 48-bit encoder's templates.
     match opcode {
         0x00 => format!("r{rn}=lshift r{rx} by r{ry}"),
-        0x04 => format!("r{rn}=r{rn} or lshift r{rx} by r{ry}"),
-        0x08 => format!("r{rn}=ashift r{rx} by r{ry}"),
-        0x0C => format!("r{rn}=r{rn} or ashift r{rx} by r{ry}"),
+        0x04 => format!("r{rn}=ashift r{rx} by r{ry}"),
+        0x08 => format!("r{rn}=rot r{rx} by r{ry}"),
         0x20 => format!("r{rn}=r{rn} or lshift r{rx} by r{ry}"),
+        0x24 => format!("r{rn}=r{rn} or ashift r{rx} by r{ry}"),
+        0x40 => format!("r{rn}=fext r{rx} by r{ry}"),
+        0x44 => format!("r{rn}=fdep r{rx} by r{ry}"),
+        0x80 => format!("r{rn}=exp r{rx}"),
+        0x84 => format!("r{rn}=exp r{rx} (ex)"),
         0x88 => format!("r{rn}=leftz r{rx}"),
         0x8C => format!("r{rn}=lefto r{rx}"),
+        0x90 => format!("r{rn}=fpack f{rx}"),
+        0x94 => format!("f{rn}=funpack r{rx}"),
         0xC0 => format!("r{rn}=bset r{rx} by r{ry}"),
         0xC4 => format!("r{rn}=bclr r{rx} by r{ry}"),
         0xC8 => format!("r{rn}=btgl r{rx} by r{ry}"),
         0xCC => format!("btst r{rx} by r{ry}"),
-        0x40 => format!("btst r{rx} by r{ry}"),
-        0x44 => format!("r{rn}=bclr r{rx} by r{ry}"),
-        0x48 => format!("r{rn}=bset r{rx} by r{ry}"),
-        0x4C => format!("r{rn}=btgl r{rx} by r{ry}"),
-        0x60 => format!("r{rn}=fext r{rx} by r{ry}"),
-        0x64 => format!("r{rn}=fdep r{rx} by r{ry}"),
-        0x80 => format!("r{rn}=exp r{rx}"),
-        0x84 => format!("r{rn}=exp r{rx} (ex)"),
-        0xD0 => format!("r{rn}=fpack f{rx}"),
-        0xD4 => format!("f{rn}=funpack r{rx}"),
         _ => format!("shift 0x{opcode:02x} r{rn} r{rx} r{ry}"),
     }
 }

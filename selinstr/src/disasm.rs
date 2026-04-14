@@ -337,60 +337,59 @@ fn decode_alu(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
 }
 
 fn decode_mul(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
+    // Mirror of `encode_mul`; see the comment there for the
+    // structured opcode templates.
     let r = |i: u32| dreg(i, false);
     let f = |i: u32| dreg(i, true);
     match opcode {
-        0x40 => format!("MRF = {} * {} (SSF)", r(rx), r(ry)),
-        0x41 => format!("MRB = {} * {} (SSF)", r(rx), r(ry)),
-        0x44 => format!("{} = {} * {} (SSF)", r(rn), r(rx), r(ry)),
-        0x48 => format!("MRF = MRF + {} * {} (SSF)", r(rx), r(ry)),
-        0x49 => format!("MRB = MRB + {} * {} (SSF)", r(rx), r(ry)),
-        0x4C => format!("{} = MRF + {} * {} (SSF)", r(rn), r(rx), r(ry)),
-        0x50 => format!("MRF = MRF - {} * {} (SSF)", r(rx), r(ry)),
-        0x51 => format!("MRB = MRB - {} * {} (SSF)", r(rx), r(ry)),
-        0x60 => format!("{} = SAT MRF", r(rn)),
-        0x61 => format!("{} = SAT MRB", r(rn)),
-        0x64 => "MRF = 0".into(),
-        0x65 => "MRB = 0".into(),
-        0x68 => "MRF = TRNC MRF".into(),
-        0x69 => "MRB = TRNC MRB".into(),
-        0x6C => format!("{} = TRNC MRF", r(rn)),
-        0x6D => format!("{} = TRNC MRB", r(rn)),
+        0x08 => format!("{} = SAT MRF", r(rn)),
+        0x0A => format!("{} = SAT MRB", r(rn)),
+        0x14 => "MRF = 0".into(),
+        0x16 => "MRB = 0".into(),
+        0x18 => "MRF = TRNC MRF".into(),
+        0x1A => "MRB = TRNC MRB".into(),
+        0x1C => format!("{} = TRNC MRF", r(rn)),
+        0x1E => format!("{} = TRNC MRB", r(rn)),
+        0x30 => format!("{} = {} * {}", f(rn), f(rx), f(ry)),
+        0x4C => format!("MRF = {} * {} (UUF)", r(rx), r(ry)),
         0x70 => format!("{} = {} * {} (SSI)", r(rn), r(rx), r(ry)),
         0x74 => format!("MRF = {} * {} (SSI)", r(rx), r(ry)),
-        0x80 => format!("{} = {} * {}", f(rn), f(rx), f(ry)),
+        0x78 => format!("{} = {} * {} (SSF)", r(rn), r(rx), r(ry)),
+        0x7C => format!("MRF = {} * {} (SSF)", r(rx), r(ry)),
+        0x7E => format!("MRB = {} * {} (SSF)", r(rx), r(ry)),
+        0xB8 => format!("{} = MRF + {} * {} (SSF)", r(rn), r(rx), r(ry)),
+        0xBC => format!("MRF = MRF + {} * {} (SSF)", r(rx), r(ry)),
+        0xBE => format!("MRB = MRB + {} * {} (SSF)", r(rx), r(ry)),
+        0xFC => format!("MRF = MRF - {} * {} (SSF)", r(rx), r(ry)),
+        0xFE => format!("MRB = MRB - {} * {} (SSF)", r(rx), r(ry)),
         _ => format!("MUL opcode 0x{opcode:02X}"),
     }
 }
 
 fn decode_shift(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
+    // Mirror of `encode_shift`. Register-count SHIFTOP only; the
+    // immediate-count form is handled by Type 6b elsewhere.
     let r = |i: u32| dreg(i, false);
     match opcode {
         0x00 => format!("{} = LSHIFT {} BY {}", r(rn), r(rx), r(ry)),
-        0x04 => format!("{} = {} OR LSHIFT {} BY {}", r(rn), r(rn), r(rx), r(ry)),
-        0x08 => format!("{} = ASHIFT {} BY {}", r(rn), r(rx), r(ry)),
-        0x0C => format!("{} = {} OR ASHIFT {} BY {}", r(rn), r(rn), r(rx), r(ry)),
+        0x04 => format!("{} = ASHIFT {} BY {}", r(rn), r(rx), r(ry)),
+        0x08 => format!("{} = ROT {} BY {}", r(rn), r(rx), r(ry)),
         0x20 => format!("{} = {} OR LSHIFT {} BY {}", r(rn), r(rn), r(rx), r(ry)),
-        0x40 => format!("BTST {} BY {}", r(rx), r(ry)),
-        0x44 => format!("{} = BCLR {} BY {}", r(rn), r(rx), r(ry)),
-        0x48 => format!("{} = BSET {} BY {}", r(rn), r(rx), r(ry)),
-        0x4C => format!("{} = BTGL {} BY {}", r(rn), r(rx), r(ry)),
-        0x50 => format!("{} = FEXT {} BY {}", r(rn), r(rx), r(ry)),
-        0x54 => format!("{} = FDEP {} BY {}", r(rn), r(rx), r(ry)),
-        0x60 => format!("{} = FEXT {} BY {}", r(rn), r(rx), r(ry)),
-        0x64 => format!("{} = FDEP {} BY {}", r(rn), r(rx), r(ry)),
-        0x68 => format!("{} = {} OR FEXT {} BY {} (SE)", r(rn), r(rn), r(rx), r(ry)),
-        0x6C => format!("{} = {} OR FDEP {} BY {}", r(rn), r(rn), r(rx), r(ry)),
+        0x24 => format!("{} = {} OR ASHIFT {} BY {}", r(rn), r(rn), r(rx), r(ry)),
+        0x40 => format!("{} = FEXT {} BY {}", r(rn), r(rx), r(ry)),
+        0x44 => format!("{} = FDEP {} BY {}", r(rn), r(rx), r(ry)),
+        0x48 => format!("{} = {} OR FEXT {} BY {} (SE)", r(rn), r(rn), r(rx), r(ry)),
+        0x64 => format!("{} = {} OR FDEP {} BY {}", r(rn), r(rn), r(rx), r(ry)),
         0x80 => format!("{} = EXP {}", r(rn), r(rx)),
         0x84 => format!("{} = EXP {} (EX)", r(rn), r(rx)),
         0x88 => format!("{} = LEFTZ {}", r(rn), r(rx)),
         0x8C => format!("{} = LEFTO {}", r(rn), r(rx)),
+        0x90 => format!("{} = FPACK {}", r(rn), dreg(rx, true)),
+        0x94 => format!("{} = FUNPACK {}", dreg(rn, true), r(rx)),
         0xC0 => format!("{} = BSET {} BY {}", r(rn), r(rx), r(ry)),
         0xC4 => format!("{} = BCLR {} BY {}", r(rn), r(rx), r(ry)),
         0xC8 => format!("{} = BTGL {} BY {}", r(rn), r(rx), r(ry)),
         0xCC => format!("BTST {} BY {}", r(rx), r(ry)),
-        0xD0 => format!("{} = FPACK {}", r(rn), dreg(rx, true)),
-        0xD4 => format!("{} = FUNPACK {}", dreg(rn, true), r(rx)),
         _ => format!("SHIFT opcode 0x{opcode:02X}"),
     }
 }
@@ -1788,24 +1787,24 @@ mod tests {
 
     #[test]
     fn test_mul_ssf_type2() {
-        // MRF = Rx * Ry (SSF), CU=01, opcode=0x40
-        let compute: u64 = (1u64 << 20) | (0x40u64 << 12) | (2 << 4) | 3;
+        // MRF = Rx * Ry (SSF), CU=01, opcode=0x7C.
+        let compute: u64 = (1u64 << 20) | (0x7Cu64 << 12) | (2 << 4) | 3;
         let word: u64 = (0x01u64 << 40) | (31u64 << 33) | compute;
         assert_eq!(dis(word), "MRF = R2 * R3 (SSF)");
     }
 
     #[test]
     fn test_mul_to_reg_type2() {
-        // Rn = Rx * Ry (SSF), CU=01, opcode=0x44
-        let compute: u64 = (1u64 << 20) | (0x44u64 << 12) | (1 << 8) | (5 << 4) | 6;
+        // Rn = Rx * Ry (SSF), CU=01, opcode=0x78.
+        let compute: u64 = (1u64 << 20) | (0x78u64 << 12) | (1 << 8) | (5 << 4) | 6;
         let word: u64 = (0x01u64 << 40) | (31u64 << 33) | compute;
         assert_eq!(dis(word), "R1 = R5 * R6 (SSF)");
     }
 
     #[test]
     fn test_float_mul_type2() {
-        // Fn = Fx * Fy, CU=01, opcode=0x80
-        let compute: u64 = (1u64 << 20) | (0x80u64 << 12) | (1 << 4) | 2;
+        // Fn = Fx * Fy, CU=01, opcode=0x30.
+        let compute: u64 = (1u64 << 20) | (0x30u64 << 12) | (1 << 4) | 2;
         let word: u64 = (0x01u64 << 40) | (31u64 << 33) | compute;
         assert_eq!(dis(word), "F0 = F1 * F2");
     }
@@ -1820,7 +1819,8 @@ mod tests {
 
     #[test]
     fn test_shift_ashift_type2() {
-        let compute: u64 = (2u64 << 20) | (0x08u64 << 12) | (1 << 4) | 2;
+        // Rn = ASHIFT Rx BY Ry, CU=10, opcode=0x04.
+        let compute: u64 = (2u64 << 20) | (0x04u64 << 12) | (1 << 4) | 2;
         let word: u64 = (0x01u64 << 40) | (31u64 << 33) | compute;
         assert_eq!(dis(word), "R0 = ASHIFT R1 BY R2");
     }

@@ -852,27 +852,68 @@ fn encode_falu(op: &FaluOp) -> Result<u32, EncodeError> {
 }
 
 fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
+    // MULOP opcode at bits[19:12] when CU = 01. The 8-bit field
+    // uses structured templates where y = signed-Y, x = signed-X,
+    // f = fractional, r = round-to-nearest:
+    //
+    //   Rn   = Rx * Ry           01yx f00r
+    //   mrf  = Rx * Ry           01yx f10r
+    //   mrb  = Rx * Ry           01yx f11r
+    //   Rn   = mrf + Rx*Ry       10yx f00r
+    //   Rn   = mrb + Rx*Ry       10yx f01r
+    //   mrf  = mrf + Rx*Ry       10yx f10r
+    //   mrb  = mrb + Rx*Ry       10yx f11r
+    //   Rn   = mrf - Rx*Ry       11yx f00r
+    //   mrf  = mrf - Rx*Ry       11yx f10r
+    //   mrb  = mrb - Rx*Ry       11yx f11r
+    //   Rn   = sat (mrf|mrb)     0000 fNNx
+    //   mrf  = 0                 0001 0100
+    //   mrb  = 0                 0001 0110
+    //   Fn   = Fx * Fy           0011 0000
+    //
+    // (SSF) => y=1 x=1 f=1 r=0.  (SSI) => y=1 x=1 f=0 r=0.
     let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *op {
-        MulOp::MrfMulSsf { rx, ry } => (0x40, 0, rx, ry),
-        MulOp::MrbMulSsf { rx, ry } => (0x41, 0, rx, ry),
-        MulOp::MulSsf { rn, rx, ry } => (0x44, rn, rx, ry),
+        // Rn = Rx * Ry family.
         MulOp::MulSsi { rn, rx, ry } => (0x70, rn, rx, ry),
+        MulOp::MulSsf { rn, rx, ry } => (0x78, rn, rx, ry),
+        // mrf = Rx * Ry family.
         MulOp::MrfMulSsi { rx, ry } => (0x74, 0, rx, ry),
-        MulOp::MrfMacSsf { rx, ry } => (0x48, 0, rx, ry),
-        MulOp::MrbMacSsf { rx, ry } => (0x49, 0, rx, ry),
-        MulOp::MacSsf { rn, rx, ry } => (0x4C, rn, rx, ry),
-        MulOp::MrfMsubSsf { rx, ry } => (0x50, 0, rx, ry),
-        MulOp::MrbMsubSsf { rx, ry } => (0x51, 0, rx, ry),
-        MulOp::SatMrf { rn } => (0x60, rn, 0, 0),
-        MulOp::SatMrb { rn } => (0x61, rn, 0, 0),
-        MulOp::ClrMrf => (0x64, 0, 0, 0),
-        MulOp::ClrMrb => (0x65, 0, 0, 0),
-        MulOp::TrncMrf => (0x68, 0, 0, 0),
-        MulOp::TrncMrb => (0x69, 0, 0, 0),
-        MulOp::TrncMrfReg { rn } => (0x6C, rn, 0, 0),
-        MulOp::TrncMrbReg { rn } => (0x6D, rn, 0, 0),
-        MulOp::MrfMulUuf { rx, ry } => (0x70, 0, rx, ry),
-        MulOp::FMul { rn, rx, ry } => (0x80, rn, rx, ry),
+        MulOp::MrfMulSsf { rx, ry } => (0x7C, 0, rx, ry),
+        MulOp::MrfMulUuf { rx, ry } => (0x4C, 0, rx, ry),
+        // mrb = Rx * Ry family.
+        MulOp::MrbMulSsf { rx, ry } => (0x7E, 0, rx, ry),
+        // Rn = mrf + Rx*Ry and accumulator-MAC variants.
+        MulOp::MacSsf { rn, rx, ry } => (0xB8, rn, rx, ry),
+        MulOp::MrfMacSsf { rx, ry } => (0xBC, 0, rx, ry),
+        MulOp::MrbMacSsf { rx, ry } => (0xBE, 0, rx, ry),
+        // Multiply-subtract variants.
+        MulOp::MrfMsubSsf { rx, ry } => (0xFC, 0, rx, ry),
+        MulOp::MrbMsubSsf { rx, ry } => (0xFE, 0, rx, ry),
+        // Accumulator clears (no operand fields).
+        MulOp::ClrMrf => (0x14, 0, 0, 0),
+        MulOp::ClrMrb => (0x16, 0, 0, 0),
+        // `Rn = sat mrf/mrb` at `0000 fNNx` with f=1 (fractional).
+        MulOp::SatMrf { rn } => (0x08, rn, 0, 0),
+        MulOp::SatMrb { rn } => (0x0A, rn, 0, 0),
+        // TRNC variants live only in the 64-bit multiplier
+        // encoding; these single-function placeholders are unused
+        // by selcc / selas today.
+        MulOp::TrncMrf => (0x18, 0, 0, 0),
+        MulOp::TrncMrb => (0x1A, 0, 0, 0),
+        MulOp::TrncMrfReg { rn } => (0x1C, rn, 0, 0),
+        MulOp::TrncMrbReg { rn } => (0x1E, rn, 0, 0),
+        // `Fn = Fx * Fy` (32/40-bit floating-point multiply) sits
+        // at opcode 0x30 = `0011 0000`. The previous value 0x80
+        // landed inside the MAC-accumulate row `10yx f00r` at y =
+        // x = f = r = 0, i.e. `Rn = mrf + Rx*Ry (UUI)`, so an
+        // `F2 = F0 * F1` of two IEEE-754 bit patterns ran an
+        // unsigned-integer multiply-accumulate through mrf on
+        // real silicon and returned 0.
+        MulOp::FMul { rn, rx, ry } => (0x30, rn, rx, ry),
+        // MR register read/write moves use an MR-transfer
+        // sub-encoding that is not part of the compute-field
+        // opcode table above; keep the previous values until a
+        // follow-up audit verifies them.
         MulOp::ReadMr0f { rn } => (0x00, rn, 0, 0),
         MulOp::ReadMr1f { rn } => (0x01, rn, 0, 0),
         MulOp::ReadMr2f { rn } => (0x02, rn, 0, 0),
@@ -882,9 +923,9 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
         MulOp::WriteMr0f { rn } => (0x10, rn, 0, 0),
         MulOp::WriteMr1f { rn } => (0x11, rn, 0, 0),
         MulOp::WriteMr2f { rn } => (0x12, rn, 0, 0),
-        MulOp::WriteMr0b { rn } => (0x14, rn, 0, 0),
-        MulOp::WriteMr1b { rn } => (0x15, rn, 0, 0),
-        MulOp::WriteMr2b { rn } => (0x16, rn, 0, 0),
+        MulOp::WriteMr0b { rn } => (0x20, rn, 0, 0),
+        MulOp::WriteMr1b { rn } => (0x21, rn, 0, 0),
+        MulOp::WriteMr2b { rn } => (0x22, rn, 0, 0),
     };
     check_reg4("MUL rn", rn)?;
     check_reg4("MUL rx", rx)?;
@@ -894,26 +935,30 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
 }
 
 fn encode_shift(op: &ShiftOp) -> Result<u32, EncodeError> {
+    // SHIFTOP opcode at bits[19:12] when CU = 10. Only the
+    // register-count form lives here; the immediate-count
+    // (shiftimm) form is encoded by `encode_type6b` and sits in
+    // a separate 6-bit sub-opcode space.
     let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *op {
         ShiftOp::Lshift { rn, rx, ry } => (0x00, rn, rx, ry),
-        ShiftOp::OrLshift { rn, rx, ry } => (0x04, rn, rx, ry),
-        ShiftOp::Ashift { rn, rx, ry } => (0x08, rn, rx, ry),
-        ShiftOp::OrAshift { rn, rx, ry } => (0x0C, rn, rx, ry),
-        ShiftOp::Rot { rn, rx, ry } => (0x20, rn, rx, ry),
-        ShiftOp::Btst { rx, ry } => (0x40, 0, rx, ry),
-        ShiftOp::Bclr { rn, rx, ry } => (0x44, rn, rx, ry),
-        ShiftOp::Bset { rn, rx, ry } => (0x48, rn, rx, ry),
-        ShiftOp::Btgl { rn, rx, ry } => (0x4C, rn, rx, ry),
-        ShiftOp::Fext { rn, rx, ry } => (0x60, rn, rx, ry),
-        ShiftOp::Fdep { rn, rx, ry } => (0x64, rn, rx, ry),
-        ShiftOp::OrFextSe { rn, rx, ry } => (0x68, rn, rx, ry),
-        ShiftOp::OrFdep { rn, rx, ry } => (0x6C, rn, rx, ry),
+        ShiftOp::Ashift { rn, rx, ry } => (0x04, rn, rx, ry),
+        ShiftOp::Rot { rn, rx, ry } => (0x08, rn, rx, ry),
+        ShiftOp::OrLshift { rn, rx, ry } => (0x20, rn, rx, ry),
+        ShiftOp::OrAshift { rn, rx, ry } => (0x24, rn, rx, ry),
+        ShiftOp::Fext { rn, rx, ry } => (0x40, rn, rx, ry),
+        ShiftOp::Fdep { rn, rx, ry } => (0x44, rn, rx, ry),
+        ShiftOp::OrFextSe { rn, rx, ry } => (0x48, rn, rx, ry),
+        ShiftOp::OrFdep { rn, rx, ry } => (0x64, rn, rx, ry),
         ShiftOp::Exp { rn, rx } => (0x80, rn, rx, 0),
         ShiftOp::ExpEx { rn, rx } => (0x84, rn, rx, 0),
         ShiftOp::Leftz { rn, rx } => (0x88, rn, rx, 0),
         ShiftOp::Lefto { rn, rx } => (0x8C, rn, rx, 0),
-        ShiftOp::Fpack { rn, rx } => (0xD0, rn, rx, 0),
-        ShiftOp::Funpack { rn, rx } => (0xD4, rn, rx, 0),
+        ShiftOp::Fpack { rn, rx } => (0x90, rn, rx, 0),
+        ShiftOp::Funpack { rn, rx } => (0x94, rn, rx, 0),
+        ShiftOp::Bset { rn, rx, ry } => (0xC0, rn, rx, ry),
+        ShiftOp::Bclr { rn, rx, ry } => (0xC4, rn, rx, ry),
+        ShiftOp::Btgl { rn, rx, ry } => (0xC8, rn, rx, ry),
+        ShiftOp::Btst { rx, ry } => (0xCC, 0, rx, ry),
     };
     check_reg4("SHIFT rn", rn)?;
     check_reg4("SHIFT rx", rx)?;
@@ -1875,7 +1920,7 @@ mod tests {
             cond: 31,
             compute: ComputeOp::Shift(ShiftOp::Rot { rn: 1, rx: 2, ry: 3 }),
         });
-        assert_eq!(text, "R1 = R1 OR LSHIFT R2 BY R3");
+        assert_eq!(text, "R1 = ROT R2 BY R3");
     }
 
     #[test]
@@ -2565,5 +2610,80 @@ mod tests {
             compute: None,
         });
         assert_eq!(text, "IF EQ R5<->S3");
+    }
+
+    // ──────────────────────────────────────────────────────────
+    // Compute-unit opcode audit
+    //
+    // These tests pin the 8-bit MULOP and SHIFTOP fields in the
+    // 48-bit encoder against the values the SHARC+ core actually
+    // executes. A round-trip test is not enough on its own: if
+    // both the encoder and the decoder drift to the same wrong
+    // value they still round-trip cleanly, but the compiled
+    // instruction runs a different operation on real silicon.
+    // ──────────────────────────────────────────────────────────
+
+    fn mul_opcode(op: MulOp) -> u32 {
+        let word = encode_word(&Instruction::Compute {
+            cond: 31,
+            compute: ComputeOp::Mul(op),
+        })
+        .expect("encode");
+        ((word >> 12) & 0xFF) as u32
+    }
+
+    fn shift_opcode(op: ShiftOp) -> u32 {
+        let word = encode_word(&Instruction::Compute {
+            cond: 31,
+            compute: ComputeOp::Shift(op),
+        })
+        .expect("encode");
+        ((word >> 12) & 0xFF) as u32
+    }
+
+    #[test]
+    fn mulop_opcode_audit() {
+        // `Rn = Rx * Ry` family (template 01yx f00r).
+        assert_eq!(mul_opcode(MulOp::MulSsi { rn: 0, rx: 1, ry: 2 }), 0x70);
+        assert_eq!(mul_opcode(MulOp::MulSsf { rn: 0, rx: 1, ry: 2 }), 0x78);
+        // `mrf = Rx * Ry` family (template 01yx f10r).
+        assert_eq!(mul_opcode(MulOp::MrfMulSsi { rx: 1, ry: 2 }), 0x74);
+        assert_eq!(mul_opcode(MulOp::MrfMulSsf { rx: 1, ry: 2 }), 0x7C);
+        assert_eq!(mul_opcode(MulOp::MrfMulUuf { rx: 1, ry: 2 }), 0x4C);
+        // `mrb = Rx * Ry` family (template 01yx f11r).
+        assert_eq!(mul_opcode(MulOp::MrbMulSsf { rx: 1, ry: 2 }), 0x7E);
+        // Multiply-accumulate variants (template 10yx fXXr).
+        assert_eq!(mul_opcode(MulOp::MacSsf { rn: 0, rx: 1, ry: 2 }), 0xB8);
+        assert_eq!(mul_opcode(MulOp::MrfMacSsf { rx: 1, ry: 2 }), 0xBC);
+        assert_eq!(mul_opcode(MulOp::MrbMacSsf { rx: 1, ry: 2 }), 0xBE);
+        // Multiply-subtract variants (template 11yx fXXr).
+        assert_eq!(mul_opcode(MulOp::MrfMsubSsf { rx: 1, ry: 2 }), 0xFC);
+        assert_eq!(mul_opcode(MulOp::MrbMsubSsf { rx: 1, ry: 2 }), 0xFE);
+        // Accumulator clears.
+        assert_eq!(mul_opcode(MulOp::ClrMrf), 0x14);
+        assert_eq!(mul_opcode(MulOp::ClrMrb), 0x16);
+        // `Fn = Fx * Fy` (0011 0000).
+        assert_eq!(mul_opcode(MulOp::FMul { rn: 0, rx: 1, ry: 2 }), 0x30);
+    }
+
+    #[test]
+    fn shiftop_opcode_audit() {
+        assert_eq!(shift_opcode(ShiftOp::Lshift { rn: 0, rx: 1, ry: 2 }), 0x00);
+        assert_eq!(shift_opcode(ShiftOp::Ashift { rn: 0, rx: 1, ry: 2 }), 0x04);
+        assert_eq!(shift_opcode(ShiftOp::Rot { rn: 0, rx: 1, ry: 2 }), 0x08);
+        assert_eq!(shift_opcode(ShiftOp::OrLshift { rn: 0, rx: 1, ry: 2 }), 0x20);
+        assert_eq!(shift_opcode(ShiftOp::OrAshift { rn: 0, rx: 1, ry: 2 }), 0x24);
+        assert_eq!(shift_opcode(ShiftOp::Fext { rn: 0, rx: 1, ry: 2 }), 0x40);
+        assert_eq!(shift_opcode(ShiftOp::Fdep { rn: 0, rx: 1, ry: 2 }), 0x44);
+        assert_eq!(shift_opcode(ShiftOp::Exp { rn: 0, rx: 1 }), 0x80);
+        assert_eq!(shift_opcode(ShiftOp::ExpEx { rn: 0, rx: 1 }), 0x84);
+        assert_eq!(shift_opcode(ShiftOp::Leftz { rn: 0, rx: 1 }), 0x88);
+        assert_eq!(shift_opcode(ShiftOp::Lefto { rn: 0, rx: 1 }), 0x8C);
+        assert_eq!(shift_opcode(ShiftOp::Fpack { rn: 0, rx: 1 }), 0x90);
+        assert_eq!(shift_opcode(ShiftOp::Funpack { rn: 0, rx: 1 }), 0x94);
+        assert_eq!(shift_opcode(ShiftOp::Bset { rn: 0, rx: 1, ry: 2 }), 0xC0);
+        assert_eq!(shift_opcode(ShiftOp::Bclr { rn: 0, rx: 1, ry: 2 }), 0xC4);
+        assert_eq!(shift_opcode(ShiftOp::Btgl { rn: 0, rx: 1, ry: 2 }), 0xC8);
+        assert_eq!(shift_opcode(ShiftOp::Btst { rx: 1, ry: 2 }), 0xCC);
     }
 }
