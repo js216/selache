@@ -30,6 +30,8 @@ pub struct Options {
     pub char_size: u8,
     pub double_size: u8,
     pub swc: bool,
+    pub ldf_file: Option<String>,
+    pub lib_paths: Vec<String>,
 }
 
 impl Default for Options {
@@ -51,6 +53,8 @@ impl Default for Options {
             char_size: 32,
             double_size: 64,
             swc: false,
+            ldf_file: None,
+            lib_paths: Vec::new(),
         }
     }
 }
@@ -118,6 +122,20 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                 }
                 opts.undefines.push(args[i].clone());
             }
+            "-T" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(Error::MissingArgument("-T".into()));
+                }
+                opts.ldf_file = Some(args[i].clone());
+            }
+            "-L" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(Error::MissingArgument("-L".into()));
+                }
+                opts.lib_paths.push(args[i].clone());
+            }
             "-char-size-8" => opts.char_size = 8,
             "-char-size-32" => opts.char_size = 32,
             "-double-size-32" => opts.double_size = 32,
@@ -134,7 +152,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             s if s.starts_with('-') => {
                 // Accept but ignore unrecognized switches for now,
                 // consuming an argument if the switch is known to take one.
-                if matches!(s, "-T" | "-L" | "-l" | "-R" | "-Map"
+                if matches!(s, "-l" | "-R" | "-Map"
                     | "-flags-compiler" | "-flags-asm" | "-flags-link"
                     | "-flags-mem" | "-flags-pp"
                     | "-Werror" | "-Wsuppress" | "-Wremarks"

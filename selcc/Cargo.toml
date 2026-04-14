@@ -5,5 +5,9 @@ edition = "2021"
 description = "C compiler for the Selache toolchain"
 
 [dependencies]
-selelf = { path = "../selelf" }
+selas = { path = "../selas" }
+seld = { path = "../seld" }
 selinstr = { path = "../selinstr" }
+
+[dev-dependencies]
+selelf = { path = "../selelf" }

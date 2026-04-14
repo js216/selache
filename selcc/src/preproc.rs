@@ -39,6 +39,12 @@ pub struct Preprocessor {
     time: String,
 }
 
+impl Default for Preprocessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Preprocessor {
     pub fn new() -> Self {
         let now = std::time::SystemTime::now();

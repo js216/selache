@@ -7,7 +7,9 @@ use std::io;
 
 #[derive(Debug)]
 pub enum Error {
-    Shared(selelf::error::Error),
+    Io(io::Error),
+    Assembler(selas::error::Error),
+    Linker(seld::error::Error),
     MissingInput,
     MissingArgument(String),
     NotImplemented(String),
@@ -20,7 +22,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Shared(e) => write!(f, "{e}"),
+            Error::Io(e) => write!(f, "{e}"),
+            Error::Assembler(e) => write!(f, "{e}"),
+            Error::Linker(e) => write!(f, "{e}"),
             Error::MissingInput => write!(f, "no input files"),
             Error::MissingArgument(what) => write!(f, "missing argument for {what}"),
             Error::NotImplemented(what) => write!(f, "{what}: not yet implemented"),
@@ -38,13 +42,19 @@ impl std::error::Error for Error {}
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
-        Error::Shared(selelf::error::Error::Io(e))
+        Error::Io(e)
     }
 }
 
-impl From<selelf::error::Error> for Error {
-    fn from(e: selelf::error::Error) -> Self {
-        Error::Shared(e)
+impl From<selas::error::Error> for Error {
+    fn from(e: selas::error::Error) -> Self {
+        Error::Assembler(e)
+    }
+}
+
+impl From<seld::error::Error> for Error {
+    fn from(e: seld::error::Error) -> Self {
+        Error::Linker(e)
     }
 }
 
