@@ -8,7 +8,7 @@
 //! `selinstr::encode` instruction types. Virtual register numbers are
 //! passed through verbatim -- the register allocator resolves them later.
 
-use crate::ir::{Cond, IrOp, Label, VReg};
+use crate::ir::{Cond, IrOp, Label};
 use crate::mach::{MachInstr, Reloc, RelocKind};
 use crate::target;
 
@@ -230,20 +230,21 @@ pub fn select(ir: &[IrOp]) -> IselResult {
             }
 
             IrOp::Ret(val) => {
-                // If returning a value not already in R0, move it there.
+                // Move the return value into R0 via the pinned
+                // pseudo-vreg `target::RETURN_REG_VREG`, which regalloc
+                // resolves to physical R0 regardless of the parameter
+                // register layout.
                 if let Some(vreg) = val {
-                    if *vreg != target::RETURN_REG as VReg {
-                        instrs.push(MachInstr {
-                            instr: Instruction::Compute {
-                                cond: target::COND_TRUE,
-                                compute: ComputeOp::Alu(AluOp::Pass {
-                                    rn: target::RETURN_REG,
-                                    rx: *vreg as u8,
-                                }),
-                            },
-                            reloc: None,
-                        });
-                    }
+                    instrs.push(MachInstr {
+                        instr: Instruction::Compute {
+                            cond: target::COND_TRUE,
+                            compute: ComputeOp::Alu(AluOp::Pass {
+                                rn: target::RETURN_REG_VREG,
+                                rx: *vreg as u8,
+                            }),
+                        },
+                        reloc: None,
+                    });
                 }
 
                 // SHARC+ C-ABI return sequence. A C caller issues a
@@ -294,10 +295,14 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                     },
                     reloc: None,
                 });
-                // Two NOPs fill the delayed branch's delay slots so
-                // no useful work runs after the indirect jump is
-                // latched and before control transfers.
-                instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
+                // Delay slot 1: RFRAME pops the caller's frame pointer
+                // (which the caller's delayed CALL pushed on the frame
+                // stack) back into I6. Without this the caller resumes
+                // execution with the callee's I6 still in place and
+                // the very next frame-relative access in the caller
+                // faults the core.
+                instrs.push(MachInstr { instr: Instruction::Rframe, reloc: None });
+                // Delay slot 2: NOP. Nothing useful to place here.
                 instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
             }
 
@@ -345,10 +350,14 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         kind: RelocKind::Addr24,
                     }),
                 });
-                // Result in R0.
-                if *dst as u8 != target::RETURN_REG {
-                    instrs.push(MachInstr::compute_pass(*dst as u8, target::RETURN_REG));
-                }
+                // Result in R0. Use the pinned `RETURN_REG_VREG`
+                // as the source so regalloc reads physical R0 (where
+                // the callee placed the value) instead of whatever
+                // vreg happens to have the number `RETURN_REG` in it.
+                instrs.push(MachInstr::compute_pass(
+                    *dst as u8,
+                    target::RETURN_REG_VREG,
+                ));
             }
 
             IrOp::CallIndirect(dst, addr, args) => {
@@ -415,10 +424,11 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                     },
                     reloc: None,
                 });
-                // Result in R0.
-                if *dst as u8 != target::RETURN_REG {
-                    instrs.push(MachInstr::compute_pass(*dst as u8, target::RETURN_REG));
-                }
+                // Result in R0, via the pinned `RETURN_REG_VREG`.
+                instrs.push(MachInstr::compute_pass(
+                    *dst as u8,
+                    target::RETURN_REG_VREG,
+                ));
             }
 
             IrOp::Branch(label) => {

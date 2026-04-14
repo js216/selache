@@ -12,7 +12,7 @@
 //! callee-saved (R8-R15) to minimise the prologue/epilogue overhead and
 //! keep the stack frame small enough for 6-bit signed offsets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::mach::MachInstr;
 use crate::target;
@@ -45,6 +45,13 @@ struct Allocator {
     vreg_to_phys: HashMap<u8, u8>,
     /// Reverse: physical register to virtual register.
     phys_to_vreg: HashMap<u8, u8>,
+    /// Physical registers that must not be evicted. Vreg 0 is always in
+    /// this set and pinned to physical R0, so that both the call-return
+    /// reload (`dst = PASS R0`) and the function-return move
+    /// (`R0 = PASS retval`) emitted by isel resolve to the ABI return
+    /// register instead of whatever register vreg 0 happens to land on
+    /// after the allocator evicts it.
+    pinned: HashSet<u8>,
     /// Round-robin index within the caller-saved range for eviction.
     next_evict: u8,
     /// Number of spill stack slots allocated.
@@ -57,14 +64,34 @@ impl Allocator {
     fn new(num_params: u8) -> Self {
         let mut vreg_to_phys = HashMap::new();
         let mut phys_to_vreg = HashMap::new();
-        // Pin parameter vregs to their ABI registers (R0..R(n-1)).
-        for i in 0..num_params.min(target::NUM_REGS) {
-            vreg_to_phys.insert(i, i);
-            phys_to_vreg.insert(i, i);
+        let mut pinned = HashSet::new();
+        // Pin parameter vregs to the physical registers the SHARC+
+        // C-ABI uses for incoming arguments: `target::ARG_REGS`
+        // (R4, R8, R12, R0 -- *not* a contiguous R0..R(n-1) range).
+        // Pinning vregs 0..n-1 to R0..R(n-1) instead would silently
+        // read garbage for any argument after the zeroth.
+        let arg_count = (num_params as usize).min(target::ARG_REGS.len());
+        for (i, &phys) in target::ARG_REGS.iter().take(arg_count).enumerate() {
+            vreg_to_phys.insert(i as u8, phys);
+            phys_to_vreg.insert(phys, i as u8);
+            pinned.insert(phys);
         }
+        // Pin the return-value pseudo-vreg to physical R0 so isel's
+        // `Pass { rn: RETURN_REG_VREG, rx: ... }` always resolves to
+        // `R0 = ...`. For a 4-argument function this is the same
+        // physical register as ARG_REGS[3] -- vreg 3 (the 4th arg)
+        // also lives in R0 -- which is fine because the 4th-arg
+        // vreg's content is dead by the time isel emits the return
+        // move, so overwriting R0 is safe.
+        vreg_to_phys.insert(target::RETURN_REG_VREG, target::RETURN_REG);
+        phys_to_vreg
+            .entry(target::RETURN_REG)
+            .or_insert(target::RETURN_REG_VREG);
+        pinned.insert(target::RETURN_REG);
         Self {
             vreg_to_phys,
             phys_to_vreg,
+            pinned,
             next_evict: 0,
             spill_slots: 0,
             spill_map: HashMap::new(),
@@ -104,8 +131,13 @@ impl Allocator {
             return phys;
         }
 
-        // Try caller-saved registers first (R0-R7).
+        // Try caller-saved registers first (R0-R7). Pinned registers are
+        // reserved for their owning vreg and must not be handed out to
+        // anyone else even when they appear "free" in phys_to_vreg.
         for &candidate in target::CALLER_SAVED {
+            if self.pinned.contains(&candidate) {
+                continue;
+            }
             if !self.phys_to_vreg.contains_key(&candidate) {
                 self.vreg_to_phys.insert(vreg, candidate);
                 self.phys_to_vreg.insert(candidate, vreg);
@@ -116,6 +148,9 @@ impl Allocator {
 
         // Then try callee-saved registers (R8-R15).
         for &candidate in target::CALLEE_SAVED {
+            if self.pinned.contains(&candidate) {
+                continue;
+            }
             if !self.phys_to_vreg.contains_key(&candidate) {
                 self.vreg_to_phys.insert(vreg, candidate);
                 self.phys_to_vreg.insert(candidate, vreg);
@@ -169,22 +204,25 @@ impl Allocator {
     /// Pick a physical register to evict.  Prefer caller-saved registers
     /// (R0-R7) since evicting them is cheaper (no prologue/epilogue cost).
     /// Uses round-robin within the caller-saved group for fairness.
+    /// Pinned registers (e.g. R0 aliased to vreg 0) are never candidates.
     fn pick_evict_candidate(&mut self) -> u8 {
         let n_caller = target::CALLER_SAVED.len() as u8;
         let start = self.next_evict;
         loop {
             let candidate = self.next_evict;
             self.next_evict = (self.next_evict + 1) % n_caller;
-            if self.phys_to_vreg.contains_key(&candidate) {
+            if !self.pinned.contains(&candidate)
+                && self.phys_to_vreg.contains_key(&candidate)
+            {
                 return candidate;
             }
             if self.next_evict == start {
                 break;
             }
         }
-        // Fallback: scan all registers for an occupied one.
+        // Fallback: scan all registers for an occupied, unpinned one.
         for i in 0..target::NUM_REGS {
-            if self.phys_to_vreg.contains_key(&i) {
+            if !self.pinned.contains(&i) && self.phys_to_vreg.contains_key(&i) {
                 return i;
             }
         }
@@ -277,6 +315,7 @@ impl Allocator {
 
             Instruction::Nop
             | Instruction::Idle
+            | Instruction::Rframe
             | Instruction::EmuIdle
             | Instruction::Sync
             | Instruction::DoLoop { .. }
@@ -877,13 +916,22 @@ mod tests {
                 }
             }
         }
-        // First 8 should all be caller-saved (0-7), only the 9th
-        // should be callee-saved (8+).
-        for &r in &assigned[..8.min(assigned.len())] {
-            assert!(r < 8, "expected caller-saved, got R{r}");
+        // R0 is pinned to the return-value pseudo-vreg, so only
+        // R1-R7 (7 registers) are available in the caller-saved
+        // pool. The first 7 allocations should all land there, and
+        // any further vreg has to fall through to callee-saved.
+        for &r in &assigned[..7.min(assigned.len())] {
+            assert!(
+                (1..=7).contains(&r),
+                "expected caller-saved (R1-R7), got R{r}"
+            );
         }
-        if assigned.len() > 8 {
-            assert!(assigned[8] >= 8, "expected callee-saved for 9th vreg");
+        if assigned.len() > 7 {
+            assert!(
+                assigned[7] >= 8,
+                "expected callee-saved for 8th vreg, got R{}",
+                assigned[7]
+            );
         }
     }
 }

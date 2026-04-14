@@ -20,17 +20,43 @@ pub const INDIRECT_CALL_PMI: u8 = 4;
 /// PM M-register index for indirect calls (M12 = PM DAG2 index 4).
 pub const INDIRECT_CALL_PMM: u8 = 4;
 
-/// Argument registers R0-R3.
-pub const ARG_REGS: &[u8] = &[0, 1, 2, 3];
+/// Integer/pointer argument registers for the SHARC+ C-ABI: the
+/// first four scalar args go in R4, R8, R12, R0 (in that order),
+/// not the naive R0-R3 sequence most other ABIs use. Verified
+/// against the call sites the SHARC+ C compiler emits for a
+/// two-argument function, which load `a` into R4 and `b` into R8
+/// before a CJUMP. If selcc pins parameter vregs to R0..R3
+/// instead, the callee reads garbage on entry because the caller
+/// puts the real arguments somewhere else.
+pub const ARG_REGS: &[u8] = &[4, 8, 12, 0];
 
-/// Caller-saved data registers R0-R7.
+/// Data registers that do NOT need to be preserved across a
+/// CJUMP. Listing R0-R7 explicitly keeps the ALU's x-bank fully
+/// available to the register allocator for scratch values, while
+/// still covering the SHARC+ C-ABI guarantee that R0 (return /
+/// fourth arg) and R4 (first arg) are caller-saved.
 pub const CALLER_SAVED: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7];
 
-/// Callee-saved data registers R8-R15.
+/// Data registers the SHARC+ C-ABI expects to survive a CJUMP:
+/// R8-R15. Selcc's prologue saves each one the body actually
+/// writes, and its epilogue restores them before the RFRAME return.
 pub const CALLEE_SAVED: &[u8] = &[8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Return value is in R0.
 pub const RETURN_REG: u8 = 0;
+
+/// Pseudo-vreg that the register allocator pins to physical R0. isel
+/// uses this number as the destination vreg for the return-value move
+/// so that post-regalloc the `Pass` ends up writing physical R0, not
+/// whatever physical register got assigned to any real vreg. A plain
+/// `target::RETURN_REG` does not work here: regalloc interprets the
+/// rn/rx fields of compute instructions as vreg numbers and remaps
+/// them through its pinning table, and under the SHARC+ C-ABI
+/// `target::RETURN_REG` (= 0) collides with the fourth argument slot
+/// (R0 is ARG_REGS[3]). Any value outside 0..NUM_REGS works; 0xFF is
+/// chosen to stay clear of both the physical register numbers and
+/// any normal vreg the rest of the compiler might produce.
+pub const RETURN_REG_VREG: u8 = 0xFF;
 
 /// 16 data registers total (R0-R15).
 pub const NUM_REGS: u8 = 16;
@@ -65,7 +91,7 @@ mod tests {
         assert_eq!(FRAME_PTR, 6);
         assert_eq!(RETURN_REG, 0);
         assert_eq!(NUM_REGS, 16);
-        assert_eq!(ARG_REGS, &[0, 1, 2, 3]);
+        assert_eq!(ARG_REGS, &[4, 8, 12, 0]);
         assert_eq!(CALLER_SAVED.len(), 8);
         assert_eq!(CALLEE_SAVED.len(), 8);
         // Caller-saved and callee-saved should cover all 16 registers.

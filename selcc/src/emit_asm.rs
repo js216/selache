@@ -499,12 +499,64 @@ fn emit_function_instrs(
     let (resolved, label_insertions) = resolve_branches(&optimized, &label_map, prologue_len);
     let resolved = expand_large_frame_offsets(&resolved);
 
-    let mut instrs = Vec::with_capacity(prologue.len() + resolved.len() + epilogue.len());
+    // isel's IrOp::Ret handler emits the 4-instruction SHARC+ C-ABI
+    // leaf-return sequence as the last instructions of the body. The
+    // epilogue (callee-saved restores + frame teardown) must run BEFORE
+    // that sequence, otherwise the delayed indirect JUMP transfers
+    // control first and the restores are dead code. Split the body at
+    // the trailing return sequence and splice the epilogue between.
+    let (body_head, body_tail) = split_trailing_return_sequence(resolved);
+
+    let mut instrs = Vec::with_capacity(
+        prologue.len() + body_head.len() + epilogue.len() + body_tail.len()
+    );
     instrs.extend(prologue);
-    instrs.extend(resolved);
+    instrs.extend(body_head);
     instrs.extend(epilogue);
+    instrs.extend(body_tail);
 
     Ok(FnEmitResult { instrs, strings, wide_strings, static_locals, label_insertions })
+}
+
+/// Detach the 4-instruction SHARC+ C-ABI return sequence from the tail
+/// of the body so the epilogue can be spliced in front of it. The
+/// sequence is `I12 = DM(M7,I6)` + `JUMP (M14,I12) (DB)` + RFRAME + NOP,
+/// matching exactly what isel's IrOp::Ret handler emits. If the pattern
+/// is not at the tail (e.g. a function body that ends with something
+/// else entirely), the whole body stays in the head slice.
+fn split_trailing_return_sequence(
+    mut body: Vec<MachInstr>,
+) -> (Vec<MachInstr>, Vec<MachInstr>) {
+    let n = body.len();
+    if n < 4 {
+        return (body, Vec::new());
+    }
+    let matches = matches!(
+        body[n - 4].instr,
+        Instruction::UregDagMove {
+            pm: false,
+            write: false,
+            ureg: 0x1C,
+            i_reg: 6,
+            m_reg: 7,
+            ..
+        },
+    ) && matches!(
+        body[n - 3].instr,
+        Instruction::IndirectBranch {
+            call: false,
+            pm_i: 4,
+            pm_m: 6,
+            delayed: true,
+            ..
+        },
+    ) && matches!(body[n - 2].instr, Instruction::Rframe)
+        && matches!(body[n - 1].instr, Instruction::Nop);
+    if !matches {
+        return (body, Vec::new());
+    }
+    let tail = body.split_off(n - 4);
+    (body, tail)
 }
 
 // --------------------------------------------------------------------
@@ -1159,7 +1211,7 @@ fn resolve_branches(
     // whatever unit (words or parcels) the output mode needs, and suppresses
     // VISA compression inside the loop body.
     let mut label_insertions: HashMap<usize, String> = HashMap::new();
-    for (body_idx, mi) in instrs.iter().enumerate() {
+    for mi in instrs.iter() {
         let (new_instr, new_reloc) = match mi.instr {
             Instruction::Branch {
                 call,
@@ -1167,19 +1219,30 @@ fn resolve_branches(
                 delayed: false,
                 target: BranchTarget::PcRelative(label_as_i32),
             } if mi.reloc.is_none() => {
+                // Route same-function branches through a synthetic local
+                // label and let selas compute RELADDR at assembly time in
+                // the correct unit for the target mode (parcels in VISA
+                // PM, word offsets otherwise). A precomputed numeric
+                // `JUMP (PC, N)` where `N` was measured in instructions
+                // goes into the RELADDR field as-is, which the SHARC+
+                // hardware then interprets as parcels in VISA mode and
+                // dispatches to the wrong instruction, so any non-leaf
+                // function with a branch crashes the core.
                 let label = label_as_i32 as Label;
                 let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
-                let pc = body_idx + prologue_len;
                 let target_pc = target_body_idx + prologue_len;
-                let offset = target_pc as i32 - pc as i32;
+                let name = format!(".L_branch_{label}");
+                label_insertions
+                    .entry(target_pc)
+                    .or_insert_with(|| name.clone());
                 (
                     Instruction::Branch {
                         call,
                         cond,
                         delayed: false,
-                        target: BranchTarget::PcRelative(offset),
+                        target: BranchTarget::Absolute(0),
                     },
-                    mi.reloc.clone(),
+                    Some(Reloc { symbol: name, kind: RelocKind::Addr24 }),
                 )
             }
             Instruction::DoLoop { counter, end_pc } => {
@@ -1441,9 +1504,14 @@ mod tests {
                 text.len()
             );
             let end_line = &text[end_idx];
+            // The end line is the final body instruction, which for
+            // this source shape is the accumulator spill-store. The
+            // exact stack-slot offset depends on how regalloc lays
+            // out the locals, so only check the instruction shape
+            // (a frame-relative DM write), not a specific offset.
             assert!(
-                end_line.contains("DM (-0x1,I6)="),
-                "DO at {do_idx}: end at {end_idx} is {end_line:?}, expected the accumulator store"
+                end_line.contains("DM (-0x") && end_line.contains(",I6)="),
+                "DO at {do_idx}: end at {end_idx} is {end_line:?}, expected a frame-relative store"
             );
         }
     }
