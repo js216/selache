@@ -191,14 +191,16 @@ fn drive_link(opts: &cli::Options) -> error::Result<()> {
         .clone()
         .unwrap_or_else(|| "a.out".to_string());
 
-    let mut seld_opts = seld_default_options();
-    seld_opts.ldf_file = Some(ldf);
-    seld_opts.output_file = Some(output_file.clone());
-    seld_opts.input_files = doj_paths;
-    seld_opts.lib_paths = opts.lib_paths.clone();
-    seld_opts.processor = opts.processor.clone();
-    seld_opts.si_revision = opts.si_revision.clone();
-    seld_opts.verbose = opts.verbose;
+    let seld_opts = seld::cli::Options {
+        ldf_file: Some(ldf),
+        output_file: Some(output_file.clone()),
+        input_files: doj_paths,
+        lib_paths: opts.lib_paths.clone(),
+        processor: opts.processor.clone(),
+        si_revision: opts.si_revision.clone(),
+        verbose: opts.verbose,
+        ..Default::default()
+    };
 
     let link_result = seld::link(&seld_opts)?;
     std::fs::write(&output_file, &link_result.image)?;
@@ -232,13 +234,6 @@ fn assemble_text(asm: &str, opts: &cli::Options) -> error::Result<Vec<u8>> {
         is_visa,
     )?;
     Ok(bytes)
-}
-
-/// Build a default `seld::cli::Options` by running the linker's arg parser
-/// with an empty argv. `Options::new` is private to the seld crate, so this
-/// is the shortest way to get a zero-valued struct.
-fn seld_default_options() -> seld::cli::Options {
-    seld::cli::parse_args(&[]).expect("empty seld argv must parse")
 }
 
 /// Choose the output file for a single-file transformation.

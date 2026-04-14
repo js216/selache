@@ -5,7 +5,7 @@
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Options {
     pub processor: Option<String>,
     pub ldf_file: Option<String>,
@@ -35,39 +35,6 @@ pub struct Options {
     pub error_warnings: Vec<u32>,
 }
 
-impl Options {
-    fn new() -> Self {
-        Self {
-            processor: None,
-            ldf_file: None,
-            output_file: None,
-            lib_paths: Vec::new(),
-            include_paths: Vec::new(),
-            input_files: Vec::new(),
-            entry: None,
-            map_file: None,
-            eliminate: false,
-            keep_sections: Vec::new(),
-            strip_all: false,
-            strip_debug: false,
-            trace: false,
-            trace_full: false,
-            verbose: false,
-            show_help: false,
-            show_version: false,
-            mem_init: false,
-            skip_preprocess: false,
-            save_temps: false,
-            xref: false,
-            defines: HashMap::new(),
-            undefines: Vec::new(),
-            si_revision: None,
-            disabled_warnings: Vec::new(),
-            error_warnings: Vec::new(),
-        }
-    }
-}
-
 /// Expand response files (@filename) into argument lists.
 fn expand_response_files(args: &[String]) -> Result<Vec<String>> {
     let mut expanded = Vec::new();
@@ -87,7 +54,7 @@ fn expand_response_files(args: &[String]) -> Result<Vec<String>> {
 
 pub fn parse_args(args: &[String]) -> Result<Options> {
     let args = expand_response_files(args)?;
-    let mut opts = Options::new();
+    let mut opts = Options::default();
 
     let mut i = 0;
     while i < args.len() {
