@@ -296,6 +296,21 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
         HashMap::new();
     let mut current_section_idx: Option<usize> = None;
     let mut pending: Vec<PendingInstr> = Vec::new();
+    // SHARC+ hardware DO loops forbid VISA-compressed instructions in
+    // the loop body: the hardware DO unit steps the PC in 48-bit
+    // instruction units, so any parcel-compressed body instruction
+    // desynchronises the loop-end compare and the board hangs. While
+    // `no_compress_label` is set, VISA compression is suppressed and
+    // every body instruction is emitted in full 48-bit ISA form. The
+    // flag is armed by `LCNTR = ..., DO end_lbl UNTIL LCE` whose
+    // end-of-loop target is a symbolic label. It is cleared after the
+    // first instruction encoded at-or-after the end label is written,
+    // so the label's own instruction -- whether on the same line as
+    // the label or on a following line, since a standalone label
+    // names the next instruction's address -- is the last one of the
+    // body and is still forced to 48-bit.
+    let mut no_compress_label: Option<String> = None;
+    let mut end_label_seen: bool = false;
 
     // Pass 1: encode instructions, build label map, track unresolved refs
     for line in &lines {
@@ -320,6 +335,9 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                 sec.word_offset()
             };
             sec.symbols.push((label.clone(), word_off));
+            if no_compress_label.as_deref() == Some(label.as_str()) {
+                end_label_seen = true;
+            }
         }
 
         if let Some(instr) = &line.instruction {
@@ -340,7 +358,14 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
             if visa && sec.is_pm {
                 let isa_bytes =
                     selinstr::encode::encode(instr).expect("instruction encoding failed");
-                let encoded = selinstr::visa_encode::visa_encode(instr, &isa_bytes);
+                let encoded = if no_compress_label.is_some() {
+                    // Inside a hardware DO loop body: force the 48-bit
+                    // ISA form so the hardware DO unit keeps the PC and
+                    // the loop-end compare aligned.
+                    selinstr::visa_encode::VisaEncoded::W48(isa_bytes)
+                } else {
+                    selinstr::visa_encode::visa_encode(instr, &isa_bytes)
+                };
                 let bytes = encoded.to_bytes();
                 sec.parcel_count += encoded.parcels();
                 sec.code.extend_from_slice(&bytes);
@@ -359,6 +384,33 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     instr: *instr,
                     label_ref: label_ref.clone(),
                 });
+            }
+        }
+
+        // Clear the "force 48-bit" flag once the first instruction at-
+        // or-after the end-label has been encoded. `end_label_seen` is
+        // set when the label definition is processed (above); the
+        // instruction belonging to that label is the last body
+        // instruction and has just been written in 48-bit form, so
+        // compression can resume from the next line.
+        if end_label_seen && line.instruction.is_some() {
+            no_compress_label = None;
+            end_label_seen = false;
+        }
+
+        // Arm the flag after encoding a `DO end_lbl UNTIL LCE` so the
+        // body instructions that follow it are forced to 48-bit. The
+        // DO instruction itself is not a body instruction.
+        if let Some(instr) = &line.instruction {
+            if matches!(
+                instr,
+                selinstr::encode::Instruction::DoLoop { .. }
+                    | selinstr::encode::Instruction::DoUntil { .. }
+            ) {
+                if let Some(lbl) = &line.label_ref {
+                    no_compress_label = Some(lbl.clone());
+                    end_label_seen = false;
+                }
             }
         }
     }
@@ -1072,6 +1124,43 @@ mod tests {
         let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
             .expect("seg_pmco section not found");
         assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
+    }
+
+    /// In VISA mode, the body of a hardware `DO ... UNTIL LCE` loop
+    /// must be emitted as full 48-bit ISA instructions even when one
+    /// or more of the individual instructions would compress down to
+    /// 16/32 bits on their own. The hardware DO unit steps its
+    /// internal PC in 48-bit instruction units, so a compressed body
+    /// instruction desynchronises the loop-end compare and the board
+    /// hangs: a hand-written `LCNTR=10, DO sum_loop_end UNTIL LCE`
+    /// built with the old code path hit `R3 = R2 + R1`, the
+    /// compressor emitted the 32-bit Type 6b form, and the board
+    /// locked up every time. This test assembles a hardware loop in
+    /// VISA mode with a body instruction that *would* compress in
+    /// normal code, then walks the seg_pmco bytes and asserts each
+    /// body slot occupies a full six bytes.
+    #[test]
+    fn test_hardware_loop_body_is_48_bit_in_visa() {
+        let src = ".SECTION/PM seg_pmco;\n\
+                   .GLOBAL loop_test;\n\
+                   loop_test:\n\
+                   LCNTR = 0xA, DO sum_loop_end UNTIL LCE;\n\
+                   R0 = R0 + R1;\n\
+                   R2 = PASS R0;\n\
+                   sum_loop_end:\n\
+                   R3 = R2 + R1;\n\
+                   RTS;\n\
+                   .ENDSEG;\n";
+        let data = assemble_source(src, true).expect("assemble");
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found");
+        // DO + 3 body instructions + RTS = 5 slots, all full-width
+        // 48-bit (6 bytes each) = 30 bytes of code.
+        assert_eq!(shdr.sh_size, 30,
+            "expected every instruction (DO + body + RTS) to be \
+             48-bit; got section size {} instead of 30",
+             shdr.sh_size);
     }
 
     /// `CJUMP local_label` has to become an R_SHARC_ADDR24 relocation

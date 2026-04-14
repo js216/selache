@@ -21,7 +21,7 @@ use crate::ir::Label;
 use crate::ir_opt;
 use crate::isel;
 use crate::lower;
-use crate::mach::{MachInstr, Reloc};
+use crate::mach::{MachInstr, Reloc, RelocKind};
 use crate::regalloc;
 use crate::target;
 
@@ -65,6 +65,7 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
     struct CompiledFunction {
         name: String,
         instrs: Vec<MachInstr>,
+        label_insertions: HashMap<usize, String>,
     }
     let mut compiled: Vec<CompiledFunction> = Vec::new();
 
@@ -97,6 +98,7 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
         compiled.push(CompiledFunction {
             name: func.name.clone(),
             instrs: fr.instrs,
+            label_insertions: fr.label_insertions,
         });
     }
 
@@ -115,6 +117,13 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
     for cf in &compiled {
         for mi in &cf.instrs {
             if let Some(r) = &mi.reloc {
+                // Local labels generated inside a function (e.g. the
+                // end-of-loop labels synthesised for hardware DO loops)
+                // are never real external symbols and must not appear
+                // in a `.EXTERN` declaration.
+                if r.symbol.starts_with(".L") {
+                    continue;
+                }
                 let sym = with_abi_suffix(&r.symbol);
                 if !defined_syms.contains(&r.symbol) && !externs.contains(&sym) {
                     externs.push(sym);
@@ -138,7 +147,10 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
             let sym = with_abi_suffix(&cf.name);
             let _ = writeln!(out, ".GLOBAL {sym};");
             let _ = writeln!(out, "{sym}:");
-            for mi in &cf.instrs {
+            for (body_idx, mi) in cf.instrs.iter().enumerate() {
+                if let Some(lbl) = cf.label_insertions.get(&body_idx) {
+                    let _ = writeln!(out, "{lbl}:");
+                }
                 let line = emit_instr_line(mi).map_err(|e| Error::NotImplemented(format!("encode: {e}")))?;
                 let _ = writeln!(out, "    {line};");
             }
@@ -358,20 +370,51 @@ fn emit_instr_line(mi: &MachInstr) -> std::result::Result<String, encode::Encode
     let Some(reloc) = &mi.reloc else {
         return Ok(base);
     };
-    let sym = with_abi_suffix(&reloc.symbol);
+    // Local labels (synthesised internal references like the
+    // `.L_doloop_end_N` tags this backend uses for hardware DO loops)
+    // must NOT get the SHARC C-ABI trailing-dot suffix applied; the
+    // suffix only decorates real C symbol names.
+    let sym = if reloc.symbol.starts_with(".L") {
+        reloc.symbol.clone()
+    } else {
+        with_abi_suffix(&reloc.symbol)
+    };
     Ok(substitute_reloc_target(&base, &sym))
 }
 
 /// Patch the disassembled text to reference a symbolic target. Used when
 /// the machine instruction carries a relocation so the emitted asm line
-/// ends with the symbol name rather than the `0x000000` placeholder.
+/// references the symbol name rather than the `0x000000` placeholder.
 fn substitute_reloc_target(text: &str, sym: &str) -> String {
-    // Case 1: `<ureg> = 0x...` — LoadImm of a global address.
+    // Case 1: `LCNTR = <count> , DO (PC,0x...)UNTIL LCE` — hardware DO
+    // loop. Replace only the *inner* hex literal (the RELADDR
+    // placeholder) with the symbol; the counter value before the comma
+    // stays untouched. Must be checked before the `" = 0x"` rule,
+    // because an LCNTR-initialised DO loop matches both shapes.
+    if text.contains("DO (PC,0x") || text.contains("DO (PC, 0x") {
+        if let Some(do_pos) = text.find("DO (PC") {
+            let tail = &text[do_pos..];
+            if let Some(open) = tail.find("0x") {
+                let hex_start = do_pos + open;
+                let after_hex = &text[hex_start..];
+                let hex_end = after_hex
+                    .char_indices()
+                    .skip(2)
+                    .find(|(_, c)| !c.is_ascii_hexdigit())
+                    .map(|(i, _)| hex_start + i)
+                    .unwrap_or(text.len());
+                let before = &text[..hex_start];
+                let after = &text[hex_end..];
+                return format!("{before}{sym}{after}");
+            }
+        }
+    }
+    // Case 2: `<ureg> = 0x...` — LoadImm of a global address.
     if let Some(eq) = text.find(" = 0x") {
         let lhs = &text[..eq];
         return format!("{lhs} = {sym}");
     }
-    // Case 2: `JUMP 0x...` / `CALL 0x...` / `IF cond JUMP 0x...`.
+    // Case 3: `JUMP 0x...` / `CALL 0x...` / `IF cond JUMP 0x...`.
     // Strip the trailing hex literal and replace it with the symbol.
     if let Some(pos) = text.rfind("0x") {
         // Walk forward until the hex literal ends.
@@ -397,6 +440,12 @@ struct FnEmitResult {
     strings: Vec<String>,
     wide_strings: Vec<Vec<u32>>,
     static_locals: Vec<lower::StaticLocal>,
+    /// Function-absolute indices of machine instructions that must be
+    /// preceded by a local label in the asm output. Currently used by
+    /// hardware DO loops: the end-of-loop label is inserted before the
+    /// last body instruction so that selas resolves the DO target
+    /// symbolically at assembly time.
+    label_insertions: HashMap<usize, String>,
 }
 
 /// Run the per-function pipeline and return the final machine-instruction
@@ -447,7 +496,7 @@ fn emit_function_instrs(
     let epilogue = build_epilogue(frame_size, &used_callee_saved);
 
     let prologue_len = prologue.len();
-    let resolved = resolve_branches(&optimized, &label_map, prologue_len);
+    let (resolved, label_insertions) = resolve_branches(&optimized, &label_map, prologue_len);
     let resolved = expand_large_frame_offsets(&resolved);
 
     let mut instrs = Vec::with_capacity(prologue.len() + resolved.len() + epilogue.len());
@@ -455,7 +504,7 @@ fn emit_function_instrs(
     instrs.extend(resolved);
     instrs.extend(epilogue);
 
-    Ok(FnEmitResult { instrs, strings, wide_strings, static_locals })
+    Ok(FnEmitResult { instrs, strings, wide_strings, static_locals, label_insertions })
 }
 
 // --------------------------------------------------------------------
@@ -1100,53 +1149,63 @@ fn resolve_branches(
     instrs: &[MachInstr],
     label_map: &HashMap<Label, usize>,
     prologue_len: usize,
-) -> Vec<MachInstr> {
-    instrs
-        .iter()
-        .enumerate()
-        .map(|(body_idx, mi)| {
-            let new_instr = match mi.instr {
-                Instruction::Branch {
-                    call,
-                    cond,
-                    delayed: false,
-                    target: BranchTarget::PcRelative(label_as_i32),
-                } if mi.reloc.is_none() => {
-                    let label = label_as_i32 as Label;
-                    let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
-                    let pc = body_idx + prologue_len;
-                    let target_pc = target_body_idx + prologue_len;
-                    let offset = target_pc as i32 - pc as i32;
+) -> (Vec<MachInstr>, HashMap<usize, String>) {
+    let mut out = Vec::with_capacity(instrs.len());
+    // Map from function-absolute instruction index (prologue + body + epilogue)
+    // to a locally-generated label name. The caller inserts each label in the
+    // asm text immediately before the instruction at that index, so selas sees
+    // a `DO .L_doloop_end_N UNTIL LCE` form with a symbolic target instead of
+    // a numeric offset. selas then resolves the label at assembly time, in
+    // whatever unit (words or parcels) the output mode needs, and suppresses
+    // VISA compression inside the loop body.
+    let mut label_insertions: HashMap<usize, String> = HashMap::new();
+    for (body_idx, mi) in instrs.iter().enumerate() {
+        let (new_instr, new_reloc) = match mi.instr {
+            Instruction::Branch {
+                call,
+                cond,
+                delayed: false,
+                target: BranchTarget::PcRelative(label_as_i32),
+            } if mi.reloc.is_none() => {
+                let label = label_as_i32 as Label;
+                let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
+                let pc = body_idx + prologue_len;
+                let target_pc = target_body_idx + prologue_len;
+                let offset = target_pc as i32 - pc as i32;
+                (
                     Instruction::Branch {
                         call,
                         cond,
                         delayed: false,
                         target: BranchTarget::PcRelative(offset),
-                    }
-                }
-                Instruction::DoLoop { counter, end_pc } => {
-                    // RELADDR in the encoded Type 12 word is PC-relative to
-                    // the DO instruction itself (see the SHARC ISR, Program
-                    // Flow Control, Type 12 opcode). The value must be
-                    // `end_of_loop_address - do_instruction_address`, where
-                    // `end_of_loop_address` is the address of the last
-                    // instruction of the loop body.
-                    let label = end_pc as Label;
-                    let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
-                    let pc = body_idx + prologue_len;
-                    let target_pc = target_body_idx + prologue_len;
-                    let last_body_pc = if target_pc > 0 { target_pc - 1 } else { 0 };
-                    let offset = last_body_pc as i32 - pc as i32;
-                    Instruction::DoLoop {
-                        counter,
-                        end_pc: offset as u32,
-                    }
-                }
-                other => other,
-            };
-            MachInstr { instr: new_instr, reloc: mi.reloc.clone() }
-        })
-        .collect()
+                    },
+                    mi.reloc.clone(),
+                )
+            }
+            Instruction::DoLoop { counter, end_pc } => {
+                // Emit a synthetic local label at the last-body-instruction
+                // position and reference it from the DO instruction, so that
+                // selas computes RELADDR in the right unit for the target
+                // mode and treats everything up to that label as a
+                // compression-forbidden hardware-loop body.
+                let label = end_pc as Label;
+                let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
+                let target_pc = target_body_idx + prologue_len;
+                let last_body_pc = if target_pc > 0 { target_pc - 1 } else { 0 };
+                let name = format!(".L_doloop_end_{label}");
+                label_insertions
+                    .entry(last_body_pc)
+                    .or_insert_with(|| name.clone());
+                (
+                    Instruction::DoLoop { counter, end_pc: 0 },
+                    Some(Reloc { symbol: name, kind: RelocKind::Addr24 }),
+                )
+            }
+            other => (other, mi.reloc.clone()),
+        };
+        out.push(MachInstr { instr: new_instr, reloc: new_reloc });
+    }
+    (out, label_insertions)
 }
 
 #[cfg(test)]
