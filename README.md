@@ -1,17 +1,26 @@
 # Selache: Open-Source Toolchain for SHARC+ DSP
 
-- **libsel**: C standard library (string, math, stdlib, ctype, stdio)
-- **selar**: ELF archive tool for static libraries (.dlb)
+Core toolchain:
+
 - **selas**: SHARC+ assembler
 - **selcc**: C99 compiler
 - **seld**: LDF-driven linker with processor memory model
+- **selload**: generate SHARC+ boot stream (LDR) from ELF
+
+Libraries:
+
+- **libsel**: C standard library (string, math, stdlib, ctype, stdio)
+- **selelf**: ELF/archive parsing and writing
+- **selinstr**: SHARC+ instruction encoder, disassembler, and VISA
+  compression
+
+Utilities:
+
+- **selar**: ELF archive tool for static libraries (.dlb)
 - **seldump**: inspect ELF headers, symbols, relocations, hex dump,
   disassembly, archive browsing
-- **selelf**: ELF/archive parsing and writing, instruction
-  encoder/disassembler
 - **selhex**: convert Intel HEX32 to Motorola S-record
 - **selinit**: generate runtime memory initializer tables
-- **selload**: generate SHARC+ boot stream (LDR) from ELF
 - **selmem**: report memory usage vs. processor memory map
 - **selpatch**: extract or replace raw section content in ELF
 - **selsyms**: print global/weak symbols as LDF RESOLVE() lines
