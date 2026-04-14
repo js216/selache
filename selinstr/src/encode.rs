@@ -124,6 +124,11 @@ pub enum MulOp {
     MrbMulSsf { rx: u8, ry: u8 },
     /// Rn = Rx * Ry (SSF)
     MulSsf { rn: u8, rx: u8, ry: u8 },
+    /// Rn = Rx * Ry (SSI) — signed-integer multiply, 32-bit result
+    MulSsi { rn: u8, rx: u8, ry: u8 },
+    /// MRF = Rx * Ry (SSI) — signed-integer multiply, full 64-bit
+    /// product available in MR0F (low 32) and MR1F (high 32).
+    MrfMulSsi { rx: u8, ry: u8 },
     /// MRF = MRF + Rx * Ry (SSF)
     MrfMacSsf { rx: u8, ry: u8 },
     /// MRB = MRB + Rx * Ry (SSF)
@@ -830,6 +835,8 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
         MulOp::MrfMulSsf { rx, ry } => (0x40, 0, rx, ry),
         MulOp::MrbMulSsf { rx, ry } => (0x41, 0, rx, ry),
         MulOp::MulSsf { rn, rx, ry } => (0x44, rn, rx, ry),
+        MulOp::MulSsi { rn, rx, ry } => (0x70, rn, rx, ry),
+        MulOp::MrfMulSsi { rx, ry } => (0x74, 0, rx, ry),
         MulOp::MrfMacSsf { rx, ry } => (0x48, 0, rx, ry),
         MulOp::MrbMacSsf { rx, ry } => (0x49, 0, rx, ry),
         MulOp::MacSsf { rn, rx, ry } => (0x4C, rn, rx, ry),
