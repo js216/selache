@@ -217,7 +217,9 @@ fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u8) -> bool {
 fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u8) -> bool {
     use selinstr::encode::MulOp::*;
     match *op {
-        MulSsf { rn, rx, ry } | FMul { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
+        MulSsf { rn, rx, ry }
+        | MulSsi { rn, rx, ry }
+        | FMul { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
         _ => false,
     }
 }
@@ -701,6 +703,7 @@ fn rewrite_dest(mi: &MachInstr, old_dst: u8, new_dst: u8) -> Option<MachInstr> {
                 ComputeOp::Mul(mul) => {
                     let new_mul = match mul {
                         MulOp::MulSsf { rn, rx, ry } if rn == old_dst => MulOp::MulSsf { rn: new_dst, rx, ry },
+                        MulOp::MulSsi { rn, rx, ry } if rn == old_dst => MulOp::MulSsi { rn: new_dst, rx, ry },
                         MulOp::FMul { rn, rx, ry } if rn == old_dst => MulOp::FMul { rn: new_dst, rx, ry },
                         _ => return None,
                     };
@@ -791,7 +794,9 @@ fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u8>) {
             _ => {}
         },
         ComputeOp::Mul(ref m) => match *m {
-            MulOp::MulSsf { rx, ry, .. } | MulOp::FMul { rx, ry, .. } => {
+            MulOp::MulSsf { rx, ry, .. }
+            | MulOp::MulSsi { rx, ry, .. }
+            | MulOp::FMul { rx, ry, .. } => {
                 regs.push(rx);
                 regs.push(ry);
             }
@@ -899,6 +904,7 @@ fn remap_compute_sources(
         }),
         ComputeOp::Mul(ref m) => ComputeOp::Mul(match *m {
             MulOp::MulSsf { rn, rx, ry } => MulOp::MulSsf { rn, rx: r(rx), ry: r(ry) },
+            MulOp::MulSsi { rn, rx, ry } => MulOp::MulSsi { rn, rx: r(rx), ry: r(ry) },
             MulOp::FMul { rn, rx, ry } => MulOp::FMul { rn, rx: r(rx), ry: r(ry) },
             other => other,
         }),
@@ -1408,27 +1414,62 @@ mod tests {
 
     #[test]
     fn compile_division() {
+        // Integer divide is lowered inline via the float
+        // reciprocal-seed + Newton-Raphson + trunc sequence, so the
+        // emitted code must contain a RECIPS seed instruction and a
+        // TRUNC finalizer and must NOT hold a CALL to any runtime
+        // helper.
         let src = "int f(int a, int b) { return a / b; }";
         let unit = parse::parse(src).unwrap();
-        let code = emit_function_with_relocs(&unit.functions[0], &unit)
-            .map(|r| r.code)
-            .unwrap();
-        let disasm = selinstr::disasm::disassemble(&code, 0, false);
+        let out = emit_function_with_relocs(&unit.functions[0], &unit).unwrap();
+        let disasm = selinstr::disasm::disassemble(&out.code, 0, false);
         let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
         assert!(
-            text.iter().any(|t| t.contains("CALL")),
-            "expected CALL for division, got: {text:?}"
+            !text.iter().any(|t| t.contains("CALL")),
+            "expected no CALL for inline division, got: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("RECIPS")),
+            "expected RECIPS in inline division, got: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("TRUNC")),
+            "expected TRUNC in inline division, got: {text:?}"
+        );
+        assert!(
+            !out.relocs
+                .iter()
+                .any(|(_, r)| r.symbol == "___div32" || r.symbol == "___mod32"),
+            "unexpected relocation to legacy ___div32 / ___mod32 helper"
         );
     }
 
     #[test]
     fn compile_modulo() {
+        // Integer modulo is lowered inline: it shares the same
+        // float-reciprocal divide core as division, then computes
+        // `remainder = lhs - quotient * rhs`. No runtime helper call
+        // must remain.
         let src = "int f(int a, int b) { return a % b; }";
         let unit = parse::parse(src).unwrap();
-        let code = emit_function_with_relocs(&unit.functions[0], &unit)
-            .map(|r| r.code)
-            .unwrap();
-        assert!(!code.is_empty());
+        let out = emit_function_with_relocs(&unit.functions[0], &unit).unwrap();
+        let disasm = selinstr::disasm::disassemble(&out.code, 0, false);
+        let text: Vec<&str> = disasm.iter().map(|l| l.text.as_str()).collect();
+        assert!(!out.code.is_empty());
+        assert!(
+            !text.iter().any(|t| t.contains("CALL")),
+            "expected no CALL for inline modulo, got: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("RECIPS")),
+            "expected RECIPS in inline modulo, got: {text:?}"
+        );
+        assert!(
+            !out.relocs
+                .iter()
+                .any(|(_, r)| r.symbol == "___div32" || r.symbol == "___mod32"),
+            "unexpected relocation to legacy ___div32 / ___mod32 helper"
+        );
     }
 
     #[test]

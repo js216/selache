@@ -87,6 +87,15 @@ impl Preprocessor {
             "__STDC_VERSION__".to_string(),
             MacroDef::Object("199901L".to_string()),
         );
+        // `double` is the 32-bit single-precision type on this
+        // target, matching the base SHARC+ C runtime. Platform headers
+        // (stdio.h, math.h, ...) use this macro to select 32-bit
+        // printf/scanf link-time names such as `_printf32` rather
+        // than their 64-bit `_printf64` variants.
+        pp.defines.insert(
+            "__DOUBLES_ARE_FLOATS__".to_string(),
+            MacroDef::Object("1".to_string()),
+        );
         pp
     }
 
@@ -164,6 +173,12 @@ impl Preprocessor {
         let mut line_num: u32 = 1;
         let mut in_block_comment = false;
         let mut current_filename = filename.to_string();
+        // Pending link-name rewrite for the next function declaration,
+        // as set by `#pragma function_name NAME`. The pragma applies
+        // to the next function declaration in scope -- we scan the
+        // next non-blank text line for an identifier immediately
+        // followed by `(` and replace it with NAME.
+        let mut pending_function_name: Option<String> = None;
 
         for raw_line in source.split('\n') {
             let current_line = line_num;
@@ -328,9 +343,25 @@ impl Preprocessor {
                         msg: format!("#error {msg}"),
                     });
                 }
-                if strip_directive(directive, "pragma").is_some()
-                    || directive == "pragma"
-                {
+                if let Some(rest) = strip_directive(directive, "pragma") {
+                    // Recognize `#pragma function_name NAME`: the next
+                    // function declaration in scope is renamed to NAME
+                    // at the linker-symbol level. Every other pragma
+                    // is silently ignored.
+                    let rest = rest.trim();
+                    if let Some(after) = rest.strip_prefix("function_name") {
+                        let name = after.trim();
+                        if !name.is_empty() {
+                            // If multiple function_name pragmas stack
+                            // up before a declaration, the most recent
+                            // wins.
+                            pending_function_name = Some(name.to_string());
+                        }
+                    }
+                    output.push('\n');
+                    continue;
+                }
+                if directive == "pragma" {
                     output.push('\n');
                     continue;
                 }
@@ -361,6 +392,31 @@ impl Preprocessor {
             if !active {
                 output.push('\n');
                 continue;
+            }
+
+            // A pending `#pragma function_name NAME` rewrite applies
+            // to the next function declaration. Scan the raw line for
+            // an identifier immediately followed by `(` (the classic
+            // `TYPE ident(params)` form) and, on a match, install an
+            // object macro `ident -> NAME` so every textual use of
+            // `ident` in the source -- including later calls -- maps
+            // to the chosen link-time name. Blank lines and lines
+            // without a candidate skip the scan so the pragma rides
+            // forward to the next candidate line.
+            if pending_function_name.is_some()
+                && !line.trim().is_empty()
+            {
+                if let Some(old_ident) = scan_function_decl_ident(&line) {
+                    let new_name = pending_function_name.take().unwrap();
+                    // Install as an object-like macro. Self-reference
+                    // is impossible because `old_ident != new_name`
+                    // for every real pragma: `#pragma function_name X`
+                    // followed by `int X(...)` would be a no-op rename.
+                    if old_ident != new_name {
+                        self.defines
+                            .insert(old_ident, MacroDef::Object(new_name));
+                    }
+                }
             }
 
             // Regular line: expand macros and emit (use comment-stripped version).
@@ -534,7 +590,20 @@ impl Preprocessor {
         // Normalize backslash paths (Windows-style) to forward slashes.
         let inc_file = inc_file.replace('\\', "/");
 
-        // Search for the file (filesystem first, builtins as fallback).
+        // For system includes (<...>), the selache builtin C standard
+        // headers take priority over any filesystem path. External
+        // system headers often inline helper functions that name
+        // intrinsics this compiler does not model, so using them would
+        // pull in unresolvable symbols whenever any transitive
+        // `#include <math.h>`, `#include <stdint.h>`, etc. appears in
+        // the source.
+        if !search_local {
+            if let Some(content) = Self::builtin_header(&inc_file) {
+                return self.process_inner(content, &inc_file, depth + 1);
+            }
+        }
+
+        // Search for the file on the configured include path.
         let mut search_dirs: Vec<String> = Vec::new();
         if search_local {
             // For "file" includes, search relative to the including file first.
@@ -560,7 +629,7 @@ impl Preprocessor {
             }
         }
 
-        // Fall back to builtin headers for quoted includes too.
+        // Quoted ("...") include fallback: try builtin headers last.
         if let Some(content) = Self::builtin_header(&inc_file) {
             return self.process_inner(content, &inc_file, depth + 1);
         }
@@ -1019,6 +1088,110 @@ fn strip_comments(line: &str, in_block_comment: &mut bool) -> String {
 
 /// Strip a directive keyword from the start of a directive line.
 /// Returns the remainder after the keyword if it matches.
+/// Scan `line` for the function-declaration identifier targeted by a
+/// `#pragma function_name NAME` rewrite. Returns the declarator
+/// identifier (e.g. `"printf"` for `int printf(const char*, ...)`) or
+/// `None` when the line holds no candidate.
+///
+/// The target identifier is the leftmost non-keyword identifier that
+/// is immediately (optionally across whitespace) followed by `(` --
+/// the classic C declaration form `TYPE ident(params)`. Keywords,
+/// primitive types, and the well-known typedef `FILE` are skipped so
+/// declarators like `int fprintf(FILE*, ...)` resolve to `fprintf`
+/// rather than `int` or `FILE`. Lines whose first `(` belongs to an
+/// expression, cast, or macro invocation return `None` so the caller
+/// can leave the pragma pending for the next candidate line.
+fn scan_function_decl_ident(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_alphabetic() || b == b'_' {
+            // Start of an identifier.
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c.is_ascii_alphanumeric() || c == b'_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let end = i;
+            // Skip whitespace to look for `(`.
+            let mut j = end;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'(' {
+                let ident = &line[start..end];
+                if !is_c_keyword_or_type(ident) {
+                    return Some(ident.to_string());
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Identifiers that are never the target of a function_name rewrite:
+/// C reserved words, primitive types, and common type qualifiers.
+/// Any token in this set that appears before `(` on the rewrite line
+/// is a type or keyword (e.g. `int printf(...)`, `void f(void)`), not
+/// a declarator; the scanner must skip past it.
+fn is_c_keyword_or_type(ident: &str) -> bool {
+    matches!(
+        ident,
+        "void"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "_Bool"
+            | "bool"
+            | "size_t"
+            | "ssize_t"
+            | "ptrdiff_t"
+            | "wchar_t"
+            | "const"
+            | "volatile"
+            | "restrict"
+            | "static"
+            | "extern"
+            | "auto"
+            | "register"
+            | "inline"
+            | "_Complex"
+            | "_Imaginary"
+            | "struct"
+            | "union"
+            | "enum"
+            | "typedef"
+            | "if"
+            | "else"
+            | "while"
+            | "for"
+            | "do"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "goto"
+            | "return"
+            | "sizeof"
+            | "typeof"
+            | "FILE"
+    )
+}
+
 fn strip_directive<'a>(directive: &'a str, keyword: &str) -> Option<&'a str> {
     if let Some(rest) = directive.strip_prefix(keyword) {
         if rest.is_empty() {
@@ -1787,6 +1960,60 @@ mod tests {
     }
 
     #[test]
+    fn test_system_include_prefers_builtin_header() {
+        // A shadow math.h on the include search path must NOT override
+        // the selache builtin for system (`<>`) includes: external
+        // system headers inline helper functions that name intrinsics
+        // this compiler does not model.
+        let dir = std::env::temp_dir().join("test_selcc_builtin_priority");
+        std::fs::create_dir_all(&dir).unwrap();
+        let header = dir.join("math.h");
+        // The shadow header defines a sentinel variable; if it is
+        // included instead of the builtin, the sentinel will appear in
+        // the preprocessed output.
+        std::fs::write(
+            &header,
+            "int __shadow_math_h_selcc_test_sentinel;\n",
+        )
+        .unwrap();
+
+        let mut pp = Preprocessor::new();
+        pp.add_include_dir(dir.to_str().unwrap());
+        // Reference a prototype the selache builtin math.h provides so
+        // we can tell whether the builtin was actually included.
+        let result = pp
+            .process("#include <math.h>\nint test_use_builtin(void) { float x = fabsf(0); return 0; }\n", "test.c")
+            .unwrap();
+        assert!(
+            !result.contains("__shadow_math_h_selcc_test_sentinel"),
+            "system <math.h> must resolve to the selache builtin, \
+             not the filesystem shadow header"
+        );
+        // The selache builtin math.h declares `fabsf`; a forward
+        // declaration must be present in the preprocessed output for
+        // the call below to parse successfully.
+        assert!(
+            result.contains("fabsf"),
+            "selache builtin <math.h> was not used for system include"
+        );
+
+        // But a quoted include with the same filename must still pick
+        // up the shadow file on the search path, because `"..."`
+        // includes are supposed to search user-provided directories
+        // before falling back to the compiler's builtin library.
+        let mut pp2 = Preprocessor::new();
+        pp2.add_include_dir(dir.to_str().unwrap());
+        let result2 = pp2.process("#include \"math.h\"\n", "test.c").unwrap();
+        assert!(
+            result2.contains("__shadow_math_h_selcc_test_sentinel"),
+            "quoted math.h should pick up the filesystem shadow file"
+        );
+
+        std::fs::remove_file(header).ok();
+        std::fs::remove_dir(dir).ok();
+    }
+
+    #[test]
     fn test_function_macro() {
         let mut pp = Preprocessor::new();
         let src =
@@ -1884,6 +2111,60 @@ mod tests {
         let src = "#pragma once\nint x = 1;\n";
         let result = pp.process(src, "test.c").unwrap();
         assert!(result.contains("int x = 1;"));
+    }
+
+    #[test]
+    fn test_pragma_function_name_rewrites_decl_and_calls() {
+        // `#pragma function_name NAME` applied to `int printf(...)`
+        // must rewrite both the declaration and every subsequent call
+        // in the translation unit to NAME so the linker sees NAME as
+        // the C-level symbol.
+        let mut pp = Preprocessor::new();
+        let src = "#pragma function_name _printf32\n\
+                   int printf(const char *f, ...);\n\
+                   int main(void) { return printf(\"hi\"); }\n";
+        let result = pp.process(src, "test.c").unwrap();
+        assert!(result.contains("int _printf32(const char *f, ...);"));
+        assert!(result.contains("return _printf32(\"hi\");"));
+        assert!(!result.contains("printf("));
+    }
+
+    #[test]
+    fn test_pragma_function_name_skips_blank_lines() {
+        // The pragma must ride forward across comments and blank
+        // lines to the next actual declaration.
+        let mut pp = Preprocessor::new();
+        let src = "#pragma function_name _fprintf32\n\
+                   \n\
+                   int fprintf(int stream, const char *f, ...);\n";
+        let result = pp.process(src, "test.c").unwrap();
+        assert!(result.contains("int _fprintf32(int stream, const char *f, ...);"));
+    }
+
+    #[test]
+    fn test_pragma_function_name_skips_misra_prefix() {
+        // Multiple pragmas can stack before a declaration; only the
+        // function_name pragma carries a rewrite, other pragmas
+        // (like misra_func) are silently consumed.
+        let mut pp = Preprocessor::new();
+        let src = "#pragma misra_func(io)\n\
+                   #pragma function_name _printf32\n\
+                   int printf(const char *f, ...);\n";
+        let result = pp.process(src, "test.c").unwrap();
+        assert!(result.contains("int _printf32(const char *f, ...);"));
+    }
+
+    #[test]
+    fn test_pragma_function_name_ignores_nondecl_line() {
+        // A pragma followed by a comment or a block-brace line
+        // should ride forward, not attach to the brace line.
+        let mut pp = Preprocessor::new();
+        let src = "#pragma function_name _foo\n\
+                   {\n\
+                   int foo(int x);\n\
+                   }\n";
+        let result = pp.process(src, "test.c").unwrap();
+        assert!(result.contains("int _foo(int x);"));
     }
 
     #[test]

@@ -459,12 +459,21 @@ impl Allocator {
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
+            MulSsi { rn, rx, ry } => MulSsi {
+                rn: self.get_phys(rn, spill),
+                rx: self.get_phys(rx, spill),
+                ry: self.get_phys(ry, spill),
+            },
             FMul { rn, rx, ry } => FMul {
                 rn: self.get_phys(rn, spill),
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
             MrfMulSsf { rx, ry } => MrfMulSsf {
+                rx: self.get_phys(rx, spill),
+                ry: self.get_phys(ry, spill),
+            },
+            MrfMulSsi { rx, ry } => MrfMulSsi {
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
