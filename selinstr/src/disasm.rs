@@ -1452,18 +1452,20 @@ fn decode_type15(word: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn decode_type16(word: u64) -> String {
-    // Type 16a: DM|PM(Ii,Mm)=data32
-    // For 0x9FC0 (Type 16a), i=7, m=7, DM
-    // bits[43:41] = i[2:0], bits[40:38] = m[2:0], g encoded in upper bits
-    // 0x9FC0 has bits[43:38] = 111111 → i=7, m=7
+    // Type 16: DM|PM(Ii,Mm)=data32
+    //   bits[43:41] = I register index within the selected DAG
+    //   bits[40:38] = M register index within the selected DAG
+    //   bit[37]     = G (0 = DM/DAG1, 1 = PM/DAG2)
+    //   bits[31:0]  = 32-bit immediate
     let i_field = bits(word, 43, 41);
     let m_field = bits(word, 40, 38);
+    let g = bit(word, 37);
     let imm32 = bits(word, 31, 0);
 
-    // g bit: bit 37 or determined from context. For now assume DM (DAG1).
-    // TODO: add PM support when needed.
-    let mem = "DM";
-    format!("{mem} (I{i_field},M{m_field})=0x{imm32:X}")
+    let mem = if g { "PM" } else { "DM" };
+    let i_idx = if g { (i_field & 7) + 8 } else { i_field & 7 };
+    let m_idx = if g { (m_field & 7) + 8 } else { m_field & 7 };
+    format!("{mem} (I{i_idx},M{m_idx})=0x{imm32:X}")
 }
 
 // ---------------------------------------------------------------------------

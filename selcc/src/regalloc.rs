@@ -291,7 +291,7 @@ impl Allocator {
             | Instruction::RegisterSwap { .. }
             | Instruction::ImmShift { .. }
             | Instruction::UregAbsAccess { .. }
-            | Instruction::DmImmStore { .. }
+            | Instruction::ImmStore { .. }
             | Instruction::DoUntil { .. }
             | Instruction::UregMemAccess { .. } => mi.instr,
 

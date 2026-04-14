@@ -518,11 +518,17 @@ pub enum Instruction {
         /// Condition code (31 = TRUE = unconditional)
         cond: u8,
     },
-    /// Type 16: DM(Ii,Mm) = imm32 (immediate data store to memory).
-    DmImmStore {
-        /// I-register index (0-7)
+    /// Type 16: DM|PM(Ii,Mm) = imm32 (immediate data store to memory).
+    /// When `pm` is true the store targets program memory via DAG2 (the
+    /// I/M field is a PM-relative 0-7 index that names I8-I15 / M8-M15);
+    /// otherwise it targets data memory via DAG1 (I0-I7 / M0-M7). The
+    /// G bit selector lives at bit 37 of the Type 16 encoding.
+    ImmStore {
+        /// 0 = DM/DAG1, 1 = PM/DAG2
+        pm: bool,
+        /// I-register index within the DAG (0-7)
         i_reg: u8,
-        /// M-register index (0-7)
+        /// M-register index within the DAG (0-7)
         m_reg: u8,
         /// 32-bit immediate value to store
         value: u32,
@@ -690,8 +696,8 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
                 | ((rn as u64 & 0xF) << 4)
                 | (rx as u64 & 0xF))
         }
-        Instruction::DmImmStore { i_reg, m_reg, value } => {
-            encode_type16(i_reg, m_reg, value)
+        Instruction::ImmStore { pm, i_reg, m_reg, value } => {
+            encode_type16(pm, i_reg, m_reg, value)
         }
         Instruction::UregAbsAccess { pm, write, ureg, addr } => {
             encode_type14(pm, write, ureg, addr)
@@ -1306,14 +1312,15 @@ fn encode_type19(i_reg: u8, value: i32, width: MemWidth, bitrev: bool) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Type 16: DM(Ii,Mm) = imm32 (immediate data store)
+// Type 16: DM|PM(Ii,Mm) = imm32 (immediate data store)
 // bits[47:45] = 100, bit[44] = 1
-// bits[43:41] = i_reg (0-7)
-// bits[40:38] = m_reg (0-7)
+// bits[43:41] = i_reg (0-7 within the selected DAG)
+// bits[40:38] = m_reg (0-7 within the selected DAG)
+// bit[37]     = G (0 = DM/DAG1, 1 = PM/DAG2)
 // bits[31:0]  = imm32
 // ---------------------------------------------------------------------------
 
-fn encode_type16(i_reg: u8, m_reg: u8, value: u32) -> Result<u64, EncodeError> {
+fn encode_type16(pm: bool, i_reg: u8, m_reg: u8, value: u32) -> Result<u64, EncodeError> {
     if i_reg > 7 {
         return Err(EncodeError {
             msg: format!("Type 16 I register index {} out of range (0-7)", i_reg),
@@ -1324,10 +1331,12 @@ fn encode_type16(i_reg: u8, m_reg: u8, value: u32) -> Result<u64, EncodeError> {
             msg: format!("Type 16 M register index {} out of range (0-7)", m_reg),
         });
     }
+    let g = if pm { 1u64 } else { 0 };
     let word = (0b100u64 << 45)
         | (1u64 << 44)
         | ((i_reg as u64 & 0x7) << 41)
         | ((m_reg as u64 & 0x7) << 38)
+        | (g << 37)
         | (value as u64);
     Ok(word)
 }
@@ -2349,6 +2358,46 @@ mod tests {
     }
 
     // -- Type 15: ureg <-> DM/PM with 32-bit offset --
+
+    // -- Type 16: DM|PM(Ii,Mm) = imm32 --
+
+    #[test]
+    fn roundtrip_type16_dm_imm_store() {
+        let instr = Instruction::ImmStore {
+            pm: false,
+            i_reg: 7,
+            m_reg: 7,
+            value: 0xDEAD_BEEF,
+        };
+        let text = roundtrip(&instr);
+        assert_eq!(text, "DM (I7,M7)=0xDEADBEEF");
+    }
+
+    #[test]
+    fn roundtrip_type16_pm_imm_store() {
+        // PM-addressed store uses DAG2: the i_reg/m_reg fields are 0-7 but
+        // name I8-I15 / M8-M15, the G bit at position 37 picks PM.
+        let instr = Instruction::ImmStore {
+            pm: true,
+            i_reg: 0,
+            m_reg: 1,
+            value: 0xCAFEF00D,
+        };
+        let text = roundtrip(&instr);
+        assert_eq!(text, "PM (I8,M9)=0xCAFEF00D");
+    }
+
+    #[test]
+    fn roundtrip_type16_pm_imm_store_high_regs() {
+        let instr = Instruction::ImmStore {
+            pm: true,
+            i_reg: 7,
+            m_reg: 7,
+            value: 0x12345678,
+        };
+        let text = roundtrip(&instr);
+        assert_eq!(text, "PM (I15,M15)=0x12345678");
+    }
 
     #[test]
     fn roundtrip_type15_ureg_load() {

@@ -1705,19 +1705,25 @@ fn parse_mem_store(
     is_lw: bool,
     line: u32,
 ) -> Result<Instruction> {
-    // Type 16: DM(Ii, Mm) = imm32 — immediate data store (both operands
+    // Type 16: DM|PM(Ii, Mm) = imm32 — immediate data store (both operands
     // are I+M registers and the RHS is a numeric literal, not a register name).
     // Must check before try_build_dag_move, which would error on numeric rhs.
+    // The outer `pm` flag (from whether the source wrote "DM(" or "PM(")
+    // picks DAG1 vs DAG2; the I/M field is the 0-7 index within that DAG,
+    // so PM-addressed registers I8-I15 / M8-M15 are stored as 0-7 after
+    // subtracting 8.
     if op1.starts_with('I') && op2.starts_with('M')
         || op1.starts_with('M') && op2.starts_with('I')
     {
         let is_imm = parse_signed_number(rhs).is_some() || has_label_ident(rhs);
         if is_imm {
             let (i_str, m_str) = if op1.starts_with('I') { (op1, op2) } else { (op2, op1) };
-            let i_reg = parse_reg_index(i_str, 'I', line)?;
-            let m_reg = parse_reg_index(m_str, 'M', line)?;
+            let i_raw = parse_reg_index(i_str, 'I', line)?;
+            let m_raw = parse_reg_index(m_str, 'M', line)?;
+            let i_reg = if pm { i_raw.wrapping_sub(8) } else { i_raw };
+            let m_reg = if pm { m_raw.wrapping_sub(8) } else { m_raw };
             let value = parse_signed_number(rhs).unwrap_or(0) as u32;
-            return Ok(Instruction::DmImmStore { i_reg, m_reg, value });
+            return Ok(Instruction::ImmStore { pm, i_reg, m_reg, value });
         }
     }
 
@@ -5364,6 +5370,38 @@ mod tests {
             cdreg: 3,
             cond: 0,
             compute: None,
+        });
+    }
+
+    // -- Type 16: DM|PM(Ii,Mm) = imm32 --
+
+    #[test]
+    fn roundtrip_type16_dm_imm_store() {
+        roundtrip(&Instruction::ImmStore {
+            pm: false,
+            i_reg: 7,
+            m_reg: 7,
+            value: 0xDEAD_BEEF,
+        });
+    }
+
+    #[test]
+    fn roundtrip_type16_pm_imm_store() {
+        roundtrip(&Instruction::ImmStore {
+            pm: true,
+            i_reg: 0,
+            m_reg: 1,
+            value: 0xCAFE_F00D,
+        });
+    }
+
+    #[test]
+    fn roundtrip_type16_pm_imm_store_high_regs() {
+        roundtrip(&Instruction::ImmStore {
+            pm: true,
+            i_reg: 7,
+            m_reg: 7,
+            value: 0x1234_5678,
         });
     }
 
