@@ -1387,13 +1387,38 @@ fn encode_type14(pm: bool, write: bool, ureg: u8, addr: u32) -> Result<u64, Enco
 // ---------------------------------------------------------------------------
 
 fn encode_type5a(dest: u8, src: u8) -> Result<u64, EncodeError> {
-    // d=1: ureg(dst_field) = ureg(src_field)
+    // Type 5a layout (see `decode_type5a` for the bit-field split):
+    //   bits[47:45] = 011, bit[44]=1
+    //   bits[42:38] = src_ureg[6:2]
+    //   bits[37:33] = cond (31 = TRUE)
+    //   bit[32]     = src_ureg[1]
+    //   bit[31]     = src_ureg[0]
+    //   bits[30:27] = dst_ureg[6:3]   (see note below)
+    //   bits[26:23] = dst_ureg[3:0]
+    //   bits[22:0]  = compute (0 for no compute)
+    //
+    // The previous version of this encoder wrote the src and dst
+    // ureg codes as contiguous 8-bit fields at bits[41:34] /
+    // [33:26] and set cond = 7 at [25:23], which is consistent with
+    // *itself* (encoder + decoder round-trip cleanly) but not with
+    // what real SHARC+ silicon executes: an `I6 = I7` emitted that
+    // way decoded on hardware as a bogus conditional dreg move
+    // (`IF BM, UREG(0xB7)=B4`) and trampled the register file. Use
+    // the same bit layout the 48-bit UregTransfer encoder below
+    // already uses, which the hardware does honour.
+    let src = src as u64;
+    let dst = dest as u64;
+    let src_hi = (src >> 2) & 0x1F;
+    let src_lo = src & 0x03;
+    let dst_hi = (dst >> 4) & 0x0F;
+    let dst_lo = dst & 0x0F;
     let word = (0b011u64 << 45)
-        | (1u64 << 44)       // bit 44 = 1 (Type 5a)
-        | (1u64 << 42)       // d=1: dest_ureg = src_ureg
-        | ((src as u64 & 0xFF) << 34)
-        | ((dest as u64 & 0xFF) << 26)
-        | (7u64 << 23);      // cond = 7 (always)
+        | (1u64 << 44)
+        | (src_hi << 38)
+        | (31u64 << 33) // cond = TRUE
+        | (src_lo << 31)
+        | (dst_hi << 27)
+        | (dst_lo << 23);
     Ok(word)
 }
 

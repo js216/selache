@@ -134,12 +134,15 @@ fn try_type2c(compute: &ComputeOp) -> Option<u16> {
         ComputeOp::Alu(AluOp::AddCi { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
             (7, rn, ry)
         }
-        ComputeOp::Alu(AluOp::Neg { rn, rx }) if rn < 16 && rx < 16 => {
-            (8, rn, rx)
-        }
-        ComputeOp::Alu(AluOp::Abs { rn, rx }) if rn < 16 && rx < 16 => {
-            (9, rn, rx)
-        }
+        // Abs and Neg are intentionally *not* compressed into the
+        // Type 2c short-compute form. The 16-bit opcode-8/9 encoding
+        // round-trips fine inside this crate, but the SHARC+ core
+        // does not execute them as the expected single-source
+        // `Rn = -Rx` / `Rn = ABS Rx` pair -- the compact form the
+        // hardware actually implements for these opcodes treats the
+        // bits[3:0] field differently, and a straight `Rn = ABS Rx`
+        // compressed this way returns -1 from ABS(-7) on real
+        // silicon. Let the 48-bit Type 2 encoder handle them.
         ComputeOp::Falu(FaluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
             (10, rn, ry)
         }
