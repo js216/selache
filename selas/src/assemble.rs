@@ -171,7 +171,14 @@ struct PendingReloc {
 const R_SHARC_ADDR24: u8 = 0x01;
 
 /// Resolve a symbolic label reference inside an instruction, replacing the
-/// placeholder address (0) with the actual word offset from `label_map`.
+/// placeholder address (0) with the actual value encoded for this instruction.
+/// For branch and CJump instructions the field is the label's word offset in
+/// the section; for DO/UNTIL instructions the field is the PC-relative offset
+/// from the DO instruction itself to the label (SHARC ISR, Program Flow
+/// Control, Type 12/13 opcode: RELADDR is "the end-of-loop address relative
+/// to the DO LOOP instruction address"). `instr_word_offset` is the word
+/// address of the instruction being resolved within its own section.
+///
 /// Returns `None` when the reference must become an external relocation:
 /// either the label is undefined in this file, or the instruction is a
 /// `LoadImm` (which always loads a runtime address that the linker must
@@ -180,6 +187,7 @@ fn resolve_labels(
     instr: &selinstr::encode::Instruction,
     label_name: &str,
     label_map: &std::collections::HashMap<String, u32>,
+    instr_word_offset: u32,
 ) -> Option<selinstr::encode::Instruction> {
     use selinstr::encode::{BranchTarget, Instruction};
     // LoadImm always becomes a relocation — the symbol's final address
@@ -193,10 +201,12 @@ fn resolve_labels(
             Instruction::Branch { call, cond, target: BranchTarget::Absolute(addr), delayed }
         }
         Instruction::DoLoop { counter, end_pc: 0 } => {
-            Instruction::DoLoop { counter, end_pc: addr }
+            let offset = (addr as i32) - (instr_word_offset as i32);
+            Instruction::DoLoop { counter, end_pc: offset as u32 }
         }
         Instruction::DoUntil { addr: 0, term } => {
-            Instruction::DoUntil { addr, term }
+            let offset = (addr as i32) - (instr_word_offset as i32);
+            Instruction::DoUntil { addr: offset as u32, term }
         }
         Instruction::CJump { addr: 0, delayed } => {
             Instruction::CJump { addr, delayed }
@@ -320,7 +330,8 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     if !pending.is_empty() {
         let label_map = build_label_map(&sections);
         for pi in &pending {
-            match resolve_labels(&pi.instr, &pi.label_ref, &label_map) {
+            let instr_word_offset = (pi.byte_offset / 6) as u32;
+            match resolve_labels(&pi.instr, &pi.label_ref, &label_map, instr_word_offset) {
                 Some(resolved) => {
                     let sec = &mut sections[pi.section_idx].1;
                     if visa && sec.is_visa {

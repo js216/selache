@@ -1125,13 +1125,21 @@ fn resolve_branches(
                     }
                 }
                 Instruction::DoLoop { counter, end_pc } => {
+                    // RELADDR in the encoded Type 12 word is PC-relative to
+                    // the DO instruction itself (see the SHARC ISR, Program
+                    // Flow Control, Type 12 opcode). The value must be
+                    // `end_of_loop_address - do_instruction_address`, where
+                    // `end_of_loop_address` is the address of the last
+                    // instruction of the loop body.
                     let label = end_pc as Label;
                     let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
+                    let pc = body_idx + prologue_len;
                     let target_pc = target_body_idx + prologue_len;
                     let last_body_pc = if target_pc > 0 { target_pc - 1 } else { 0 };
+                    let offset = last_body_pc as i32 - pc as i32;
                     Instruction::DoLoop {
                         counter,
-                        end_pc: last_body_pc as u32,
+                        end_pc: offset as u32,
                     }
                 }
                 other => other,
@@ -1321,6 +1329,61 @@ mod tests {
         );
         let has_hw = text.iter().any(|t| t.contains("LCNTR") || t.contains("DO"));
         assert!(has_hw, "got: {text:?}");
+    }
+
+    /// The Type 12 RELADDR field is PC-relative to the DO instruction,
+    /// per the SHARC ISR (Program Flow Control, Type 12 opcode). For a
+    /// function whose body has `B` instructions after the DO, the field
+    /// must equal `B` so that hardware computes
+    /// `end_address = DO_pc + B = last_body_address`. The old code
+    /// stored the function-relative absolute position of the last body
+    /// instruction, which was correct only when the DO happened to sit
+    /// at function-relative PC 0 — never, once a prologue is present —
+    /// and collided across multiple hardware-loop-bearing functions in
+    /// the same section. This test pins the correct value by disassembling
+    /// the two-function image and asserting the relative form.
+    #[test]
+    fn rt_hardware_loop_pc_relative_multi_function() {
+        let src = r#"
+            int sum_const(void) {
+                int s = 0;
+                for (int i = 0; i < 10; i++) s += i;
+                return s;
+            }
+            int sum2_const(void) {
+                int s = 0;
+                for (int i = 0; i < 20; i++) s += i * 2;
+                return s;
+            }
+        "#;
+        let text = round_trip_disasm(src);
+        let do_lines: Vec<(usize, &String)> = text
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.contains("LCNTR") && t.contains("DO"))
+            .collect();
+        assert_eq!(do_lines.len(), 2, "expected two DO lines, got: {text:?}");
+        // For each DO line, extract the RELADDR from "(PC,0xN)" and check
+        // that `DO_pc + N` points to a real instruction in the text (not
+        // past the end of the function), and specifically to the line
+        // that writes back the accumulator (the final body instruction).
+        for (do_idx, line) in &do_lines {
+            let open = line.find("(PC,0x").expect("missing (PC,0x in DO line");
+            let close = line[open..].find(')').unwrap() + open;
+            let hex = &line[open + 6..close];
+            let offset = u32::from_str_radix(hex, 16).unwrap() as usize;
+            let end_idx = do_idx + offset;
+            assert!(
+                end_idx < text.len(),
+                "DO at {do_idx} with offset 0x{offset:x} points past end ({})",
+                text.len()
+            );
+            let end_line = &text[end_idx];
+            assert!(
+                end_line.contains("DM (-0x1,I6)="),
+                "DO at {do_idx}: end at {end_idx} is {end_line:?}, expected the accumulator store"
+            );
+        }
     }
 
     #[test]
