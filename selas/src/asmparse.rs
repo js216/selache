@@ -3053,6 +3053,9 @@ fn parse_mr_mul(lhs: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
     if modifier.contains("UUF") {
         return Ok(ComputeOp::Mul(MulOp::MrfMulUuf { rx, ry }));
     }
+    if modifier.contains("SSI") && !is_b {
+        return Ok(ComputeOp::Mul(MulOp::MrfMulSsi { rx, ry }));
+    }
 
     if is_b {
         Ok(ComputeOp::Mul(MulOp::MrbMulSsf { rx, ry }))
@@ -3772,13 +3775,22 @@ fn parse_reg_mul(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<Compute
     let after_star = rhs[star + 1..].trim();
     let ry_end = after_star.find('(').unwrap_or(after_star.len());
     let ry_str = after_star[..ry_end].trim();
+    let modifier = if ry_end < after_star.len() {
+        after_star[ry_end..].trim()
+    } else {
+        ""
+    };
 
     let rx = parse_dreg(rx_str, line)?;
     let ry = parse_dreg(ry_str, line)?;
 
     if is_float {
         Ok(ComputeOp::Mul(MulOp::FMul { rn, rx, ry }))
+    } else if modifier.contains("SSI") {
+        Ok(ComputeOp::Mul(MulOp::MulSsi { rn, rx, ry }))
     } else {
+        // Default SHARC integer multiply is signed-signed fractional
+        // when no modifier is given; (SSF), (UUF) etc. select variants.
         Ok(ComputeOp::Mul(MulOp::MulSsf { rn, rx, ry }))
     }
 }
