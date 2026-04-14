@@ -172,8 +172,50 @@ struct PendingReloc {
     rela_type: u8,
 }
 
-/// R_SHARC_ADDR24: absolute 24-bit address for CALL / JUMP / LoadImm.
-const R_SHARC_ADDR24: u8 = 0x01;
+/// Pick the ELF relocation type that matches the byte layout of a given
+/// instruction. SHARC+ PM code references use a small family of
+/// relocation types, one per instruction field layout:
+///   * `R_SHARC_PM32` (0x0c) patches bytes 2..5 of a 48-bit instruction
+///     with a 32-bit absolute value. Used by Type 17 `Ureg = imm32`
+///     (`LoadImm`).
+///   * `R_SHARC_PM24` (0x0b) patches bytes 3..5 of a 48-bit instruction
+///     with a 24-bit absolute value. Used by Type 8a direct
+///     `JUMP`/`CALL` and Type 25a `CJUMP`.
+///   * `R_SHARC_PM_PCREL24` (0x0f) patches the same bytes 3..5, but
+///     seld computes `target - pc` first. Used by Type 8b PC-relative
+///     direct branches and by Type 12/13 `DO ... UNTIL` loops whose
+///     RELADDR field is itself PC-relative to the DO instruction.
+///
+/// `R_SHARC_ADDR32` (0x01) writes a 32-bit value at the raw byte
+/// offset and will clobber the opcode bytes of a 48-bit instruction,
+/// so it must never be used for code-section relocations. It was the
+/// type this code emitted originally, and it is the reason external
+/// CALL/LoadImm targets silently produced broken bytes in the linked
+/// image even when the link itself succeeded.
+fn reloc_type_for(instr: &selinstr::encode::Instruction) -> u8 {
+    use selinstr::encode::{BranchTarget, Instruction};
+    match instr {
+        Instruction::LoadImm { .. } => selelf::elf::R_SHARC_PM32 as u8,
+        Instruction::Branch { target: BranchTarget::Absolute(_), .. } => {
+            selelf::elf::R_SHARC_PM24 as u8
+        }
+        Instruction::Branch { target: BranchTarget::PcRelative(_), .. } => {
+            selelf::elf::R_SHARC_PM_PCREL24 as u8
+        }
+        Instruction::CJump { .. } => selelf::elf::R_SHARC_PM24 as u8,
+        Instruction::DoLoop { .. } | Instruction::DoUntil { .. } => {
+            selelf::elf::R_SHARC_PM_PCREL24 as u8
+        }
+        // Any other instruction landing in the relocation path is a
+        // bug in either the parser or the backend: every case we
+        // actually produce is handled above. Panicking here makes such
+        // a bug loud instead of silently emitting the wrong reloc
+        // type.
+        other => panic!(
+            "relocation emitted for unsupported instruction shape: {other:?}"
+        ),
+    }
+}
 
 /// Resolve a symbolic label reference inside an instruction.
 ///
@@ -358,10 +400,28 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
             if visa && sec.is_pm {
                 let isa_bytes =
                     selinstr::encode::encode(instr).expect("instruction encoding failed");
-                let encoded = if no_compress_label.is_some() {
-                    // Inside a hardware DO loop body: force the 48-bit
-                    // ISA form so the hardware DO unit keeps the PC and
-                    // the loop-end compare aligned.
+                // Force the 48-bit ISA form under either of two
+                // conditions:
+                //   1. We are inside a hardware DO loop body, where the
+                //      DO unit steps its PC in 48-bit instruction units
+                //      and a compressed body instruction hangs the core.
+                //   2. The instruction carries a pending relocation
+                //      against a symbolic label. The SHARC+ PM reloc
+                //      types (`R_SHARC_PM32` / `R_SHARC_PM24` / their
+                //      PC-relative cousins) all patch byte slots 2..5
+                //      or 3..5 of a 48-bit instruction. If selas
+                //      compresses the instruction into a 2/4-byte VISA
+                //      form, the linker's patcher writes past the
+                //      instruction end -- or, in the former (mis-
+                //      typed) case, straight over the opcode -- and
+                //      the resulting code is corrupt. The only
+                //      instruction that visa_encode currently
+                //      compresses in practice is `LoadImm` via the
+                //      Type 17b path, but checking `label_ref` is
+                //      future-proof and costs nothing at call sites
+                //      that do not have a reloc.
+                let force_isa = no_compress_label.is_some() || line.label_ref.is_some();
+                let encoded = if force_isa {
                     selinstr::visa_encode::VisaEncoded::W48(isa_bytes)
                 } else {
                     selinstr::visa_encode::visa_encode(instr, &isa_bytes)
@@ -469,11 +529,16 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                             }
                         }
                     }
+                    // All code-section relocations use the SHARC+ PM
+                    // relocation family, whose `r_offset` is counted in
+                    // 16-bit parcel units. `pi.byte_offset` is the byte
+                    // offset inside the section; dividing by 2 gives
+                    // the parcel offset the linker expects.
                     relocs.push(PendingReloc {
                         section_idx: pi.section_idx,
-                        byte_offset: pi.byte_offset as u32,
+                        byte_offset: (pi.byte_offset / 2) as u32,
                         symbol: pi.label_ref.clone(),
-                        rela_type: R_SHARC_ADDR24,
+                        rela_type: reloc_type_for(&pi.instr),
                     });
                 }
             }
@@ -1163,7 +1228,104 @@ mod tests {
              shdr.sh_size);
     }
 
-    /// `CJUMP local_label` has to become an R_SHARC_ADDR24 relocation
+    /// A LoadImm of an external symbol's address has to end up in the
+    /// full 48-bit Type 17 form, with an R_SHARC_PM32 relocation whose
+    /// `r_offset` is in parcel units. The old code path emitted
+    /// R_SHARC_ADDR32 (value 0x01, which seld patches as a raw
+    /// 4-byte LE write at the byte offset) and let visa_encode
+    /// compress a LoadImm of zero to the 4-byte Type 17b form. When
+    /// seld then patched that slot with a 32-bit address, the write
+    /// ran off the end of the 4-byte instruction and the opcode bytes
+    /// were destroyed. This test pins the fix: the section must hold
+    /// a single 6-byte LoadImm, the relocation must be PM32 at parcel
+    /// offset 0, and the instruction bytes must match an unresolved
+    /// 48-bit `Ureg = 0x0` Type 17 encoding.
+    #[test]
+    fn test_load_imm_of_external_is_48_bit_pm32_reloc() {
+        let src = ".SECTION/PM seg_pmco;\n\
+                   .GLOBAL _start;\n\
+                   .EXTERN _global;\n\
+                   _start: R0 = _global;\n\
+                   RTS;\n\
+                   .ENDSEG;\n";
+        let data = assemble_source(src, true).expect("assemble");
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+
+        // seg_pmco: one LoadImm (48-bit, 6 bytes) + RTS (48-bit, 6 bytes).
+        let seg = find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found");
+        assert_eq!(
+            seg.sh_size, 12,
+            "LoadImm of an extern must not compress; \
+             expected 12 bytes of code, got {}",
+            seg.sh_size,
+        );
+        // Bytes 0..6 are the LoadImm with a 0x0 immediate placeholder.
+        let off = seg.sh_offset as usize;
+        assert_eq!(
+            &data[off..off + 6],
+            &[0x0f, 0x00, 0x00, 0x00, 0x00, 0x00],
+            "unresolved Type 17 LoadImm encoding",
+        );
+
+        // .rela must have exactly one entry: type PM32 (0x0c), offset 0
+        // (parcel units), symbol `_global`.
+        let rela = find_section_by_name(&data, &hdr, ".relaseg_pmco")
+            .expect(".relaseg_pmco section not found");
+        assert_eq!(rela.sh_size, 12, "expected exactly one rela entry");
+        let rela_off = rela.sh_offset as usize;
+        let r_offset = u32::from_le_bytes(
+            data[rela_off..rela_off + 4].try_into().unwrap(),
+        );
+        let r_info = u32::from_le_bytes(
+            data[rela_off + 4..rela_off + 8].try_into().unwrap(),
+        );
+        let r_type = r_info & 0xff;
+        assert_eq!(r_offset, 0, "r_offset must be parcel 0 of seg_pmco");
+        assert_eq!(
+            r_type, selelf::elf::R_SHARC_PM32,
+            "LoadImm of extern must use R_SHARC_PM32 (0x0c), got 0x{r_type:x}",
+        );
+    }
+
+    /// A CALL of an external function must likewise be 48-bit (Branches
+    /// already always are in VISA mode), and its relocation must be
+    /// R_SHARC_PM24 at a parcel offset -- not R_SHARC_ADDR32 at a byte
+    /// offset, which would patch bytes 0..3 and clobber the opcode.
+    #[test]
+    fn test_call_extern_is_pm24_reloc() {
+        let src = ".SECTION/PM seg_pmco;\n\
+                   .GLOBAL _start;\n\
+                   .EXTERN _helper;\n\
+                   _start: CALL _helper;\n\
+                   RTS;\n\
+                   .ENDSEG;\n";
+        let data = assemble_source(src, true).expect("assemble");
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+
+        let seg = find_section_by_name(&data, &hdr, "seg_pmco")
+            .expect("seg_pmco section not found");
+        assert_eq!(seg.sh_size, 12);
+
+        let rela = find_section_by_name(&data, &hdr, ".relaseg_pmco")
+            .expect(".relaseg_pmco section not found");
+        assert_eq!(rela.sh_size, 12);
+        let rela_off = rela.sh_offset as usize;
+        let r_offset = u32::from_le_bytes(
+            data[rela_off..rela_off + 4].try_into().unwrap(),
+        );
+        let r_info = u32::from_le_bytes(
+            data[rela_off + 4..rela_off + 8].try_into().unwrap(),
+        );
+        let r_type = r_info & 0xff;
+        assert_eq!(r_offset, 0, "r_offset must be parcel 0 of seg_pmco");
+        assert_eq!(
+            r_type, selelf::elf::R_SHARC_PM24,
+            "CALL of extern must use R_SHARC_PM24 (0x0b), got 0x{r_type:x}",
+        );
+    }
+
+    /// `CJUMP local_label` has to become an R_SHARC_PM24 relocation
     /// against a STB_LOCAL symbol: Type 25a has no PC-relative variant,
     /// so the only way to produce position-independent bytes is to let
     /// the linker patch the final address from an in-file symbol table
