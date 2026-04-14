@@ -24,10 +24,12 @@ pub struct LoadedArchive {
 
 /// Collect library basenames (both `.doj` CRT startup objects and
 /// `.dlb` archives) referenced by the LDF's top-level variable
-/// declarations. The stock typical LDF uses
+/// declarations. A minimal setup looks like
 ///
-///     $OBJECTS   = 21569_hdr.doj, $COMMAND_LINE_OBJECTS;
-///     $LIBRARIES = libcc.dlb, libc.dlb, ...;
+/// ```text
+/// $OBJECTS   = 21569_hdr.doj, $COMMAND_LINE_OBJECTS;
+/// $LIBRARIES = libcc.dlb, libc.dlb, ...;
+/// ```
 ///
 /// The CRT header is a plain object that must be loaded unconditionally;
 /// the `$LIBRARIES` list is the ordered search chain for archive-backed

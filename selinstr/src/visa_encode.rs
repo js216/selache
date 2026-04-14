@@ -640,7 +640,7 @@ mod tests {
         let result = visa_encode(&instr, &isa);
         match result {
             VisaEncoded::W16(v) => {
-                assert_eq!(v, 0b110_00000_0011_0101);
+                assert_eq!(v, 0b1100_0000_0011_0101);
             }
             _ => panic!("expected 16-bit"),
         }

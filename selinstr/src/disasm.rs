@@ -1764,7 +1764,8 @@ mod tests {
     fn test_conditional_type2() {
         // IF EQ R0 = R1 + R2
         let compute: u64 = 0x001012;
-        let word: u64 = (0x01u64 << 40) | (0u64 << 33) | compute; // cond=0 = EQ
+        // cond field at bit 33 is zero (EQ), so it contributes nothing.
+        let word: u64 = (0x01u64 << 40) | compute;
         assert_eq!(dis(word), "IF EQ R0 = R1 + R2");
     }
 
@@ -1878,7 +1879,7 @@ mod tests {
     #[test]
     fn test_conditional_rts() {
         // IF EQ RTS — cond=0 (EQ) at bits[37:33]
-        let word: u64 = (0x0Au64 << 40) | (0u64 << 33); // J=0, COND=0 (EQ)
+        let word: u64 = 0x0Au64 << 40; // J=0, COND=0 (EQ)
         assert_eq!(dis(word), "IF EQ RTS");
     }
 

@@ -21,13 +21,19 @@ pub struct Preproc {
     pub max_depth: usize,
 }
 
-impl Preproc {
-    pub fn new() -> Self {
+impl Default for Preproc {
+    fn default() -> Self {
         Self {
             defines: HashMap::new(),
             include_paths: Vec::new(),
             max_depth: 64,
         }
+    }
+}
+
+impl Preproc {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn define_simple(&mut self, name: &str, value: &str) {

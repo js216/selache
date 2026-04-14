@@ -547,61 +547,71 @@ mod tests {
         write_shdr(
             &mut out,
             shtab_off + 40,
-            shstrtab_name as u32,
-            3, // SHT_STRTAB
-            0,
-            shstrtab_off as u32,
-            shstrtab.len() as u32,
-            0,
-            0,
+            &ShdrFields {
+                sh_name: shstrtab_name as u32,
+                sh_type: 3, // SHT_STRTAB
+                sh_flags: 0,
+                sh_offset: shstrtab_off as u32,
+                sh_size: shstrtab.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+            },
         );
         // [2] data section (PROGBITS, ALLOC|WRITE)
         write_shdr(
             &mut out,
             shtab_off + 2 * 40,
-            data_name_off as u32,
-            1, // SHT_PROGBITS
-            0x3, // SHF_WRITE | SHF_ALLOC
-            data_off as u32,
-            data_content.len() as u32,
-            0,
-            0,
+            &ShdrFields {
+                sh_name: data_name_off as u32,
+                sh_type: 1, // SHT_PROGBITS
+                sh_flags: 0x3, // SHF_WRITE | SHF_ALLOC
+                sh_offset: data_off as u32,
+                sh_size: data_content.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+            },
         );
         // [3] seg_init (PROGBITS, ALLOC)
         write_shdr(
             &mut out,
             shtab_off + 3 * 40,
-            seg_init_name as u32,
-            1, // SHT_PROGBITS
-            0x2, // SHF_ALLOC
-            seg_init_off as u32,
-            seg_init_data.len() as u32,
-            0,
-            0,
+            &ShdrFields {
+                sh_name: seg_init_name as u32,
+                sh_type: 1, // SHT_PROGBITS
+                sh_flags: 0x2, // SHF_ALLOC
+                sh_offset: seg_init_off as u32,
+                sh_size: seg_init_data.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+            },
         );
         // [4] .strtab
         write_shdr(
             &mut out,
             shtab_off + 4 * 40,
-            strtab_name as u32,
-            3, // SHT_STRTAB
-            0,
-            strtab_off as u32,
-            strtab.len() as u32,
-            0,
-            0,
+            &ShdrFields {
+                sh_name: strtab_name as u32,
+                sh_type: 3, // SHT_STRTAB
+                sh_flags: 0,
+                sh_offset: strtab_off as u32,
+                sh_size: strtab.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+            },
         );
         // [5] .symtab
         write_shdr(
             &mut out,
             shtab_off + 5 * 40,
-            symtab_name as u32,
-            2, // SHT_SYMTAB
-            0,
-            symtab_off as u32,
-            symtab.len() as u32,
-            4, // sh_link = .strtab
-            1, // sh_info = first global
+            &ShdrFields {
+                sh_name: symtab_name as u32,
+                sh_type: 2, // SHT_SYMTAB
+                sh_flags: 0,
+                sh_offset: symtab_off as u32,
+                sh_size: symtab.len() as u32,
+                sh_link: 4, // sh_link = .strtab
+                sh_info: 1, // sh_info = first global
+            },
         );
         // Set sh_entsize for symtab
         write_u32_le(
@@ -620,9 +630,7 @@ mod tests {
         buf[0..4].copy_from_slice(&val.to_le_bytes());
     }
 
-    fn write_shdr(
-        out: &mut [u8],
-        offset: usize,
+    struct ShdrFields {
         sh_name: u32,
         sh_type: u32,
         sh_flags: u32,
@@ -630,16 +638,18 @@ mod tests {
         sh_size: u32,
         sh_link: u32,
         sh_info: u32,
-    ) {
-        write_u32_le(&mut out[offset..], sh_name);
-        write_u32_le(&mut out[offset + 4..], sh_type);
-        write_u32_le(&mut out[offset + 8..], sh_flags);
+    }
+
+    fn write_shdr(out: &mut [u8], offset: usize, f: &ShdrFields) {
+        write_u32_le(&mut out[offset..], f.sh_name);
+        write_u32_le(&mut out[offset + 4..], f.sh_type);
+        write_u32_le(&mut out[offset + 8..], f.sh_flags);
         // sh_addr = 0x10000 (arbitrary)
         write_u32_le(&mut out[offset + 12..], 0x0001_0000);
-        write_u32_le(&mut out[offset + 16..], sh_offset);
-        write_u32_le(&mut out[offset + 20..], sh_size);
-        write_u32_le(&mut out[offset + 24..], sh_link);
-        write_u32_le(&mut out[offset + 28..], sh_info);
+        write_u32_le(&mut out[offset + 16..], f.sh_offset);
+        write_u32_le(&mut out[offset + 20..], f.sh_size);
+        write_u32_le(&mut out[offset + 24..], f.sh_link);
+        write_u32_le(&mut out[offset + 28..], f.sh_info);
     }
 
     fn make_default_opts() -> Options {

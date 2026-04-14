@@ -1138,18 +1138,18 @@ mod tests {
     ///     (0, 0)
     ///   Terminator (0)
     fn make_test_abbrev() -> Vec<u8> {
-        let mut data = Vec::new();
-        data.push(0x01); // abbrev number 1
-        data.push(0x11); // DW_TAG_compile_unit
-        data.push(0x01); // DW_CHILDREN_yes
-        data.push(0x03); // DW_AT_name
-        data.push(0x08); // DW_FORM_string
-        data.push(0x13); // DW_AT_language
-        data.push(0x0b); // DW_FORM_data1
-        data.push(0x00); // terminator at
-        data.push(0x00); // terminator form
-        data.push(0x00); // end of table
-        data
+        vec![
+            0x01, // abbrev number 1
+            0x11, // DW_TAG_compile_unit
+            0x01, // DW_CHILDREN_yes
+            0x03, // DW_AT_name
+            0x08, // DW_FORM_string
+            0x13, // DW_AT_language
+            0x0b, // DW_FORM_data1
+            0x00, // terminator at
+            0x00, // terminator form
+            0x00, // end of table
+        ]
     }
 
     #[test]
@@ -1256,12 +1256,13 @@ mod tests {
         body.extend_from_slice(&2u16.to_le_bytes());
 
         // Build prologue content (after prologue_length field)
-        let mut prologue = Vec::new();
-        prologue.push(0x01); // minimum_instruction_length
-        prologue.push(0x01); // default_is_stmt
-        prologue.push(0xfb_u8); // line_base (-5 as i8)
-        prologue.push(14); // line_range
-        prologue.push(10); // opcode_base (standard opcodes 1..9)
+        let mut prologue = vec![
+            0x01_u8, // minimum_instruction_length
+            0x01,    // default_is_stmt
+            0xfb,    // line_base (-5 as i8)
+            14,      // line_range
+            10,      // opcode_base (standard opcodes 1..9)
+        ];
 
         // standard_opcode_lengths for opcodes 1..9
         for len in &[0u8, 1, 1, 1, 1, 0, 0, 0, 1] {

@@ -1015,9 +1015,9 @@ mod tests {
 
         // Verify HDR_CHK: XOR of all 15 non-checksum header bytes
         let mut chk: u8 = 0;
-        for i in 0..16 {
+        for (i, b) in bytes.iter().take(16).enumerate() {
             if i != 2 {
-                chk ^= bytes[i];
+                chk ^= b;
             }
         }
         assert_eq!(chk, bytes[2]);
