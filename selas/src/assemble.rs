@@ -436,11 +436,13 @@ fn emit_elf(
 ) -> Result<()> {
     let mut writer = selelf::elf_write::ElfWriter::new();
 
-    // Add sections and collect their ELF section indices.
+    // Add sections and collect their ELF section indices. VISA-encoded PM
+    // sections use the short-word layout (alignment 1, entsize 1) so the
+    // linker accepts them when cross-linking against `-swc` C objects.
     let mut elf_indices: Vec<u16> = Vec::new();
     for (name, sec_data) in sections {
         let idx = if sec_data.is_visa {
-            writer.add_text_section_visa(name, &sec_data.code)
+            writer.add_text_section_sw(name, &sec_data.code)
         } else if sec_data.is_pm {
             writer.add_text_section(name, &sec_data.code)
         } else {
@@ -454,18 +456,26 @@ fn emit_elf(
         writer.add_undefined(ext);
     }
 
-    // Register symbols per section.
-    for (sec_idx, (_, sec_data)) in sections.iter().enumerate() {
+    // Register symbols per section. Track globally-exported function names
+    // for each PM section so we can populate the `.attributes` metadata.
+    // Each entry is (elf index, section name, VISA flag, exported functions).
+    let mut pm_section_funcs: Vec<(u16, String, bool, Vec<String>)> = Vec::new();
+    for (sec_idx, (name, sec_data)) in sections.iter().enumerate() {
         let elf_idx = elf_indices[sec_idx];
+        let mut funcs = Vec::new();
         for (sym_name, word_off) in &sec_data.symbols {
             let is_global = globals.iter().any(|g| g == sym_name);
             if is_global {
                 if sec_data.is_pm {
                     writer.add_function(sym_name, elf_idx, *word_off, 0);
+                    funcs.push(sym_name.clone());
                 } else {
                     writer.add_object(sym_name, elf_idx, *word_off, 0);
                 }
             }
+        }
+        if sec_data.is_pm {
+            pm_section_funcs.push((elf_idx, name.clone(), sec_data.is_visa, funcs));
         }
     }
 
@@ -480,9 +490,96 @@ fn emit_elf(
         }
     }
 
+    // Emit `.align.<name>` sections for every PM section. The linker
+    // requires this placement metadata to accept the object file.
+    for (idx, name, _, _) in &pm_section_funcs {
+        writer.add_align_section(name, *idx);
+    }
+
+    // Emit a `.attributes` string table naming the exported functions and
+    // the encoding / content tags the linker uses to classify code sections.
+    // VISA sections are tagged as SW (short-word) for compatibility with
+    // `-swc` compiled C objects; non-VISA PM sections stay NW.
+    if !pm_section_funcs.is_empty() {
+        let any_visa = pm_section_funcs.iter().any(|(_, _, v, _)| *v);
+        let encoding: &[u8] = if any_visa { b"SW" } else { b"NW" };
+        let mut attrs = Vec::new();
+        attrs.push(0u8); // leading null
+        for (_, _, _, funcs) in &pm_section_funcs {
+            for f in funcs {
+                attrs.extend_from_slice(b"FuncName\t");
+                attrs.extend_from_slice(f.as_bytes());
+                attrs.push(0);
+            }
+        }
+        attrs.extend_from_slice(b"Encoding\t");
+        attrs.extend_from_slice(encoding);
+        attrs.push(0);
+        attrs.extend_from_slice(b"Content\tCode\0");
+        writer.add_section(".attributes", selelf::elf::SHT_STRTAB, 0, &attrs);
+    }
+
+    // Emit `.adi.attributes` with the processor identity and per-section
+    // encoding metadata. Without this section the linker rejects the file.
+    let first_pm = pm_section_funcs.first().map(|(i, _, v, _)| (*i as u8, *v));
+    writer.add_section(
+        ".adi.attributes",
+        selelf::elf::SHT_SHARC_ATTR,
+        0,
+        &build_adi_attributes(first_pm),
+    );
+
     let elf_data = writer.finish();
     std::fs::write(output, elf_data)?;
     Ok(())
+}
+
+/// Build the `.adi.attributes` blob for ADSP-21569.
+///
+/// An ARM-style build-attributes envelope carrying file-level tags
+/// (processor name, short-word mode, char size, silicon revision, tool
+/// version) and an optional per-section subsection that names the first
+/// PM section. SHARC+ code, whether VISA or fixed-width, uses Tag_Encoding
+/// value 0x03.
+fn build_adi_attributes(first_pm: Option<(u8, bool)>) -> Vec<u8> {
+    let proc_name = b"ADSP-21569\0";
+
+    let mut file_attrs = Vec::new();
+    file_attrs.push(0x04);
+    file_attrs.extend_from_slice(proc_name);
+    file_attrs.extend_from_slice(&[0x05, 0x0b]); // short-word mode
+    file_attrs.extend_from_slice(&[0x06, 0x64]); // char size 8-bit
+    file_attrs.extend_from_slice(&[0x07, 0xff, 0xff, 0x03]); // silicon rev = any (ULEB128 0xffff)
+    file_attrs.extend_from_slice(&[0x08, 0x01]); // build tool version
+
+    let file_block_size = 1 + 4 + file_attrs.len() as u32;
+    let mut file_block = Vec::new();
+    file_block.push(0x01); // Tag_File
+    file_block.extend_from_slice(&file_block_size.to_le_bytes());
+    file_block.extend_from_slice(&file_attrs);
+
+    if let Some((idx, _is_visa)) = first_pm {
+        let sec_content = vec![
+            idx,
+            0x00, // end of section index list
+            0x12, // Tag_Encoding
+            0x03,
+        ];
+
+        let sec_block_size = 1 + 4 + sec_content.len() as u32;
+        file_block.push(0x02); // Tag_Section
+        file_block.extend_from_slice(&sec_block_size.to_le_bytes());
+        file_block.extend_from_slice(&sec_content);
+    }
+
+    let producer = b"AnonADI\0";
+    let total_size = 4 + producer.len() as u32 + file_block.len() as u32;
+    let mut blob = Vec::new();
+    blob.push(b'A');
+    blob.extend_from_slice(&total_size.to_le_bytes());
+    blob.extend_from_slice(producer);
+    blob.extend_from_slice(&file_block);
+    blob
 }
 
 // -----------------------------------------------------------------------

@@ -214,8 +214,41 @@ fn try_32bit(instr: &Instruction) -> Option<u32> {
         Instruction::UregTransfer { src_ureg, dst_ureg, compute: None } => {
             try_type5b_move(dst_ureg, src_ureg)
         }
+        Instruction::IndirectBranch { call, cond, pm_i, pm_m, delayed, compute: None } => {
+            try_type9a_32bit(call, cond, pm_i, pm_m, delayed)
+        }
         _ => None,
     }
+}
+
+/// Type 9a: 32-bit VISA indirect jump/call through a PM DAG register pair.
+///
+/// Layout:
+///   p1[15:13]=000, p1[12:8]=01000 (Type 9a), p1[7]=0 (32-bit flag),
+///   p1[6]=J, p1[5:1]=cond, p1[0]=1 (reserved-set)
+///   p2[15:14]=pmi_off (I12-I15 → 0-3), p2[13:11]=pmm (M8-M15 → 0-7),
+///   p2[10]=db, p2[5:0]=0x3f (W32 marker)
+///
+/// Only reachable for I12-I15; other PM I-registers fall through to 48-bit.
+/// `pm_i` and `pm_m` arrive as the full register index (0-15) from the
+/// parser, and the encoder only uses the low 3 bits for I8-I15 / M8-M15.
+fn try_type9a_32bit(call: bool, cond: u8, pm_i: u8, pm_m: u8, delayed: bool) -> Option<u32> {
+    if !(12..=15).contains(&pm_i) || !(8..=15).contains(&pm_m) {
+        return None;
+    }
+    let pmi_off = pm_i - 12;
+    let pmm_off = pm_m - 8;
+    let j = if call { 1u16 } else { 0 };
+    let db = if delayed { 1u16 } else { 0 };
+    let p1 = (0b01000u16 << 8)
+        | (j << 6)
+        | ((cond as u16 & 0x1F) << 1)
+        | 1;
+    let p2 = ((pmi_off as u16 & 3) << 14)
+        | ((pmm_off as u16 & 7) << 11)
+        | (db << 10)
+        | 0x3f;
+    Some((p1 as u32) << 16 | p2 as u32)
 }
 
 /// Type 2b: 32-bit compute.
@@ -310,15 +343,18 @@ fn try_type3b(write: bool, ureg: u8, i_reg: u8, m_reg: u8, cond: u8) -> Option<u
     let m_offset = (m_reg - 4) & 3;
     let d = if write { 1u16 } else { 0 };
 
-    // p1: top3=010, sub bits
+    // p1: top3=010, sub bits. Bit 8 must be set as part of the W32 marker.
     let p1 = (0b010u16 << 13)
         | ((i_reg as u16 & 0xF) << 9)
+        | (1u16 << 8)
         | ((m_offset as u16) << 6)
         | ((cond as u16 & 0x1F) << 1);
-    // p2: d, sw=0, ureg, width=11 (normal word)
+    // p2: d, sw=0, ureg, then 0x3f marker in the low 6 bits. The VISA
+    // width disambiguator keys off `p2 & 0x3F >= 0x38` for top3=010 to
+    // decide 32-bit vs 48-bit, so the low 6 bits must all be set.
     let p2 = (d << 15)
         | ((ureg as u16 & 0x7F) << 7)
-        | 0b11u16; // NW = normal word
+        | 0x3f;
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -491,6 +527,11 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
         MulOp::MrfMulSsf { rx, ry } => (0x40, 0, rx, ry),
         MulOp::MrbMulSsf { rx, ry } => (0x41, 0, rx, ry),
         MulOp::MulSsf { rn, rx, ry } => (0x44, rn, rx, ry),
+        MulOp::MulSsi { rn, rx, ry } => (0x70, rn, rx, ry),
+        // MrfMulSsi is intentionally omitted from the 32-bit compact
+        // form; the 48-bit encoder handles it.  The 32-bit VISA MUL
+        // opcode map differs from the 48-bit one and opcode 0x74 in
+        // 32-bit space collides with a different instruction form.
         MulOp::MrfMacSsf { rx, ry } => (0x48, 0, rx, ry),
         MulOp::MrbMacSsf { rx, ry } => (0x49, 0, rx, ry),
         MulOp::MacSsf { rn, rx, ry } => (0x4C, rn, rx, ry),
