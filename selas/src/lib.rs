@@ -24,6 +24,23 @@ pub fn find_toolchain_root(exe_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Assemble in-memory source text and return the raw .doj ELF bytes.
+///
+/// Runs the selas preprocessor with the given processor/defines/includes,
+/// then encodes the result directly. When `visa` is true, PM code sections
+/// use VISA variable-width encoding.
+pub fn assemble_text(
+    src: &str,
+    proc: Option<&str>,
+    defines: &[(String, String)],
+    include_dirs: &[String],
+    visa: bool,
+) -> error::Result<Vec<u8>> {
+    let mut pp = preproc::Preprocessor::new(proc, include_dirs, defines);
+    let processed = pp.process(src, "<memory>")?;
+    assemble::assemble_source(&processed, visa)
+}
+
 pub fn run(opts: &cli::Options) -> error::Result<()> {
     if opts.show_version {
         println!("SHARC+ Assembler");
@@ -62,21 +79,10 @@ pub fn run(opts: &cli::Options) -> error::Result<()> {
         return Ok(());
     }
 
-    // Write preprocessed source to a temp file for the assembler
-    let tmp_dir = std::env::temp_dir();
-    let tmp_path = tmp_dir.join("selas_pp.s");
-    std::fs::write(&tmp_path, &processed)?;
-
-    let tmp_str = tmp_path.to_string_lossy();
     let is_visa = opts.proc.as_deref()
         .is_some_and(|p| p.eq_ignore_ascii_case("ADSP-21569"));
-    if is_visa {
-        assemble::assemble_file_visa(&tmp_str, &opts.output)?;
-    } else {
-        assemble::assemble_file(&tmp_str, &opts.output)?;
-    }
-
-    let _ = std::fs::remove_file(&tmp_path);
+    let bytes = assemble::assemble_source(&processed, is_visa)?;
+    std::fs::write(&opts.output, bytes)?;
 
     if opts.verbose {
         eprintln!("done");

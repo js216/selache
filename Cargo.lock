@@ -21,6 +21,8 @@ dependencies = [
 name = "selcc"
 version = "0.1.0"
 dependencies = [
+ "selas",
+ "seld",
  "selelf",
  "selinstr",
 ]

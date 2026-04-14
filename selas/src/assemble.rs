@@ -158,23 +158,37 @@ struct PendingInstr {
     label_ref: String,
 }
 
+/// A relocation to emit against an undefined label. Produced in pass 2
+/// when a pending label reference cannot be resolved in-file.
+struct PendingReloc {
+    section_idx: usize,
+    byte_offset: u32,
+    symbol: String,
+    rela_type: u8,
+}
+
+/// R_SHARC_ADDR24: absolute 24-bit address for CALL / JUMP / LoadImm.
+const R_SHARC_ADDR24: u8 = 0x01;
+
 /// Resolve a symbolic label reference inside an instruction, replacing the
 /// placeholder address (0) with the actual word offset from `label_map`.
+/// Returns `None` when the reference must become an external relocation:
+/// either the label is undefined in this file, or the instruction is a
+/// `LoadImm` (which always loads a runtime address that the linker must
+/// patch regardless of whether the symbol is locally defined).
 fn resolve_labels(
     instr: &selinstr::encode::Instruction,
     label_name: &str,
     label_map: &std::collections::HashMap<String, u32>,
-) -> selinstr::encode::Instruction {
-    let addr = match label_map.get(label_name) {
-        Some(&a) => a,
-        None => {
-            eprintln!("warning: undefined label: {label_name}");
-            return *instr;
-        }
-    };
-
+) -> Option<selinstr::encode::Instruction> {
     use selinstr::encode::{BranchTarget, Instruction};
-    match *instr {
+    // LoadImm always becomes a relocation — the symbol's final address
+    // is only known at link time, regardless of in-file definition.
+    if matches!(*instr, Instruction::LoadImm { value: 0, .. }) {
+        return None;
+    }
+    let addr = *label_map.get(label_name)?;
+    let resolved = match *instr {
         Instruction::Branch { call, cond, target: BranchTarget::Absolute(0), delayed } => {
             Instruction::Branch { call, cond, target: BranchTarget::Absolute(addr), delayed }
         }
@@ -188,7 +202,8 @@ fn resolve_labels(
             Instruction::CJump { addr, delayed }
         }
         other => other,
-    }
+    };
+    Some(resolved)
 }
 
 /// Assemble an input .s file to an output .doj ELF object.
@@ -196,12 +211,25 @@ fn resolve_labels(
 /// When `visa` is true, PM code sections use VISA variable-width encoding
 /// (16/32/48-bit instructions) targeting ADSP-21569.
 pub fn assemble_file(input: &str, output: &str) -> Result<()> {
-    assemble_file_inner(input, output, false)
+    let raw_src = std::fs::read_to_string(input)?;
+    let bytes = assemble_source(&raw_src, false)?;
+    std::fs::write(output, bytes)?;
+    Ok(())
 }
 
 /// Assemble with VISA encoding for PM code sections.
 pub fn assemble_file_visa(input: &str, output: &str) -> Result<()> {
-    assemble_file_inner(input, output, true)
+    let raw_src = std::fs::read_to_string(input)?;
+    let bytes = assemble_source(&raw_src, true)?;
+    std::fs::write(output, bytes)?;
+    Ok(())
+}
+
+/// Assemble already-preprocessed source text and return the raw .doj ELF
+/// bytes. Callers that already have the source in memory can use this to
+/// avoid a round-trip through the filesystem.
+pub fn assemble_source(src: &str, visa: bool) -> Result<Vec<u8>> {
+    assemble_source_inner(src, visa)
 }
 
 /// Build a label -> address map from all section symbols.
@@ -215,9 +243,8 @@ fn build_label_map(sections: &[(String, SectionData)]) -> std::collections::Hash
     map
 }
 
-fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
-    let raw_src = std::fs::read_to_string(input)?;
-    let src = preprocess(&raw_src);
+fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
+    let src = preprocess(raw_src);
     let mut parser = AsmParser::new(&src);
     let lines = parser.parse_all()?;
 
@@ -286,23 +313,45 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
     }
 
     // Pass 2: resolve label references in branch and loop instructions.
+    // Any label that does not appear in the in-file label map becomes a
+    // relocation against an external symbol so that the linker can patch
+    // the final address.
+    let mut relocs: Vec<PendingReloc> = Vec::new();
     if !pending.is_empty() {
         let label_map = build_label_map(&sections);
         for pi in &pending {
-            let resolved = resolve_labels(&pi.instr, &pi.label_ref, &label_map);
-            let sec = &mut sections[pi.section_idx].1;
-            if visa && sec.is_visa {
-                let isa_bytes =
-                    selinstr::encode::encode(&resolved).expect("instruction re-encode failed");
-                let encoded = selinstr::visa_encode::visa_encode(&resolved, &isa_bytes);
-                let bytes = encoded.to_bytes();
-                sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
-                    .copy_from_slice(&bytes);
-            } else {
-                let bytes =
-                    selinstr::encode::encode(&resolved).expect("instruction re-encode failed");
-                sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
-                    .copy_from_slice(&bytes);
+            match resolve_labels(&pi.instr, &pi.label_ref, &label_map) {
+                Some(resolved) => {
+                    let sec = &mut sections[pi.section_idx].1;
+                    if visa && sec.is_visa {
+                        let isa_bytes = selinstr::encode::encode(&resolved)
+                            .expect("instruction re-encode failed");
+                        let encoded =
+                            selinstr::visa_encode::visa_encode(&resolved, &isa_bytes);
+                        let bytes = encoded.to_bytes();
+                        sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
+                            .copy_from_slice(&bytes);
+                    } else {
+                        let bytes = selinstr::encode::encode(&resolved)
+                            .expect("instruction re-encode failed");
+                        sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
+                            .copy_from_slice(&bytes);
+                    }
+                }
+                None => {
+                    // Unresolved label: emit an R_SHARC_ADDR24 relocation
+                    // that the linker will fill in. The placeholder bytes
+                    // (already zero from pass 1) stay put.
+                    if !externs.contains(&pi.label_ref) {
+                        externs.push(pi.label_ref.clone());
+                    }
+                    relocs.push(PendingReloc {
+                        section_idx: pi.section_idx,
+                        byte_offset: pi.byte_offset as u32,
+                        symbol: pi.label_ref.clone(),
+                        rela_type: R_SHARC_ADDR24,
+                    });
+                }
             }
         }
     }
@@ -310,7 +359,7 @@ fn assemble_file_inner(input: &str, output: &str, visa: bool) -> Result<()> {
     // Resolve .SET aliases into section symbol tables.
     resolve_aliases(&mut sections, &aliases);
 
-    emit_elf(&sections, &globals, &externs, output)
+    Ok(emit_elf_bytes(&sections, &globals, &externs, &relocs))
 }
 
 /// Process directive and section-state effects from a parsed line.
@@ -427,13 +476,13 @@ fn resolve_aliases(
     }
 }
 
-/// Write the accumulated sections and symbols to an ELF .doj file.
-fn emit_elf(
+/// Serialize the accumulated sections and symbols to ELF .doj bytes.
+fn emit_elf_bytes(
     sections: &[(String, SectionData)],
     globals: &[String],
     externs: &[String],
-    output: &str,
-) -> Result<()> {
+    relocs: &[PendingReloc],
+) -> Vec<u8> {
     let mut writer = selelf::elf_write::ElfWriter::new();
 
     // Add sections and collect their ELF section indices. VISA-encoded PM
@@ -490,6 +539,12 @@ fn emit_elf(
         }
     }
 
+    // Emit deferred relocations against undefined symbols.
+    for r in relocs {
+        let elf_idx = elf_indices[r.section_idx];
+        writer.add_relocation(elf_idx, r.byte_offset, &r.symbol, r.rela_type, 0);
+    }
+
     // Emit `.align.<name>` sections for every PM section. The linker
     // requires this placement metadata to accept the object file.
     for (idx, name, _, _) in &pm_section_funcs {
@@ -529,9 +584,7 @@ fn emit_elf(
         &build_adi_attributes(first_pm),
     );
 
-    let elf_data = writer.finish();
-    std::fs::write(output, elf_data)?;
-    Ok(())
+    writer.finish()
 }
 
 /// Build the `.adi.attributes` blob for ADSP-21569.
