@@ -286,7 +286,7 @@ pub fn generate(
             sh_link: 0,
             sh_info: 0,
             sh_addralign: 4,
-            sh_entsize: 0,
+            sh_entsize: if sec.is_short_word { 1 } else { 0 },
         });
         shdr_pos += SHDR_SIZE;
     }
@@ -352,6 +352,12 @@ struct MergedSection {
     is_nobits: bool,
     is_executable: bool,
     is_writable: bool,
+    /// True for SW-qualified code sections, which hold mixed VISA
+    /// (16/32/48-bit) instructions. The output section header gets
+    /// `sh_entsize = 1` so downstream tools such as seldump can
+    /// distinguish a VISA-layout section from a pure ISA (48-bit)
+    /// one; plain-PM output sections keep `sh_entsize = 0`.
+    is_short_word: bool,
     placed: Vec<PlacedSection>,
 }
 
@@ -363,9 +369,15 @@ fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
         let idx = if let Some(&idx) = name_to_idx.get(&ps.output_name) {
             idx
         } else {
+            // SW-qualified sections hold short-word code: the SHARC+
+            // assembler's VISA output, a mix of 16/32/48-bit
+            // instructions placed in a byte-wide RAM block. They are
+            // code and need SHF_EXECINSTR so dis-assemblers and
+            // loaders recognise them, but the backing memory is still
+            // writable RAM so they keep SHF_WRITE as well.
             let is_exec = matches!(
                 ps.qualifier,
-                SectionQualifier::Pm
+                SectionQualifier::Pm | SectionQualifier::Sw
             );
             let is_write = matches!(
                 ps.qualifier,
@@ -373,6 +385,7 @@ fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
                     | SectionQualifier::ZeroInit | SectionQualifier::NoInit
                     | SectionQualifier::Data64 | SectionQualifier::None
             );
+            let is_sw = matches!(ps.qualifier, SectionQualifier::Sw);
 
             let idx = sections.len();
             sections.push(MergedSection {
@@ -383,6 +396,7 @@ fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
                 is_nobits: ps.is_nobits,
                 is_executable: is_exec,
                 is_writable: is_write,
+                is_short_word: is_sw,
                 placed: Vec::new(),
             });
             name_to_idx.insert(ps.output_name.clone(), idx);
