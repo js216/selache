@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::extnames;
+use crate::symindex;
 use crate::version::{self, VersionInfo};
 
 pub const ELFA_MAGIC: &[u8; 8] = b"!<elfa>\n";
@@ -29,6 +30,12 @@ pub struct Member {
 pub struct Archive {
     pub members: Vec<Member>,
     pub version_info: VersionInfo,
+    /// Symbol index entries parsed from the `/` symbol-table member.
+    /// Each entry is (symbol_name, member_index) where member_index
+    /// refers to `members[member_index]`. Empty if the archive has no
+    /// symbol index or if no offset in the index could be mapped to a
+    /// retained member.
+    pub symbol_index: Vec<(String, usize)>,
 }
 
 impl Archive {
@@ -46,6 +53,14 @@ pub fn read(data: &[u8]) -> Result<Archive> {
     let mut pos = 8;
     let mut archive = Archive::new();
     let mut extnames_data: Vec<u8> = Vec::new();
+    // Raw symbol index content (the `/` member's bytes), if present.
+    let mut sym_index_raw: Vec<u8> = Vec::new();
+    // Map from a member header's archive-file offset to its index in
+    // `archive.members`. The symbol index stores header offsets; we
+    // resolve them to member indices once the archive has been fully
+    // walked so that indices remain stable regardless of how many
+    // special members (`/`, `//`, `__version.doj`) were skipped.
+    let mut header_offset_to_member: Vec<(usize, usize)> = Vec::new();
 
     while pos + MEMBER_HDR_SIZE <= data.len() {
         // Align to even boundary
@@ -56,6 +71,7 @@ pub fn read(data: &[u8]) -> Result<Archive> {
             break;
         }
 
+        let header_pos = pos;
         let hdr = &data[pos..pos + MEMBER_HDR_SIZE];
         // Validate fmag
         if &hdr[58..60] != AR_FMAG {
@@ -87,7 +103,10 @@ pub fn read(data: &[u8]) -> Result<Archive> {
             .trim_end();
 
         if name_str == "/" {
-            // Symbol table - skip (we rebuild it on write)
+            // Symbol table. Capture the raw bytes so we can parse it
+            // after the full member walk completes; at that point the
+            // header-offset-to-member-index map is complete.
+            sym_index_raw = content.to_vec();
             pos = content_end;
             continue;
         }
@@ -111,6 +130,8 @@ pub fn read(data: &[u8]) -> Result<Archive> {
             continue;
         }
 
+        let member_idx = archive.members.len();
+        header_offset_to_member.push((header_pos, member_idx));
         archive.members.push(Member {
             name,
             timestamp,
@@ -121,6 +142,26 @@ pub fn read(data: &[u8]) -> Result<Archive> {
         });
 
         pos = content_end;
+    }
+
+    // Parse the symbol index and translate archive byte-offsets to
+    // member indices in the retained member list. Offsets that point
+    // at non-retained members (symbol table, extended names table,
+    // `__version.doj`) are silently dropped; this preserves the
+    // invariant that every entry in `symbol_index` can be dereferenced
+    // as `members[member_index]`.
+    if !sym_index_raw.is_empty() {
+        if let Ok(entries) = symindex::parse(&sym_index_raw) {
+            for (name, offset) in entries {
+                let target = offset as usize;
+                if let Some(&(_, idx)) = header_offset_to_member
+                    .iter()
+                    .find(|&&(hdr_pos, _)| hdr_pos == target)
+                {
+                    archive.symbol_index.push((name, idx));
+                }
+            }
+        }
     }
 
     Ok(archive)
@@ -195,5 +236,34 @@ mod tests {
         assert_eq!(archive.members[0].data, obj1);
         assert_eq!(archive.members[1].data, obj2);
         assert_eq!(archive.members[2].data, obj3);
+    }
+
+    #[test]
+    fn test_read_symbol_index_maps_to_member_indices() {
+        let obj1 = testutil::make_sharc_object(&["_alpha", "_beta"]);
+        let obj2 = testutil::make_sharc_object(&["_gamma"]);
+        let obj3 = testutil::make_sharc_object(&["_delta", "_epsilon"]);
+
+        let data = testutil::make_archive_bytes(&[
+            ("alpha.doj", &obj1),
+            ("gamma.doj", &obj2),
+            ("delta.doj", &obj3),
+        ]);
+        let archive = read(&data).unwrap();
+
+        // Every symbol in the synthesized index must map to the
+        // correct retained-member index.
+        let lookup = |name: &str| -> Option<usize> {
+            archive
+                .symbol_index
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, idx)| *idx)
+        };
+        assert_eq!(lookup("_alpha"), Some(0));
+        assert_eq!(lookup("_beta"), Some(0));
+        assert_eq!(lookup("_gamma"), Some(1));
+        assert_eq!(lookup("_delta"), Some(2));
+        assert_eq!(lookup("_epsilon"), Some(2));
     }
 }

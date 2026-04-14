@@ -36,6 +36,78 @@ pub const SHT_FINI_ARRAY: u32 = 15;
 pub const R_SHARC_NONE: u32 = 0;
 pub const R_SHARC_ADDR32: u32 = 1;
 pub const R_SHARC_PCREL: u32 = 0x2;
+/// Absolute 24-bit program-memory target for direct `JUMP`/`CALL`
+/// and conditional-branch instructions. The target is split between the
+/// low 8 bits of the middle 16-bit word of the 48-bit instruction
+/// (carrying target bits 23..16) and the entire last 16-bit word
+/// (target bits 15..0). The upper 8 bits of the middle word hold
+/// opcode/flag fields and must not be disturbed. The `r_offset` field
+/// is expressed in 16-bit word units and points at the first word of
+/// the 48-bit instruction.
+pub const R_SHARC_PM24: u32 = 0xb;
+/// Full 32-bit immediate in the low two 16-bit words of a 48-bit
+/// program-memory instruction. Used by `Rn=imm32` register loads and
+/// by the software-branch-return helper that pushes a 32-bit PC value
+/// onto the return stack (`dm(i7,m7)=imm32`). The immediate occupies
+/// bytes 2..5 of the instruction as a big-endian word; the top 16-bit
+/// word (opcode) is preserved. `r_offset` counts 16-bit words.
+pub const R_SHARC_PM32: u32 = 0xc;
+/// Full 32-bit absolute address written into a data-memory word.
+/// Targets a `.VAR`-style data definition whose initialiser is a
+/// symbol address (for example the `heap_table` initialiser that
+/// stores `ldf_heap_space` and `ldf_heap_length`). The 32-bit
+/// absolute value replaces the whole four-byte DM word in the
+/// containing section, stored in little-endian byte order to match
+/// the ELF file's overall data encoding. `r_offset` is a plain byte
+/// offset into the target section.
+pub const R_SHARC_DM_ADDR32: u32 = 0xd;
+/// 24-bit signed PC-relative program-memory branch offset. Used by
+/// conditional-jump instructions (`if cc jump (pc, N)`), including
+/// delayed variants. The delta is written into bits 23..0 of the
+/// 48-bit instruction (bytes 3..5 in big-endian order); the top 24
+/// bits are opcode/condition fields and are preserved. `r_offset`
+/// counts 16-bit words.
+pub const R_SHARC_PM_PCREL24: u32 = 0xf;
+/// 6-bit signed PC-relative program-memory branch offset used by the
+/// compute-with-jump instruction form (`if cc jump (pc, N) [(db)],
+/// compute-op`). This is the narrow branch variant that fuses a short
+/// conditional branch with a single-cycle compute operation, which
+/// leaves only six bits of the 48-bit instruction for the PC delta.
+/// The delta is split across two non-adjacent byte positions: the low
+/// five bits occupy bits 7..3 of byte 2 of the instruction, and the
+/// sign bit (bit five of the six-bit field) occupies bit 0 of byte 1.
+/// All other bits of bytes 1 and 2 carry the condition code, the
+/// delayed-branch flag, and parts of the compute-operation opcode and
+/// must be preserved. `r_offset` counts 16-bit words.
+pub const R_SHARC_PM_PCREL6: u32 = 0xe;
+/// 16-bit signed PC-relative program-memory loop-end offset used by
+/// `lcntr=N, do (pc, N) until lce` setup instructions. The delta is
+/// written into the last 16-bit word of the 48-bit instruction (bytes
+/// 4..5 in big-endian order); the top 32 bits carry the loop-counter
+/// and opcode fields and are preserved. `r_offset` counts 16-bit
+/// words.
+pub const R_SHARC_PM_LOOP16: u32 = 0x1b;
+/// Software-branch return-target load: the symbol's address is
+/// written into the 32-bit immediate field of the 48-bit instruction
+/// at bytes 2..5 (big-endian). Appears as the first of a four-relocation
+/// group at a single `dm(i7,m7)=imm32` slot, where the full expression
+/// is `sw_return_label - 1`; the subtraction is carried out by a
+/// paired `R_SHARC_PM32_SUB` reloc. `r_offset` counts 16-bit words.
+pub const R_SHARC_PM_SW_BRANCHRETURN: u32 = 0xe0;
+/// Subtract an addend from a previously-written 32-bit program-memory
+/// immediate. Used by the software-branch-return expression to
+/// decrement the return label by one; the reloc's symbol is the
+/// ABI-internal `.__constant` placeholder, and the addend carries the
+/// constant being subtracted. Bytes 2..5 of the 48-bit instruction are
+/// interpreted as a big-endian 32-bit field, decremented, and written
+/// back. `r_offset` counts 16-bit words.
+pub const R_SHARC_PM32_SUB: u32 = 0xe1;
+/// Expression-operator marker for the software-branch-return relocation
+/// group. Carries no data of its own: its symbol is always the ABI-
+/// internal `.__operator` placeholder. Applying it is a no-op, but the
+/// reloc must be decoded rather than rejected so that the containing
+/// group links cleanly. `r_offset` counts 16-bit words.
+pub const R_SHARC_PM_EXPR_MARKER: u32 = 0xe3;
 pub const R_SHARC_DATA6: u32 = 0x11;
 pub const R_SHARC_DATA7: u32 = 0x12;
 pub const R_SHARC_DATA16: u32 = 0x14;
