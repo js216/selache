@@ -11,7 +11,8 @@ pub enum Token {
     Ident(String),
     /// A `$VARIABLE` reference (includes the leading `$`).
     Variable(String),
-    /// Numeric literal (decimal or hex).
+    /// Numeric literal (decimal or hex). Size suffixes `K` and `M`
+    /// (powers of two) are recognized and multiplied at lex time.
     Number(u32),
     /// Quoted string literal (contents only, no quotes).
     StringLit(String),
@@ -23,20 +24,62 @@ pub enum Token {
     LParen,
     /// `)`
     RParen,
+    /// `[`
+    LBracket,
+    /// `]`
+    RBracket,
     /// `;`
     Semi,
     /// `,`
     Comma,
     /// `=`
     Equals,
+    /// `==`
+    EqEq,
+    /// `!=`
+    NotEq,
     /// `>`
     Gt,
+    /// `>=`
+    Ge,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `<<`
+    Shl,
+    /// `>>`
+    Shr,
     /// `!`
     Bang,
     /// `.`
     Dot,
     /// `/`
     Slash,
+    /// `+`
+    Plus,
+    /// `-`
+    Minus,
+    /// `*`
+    Star,
+    /// `%`
+    Percent,
+    /// `&`
+    Amp,
+    /// `&&`
+    AmpAmp,
+    /// `|`
+    Pipe,
+    /// `||`
+    PipePipe,
+    /// `^`
+    Caret,
+    /// `~`
+    Tilde,
+    /// `?`
+    Question,
+    /// `:`
+    Colon,
     /// End of input.
     Eof,
 }
@@ -321,6 +364,38 @@ impl<'a> Lexer<'a> {
         false
     }
 
+    /// Consume a trailing size suffix (K/M) and return the scaled value.
+    fn consume_size_suffix(&mut self, base: u32) -> u32 {
+        match self.peek() {
+            Some(b'K') | Some(b'k') => {
+                // Only accept as suffix if not followed by an ident char.
+                let after = self.src.get(self.pos + 1).copied();
+                let is_suffix = after
+                    .map(|c| !(c.is_ascii_alphanumeric() || c == b'_'))
+                    .unwrap_or(true);
+                if is_suffix {
+                    self.advance();
+                    base.saturating_mul(1024)
+                } else {
+                    base
+                }
+            }
+            Some(b'M') | Some(b'm') => {
+                let after = self.src.get(self.pos + 1).copied();
+                let is_suffix = after
+                    .map(|c| !(c.is_ascii_alphanumeric() || c == b'_'))
+                    .unwrap_or(true);
+                if is_suffix {
+                    self.advance();
+                    base.saturating_mul(1024 * 1024)
+                } else {
+                    base
+                }
+            }
+            _ => base,
+        }
+    }
+
     fn next_token(&mut self) -> Result<Spanned, String> {
         loop {
             self.skip_whitespace();
@@ -366,17 +441,83 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // Single-character tokens
+            // Multi-character and single-character tokens. Order matters:
+            // two-character forms (==, !=, &&, ||, <=, >=, <<, >>) must be
+            // checked before single characters.
+            let next = self.src.get(self.pos + 1).copied();
             match ch {
                 b'{' => { self.advance(); return Ok(Spanned { tok: Token::LBrace, loc }); }
                 b'}' => { self.advance(); return Ok(Spanned { tok: Token::RBrace, loc }); }
                 b'(' => { self.advance(); return Ok(Spanned { tok: Token::LParen, loc }); }
                 b')' => { self.advance(); return Ok(Spanned { tok: Token::RParen, loc }); }
+                b'[' => { self.advance(); return Ok(Spanned { tok: Token::LBracket, loc }); }
+                b']' => { self.advance(); return Ok(Spanned { tok: Token::RBracket, loc }); }
                 b';' => { self.advance(); return Ok(Spanned { tok: Token::Semi, loc }); }
                 b',' => { self.advance(); return Ok(Spanned { tok: Token::Comma, loc }); }
-                b'=' => { self.advance(); return Ok(Spanned { tok: Token::Equals, loc }); }
-                b'>' => { self.advance(); return Ok(Spanned { tok: Token::Gt, loc }); }
-                b'!' => { self.advance(); return Ok(Spanned { tok: Token::Bang, loc }); }
+                b'=' => {
+                    self.advance();
+                    if next == Some(b'=') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::EqEq, loc });
+                    }
+                    return Ok(Spanned { tok: Token::Equals, loc });
+                }
+                b'!' => {
+                    self.advance();
+                    if next == Some(b'=') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::NotEq, loc });
+                    }
+                    return Ok(Spanned { tok: Token::Bang, loc });
+                }
+                b'>' => {
+                    self.advance();
+                    if next == Some(b'=') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::Ge, loc });
+                    }
+                    if next == Some(b'>') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::Shr, loc });
+                    }
+                    return Ok(Spanned { tok: Token::Gt, loc });
+                }
+                b'<' => {
+                    self.advance();
+                    if next == Some(b'=') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::Le, loc });
+                    }
+                    if next == Some(b'<') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::Shl, loc });
+                    }
+                    return Ok(Spanned { tok: Token::Lt, loc });
+                }
+                b'&' => {
+                    self.advance();
+                    if next == Some(b'&') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::AmpAmp, loc });
+                    }
+                    return Ok(Spanned { tok: Token::Amp, loc });
+                }
+                b'|' => {
+                    self.advance();
+                    if next == Some(b'|') {
+                        self.advance();
+                        return Ok(Spanned { tok: Token::PipePipe, loc });
+                    }
+                    return Ok(Spanned { tok: Token::Pipe, loc });
+                }
+                b'+' => { self.advance(); return Ok(Spanned { tok: Token::Plus, loc }); }
+                b'-' => { self.advance(); return Ok(Spanned { tok: Token::Minus, loc }); }
+                b'*' => { self.advance(); return Ok(Spanned { tok: Token::Star, loc }); }
+                b'%' => { self.advance(); return Ok(Spanned { tok: Token::Percent, loc }); }
+                b'^' => { self.advance(); return Ok(Spanned { tok: Token::Caret, loc }); }
+                b'~' => { self.advance(); return Ok(Spanned { tok: Token::Tilde, loc }); }
+                b'?' => { self.advance(); return Ok(Spanned { tok: Token::Question, loc }); }
+                b':' => { self.advance(); return Ok(Spanned { tok: Token::Colon, loc }); }
                 b'.' => { self.advance(); return Ok(Spanned { tok: Token::Dot, loc }); }
                 b'/' => { self.advance(); return Ok(Spanned { tok: Token::Slash, loc }); }
                 _ => {}
@@ -424,8 +565,9 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     let s = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("0");
-                    let val = u32::from_str_radix(&s[2..], 16)
+                    let mut val = u32::from_str_radix(&s[2..], 16)
                         .map_err(|e| format!("invalid hex number `{s}`: {e}"))?;
+                    val = self.consume_size_suffix(val);
                     return Ok(Spanned { tok: Token::Number(val), loc });
                 }
                 while let Some(c) = self.peek() {
@@ -436,8 +578,9 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 let s = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("0");
-                let val: u32 = s.parse()
+                let mut val: u32 = s.parse()
                     .map_err(|e| format!("invalid number `{s}`: {e}"))?;
+                val = self.consume_size_suffix(val);
                 return Ok(Spanned { tok: Token::Number(val), loc });
             }
 

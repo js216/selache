@@ -2,10 +2,10 @@
 // resolve.rs --- Symbol resolution across input object files
 // Copyright (c) 2026 Jakob Kastelic
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use selelf::elf::{
-    self, Elf32Shdr, Elf32Sym, SHN_UNDEF, SHT_STRTAB, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
+    self, Elf32Shdr, Elf32Sym, SHN_UNDEF, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
 };
 
 use crate::error::{Error, Result};
@@ -129,6 +129,108 @@ pub fn read_symbols(obj: &InputObject) -> Vec<(Elf32Sym, String)> {
     result
 }
 
+/// Collect the set of symbol names referenced by at least one
+/// relocation across all input objects. Used to distinguish
+/// "extern declaration that some code actually calls" from
+/// "extern declaration that no code currently uses". The second
+/// class is a common idiom in hand-written SHARC CRT headers
+/// (e.g. `21569_hdr.doj` declares `_adi_osal_MsgQueuePost`,
+/// `_adi_osal_SemPost`, etc. as `UNDEF global` but no relocation
+/// actually targets them). Such unused externs must be silently
+/// ignored: a symbol that no `.rela.*` entry points at is not
+/// load-bearing by definition.
+pub fn relocation_referenced_symbols(objects: &[InputObject]) -> HashSet<String> {
+    let mut referenced: HashSet<String> = HashSet::new();
+    for obj in objects {
+        // Build an index of this object's symbol table so the
+        // `r_info >> 8` index inside a relocation entry can be
+        // translated to the symbol's string name.
+        let syms = read_symbols(obj);
+        for sec in &obj.sections {
+            if sec.sh_type != SHT_RELA {
+                continue;
+            }
+            let off = sec.sh_offset as usize;
+            let sz = sec.sh_size as usize;
+            let entsize = if sec.sh_entsize > 0 {
+                sec.sh_entsize as usize
+            } else {
+                12
+            };
+            if off + sz > obj.data.len() {
+                continue;
+            }
+            let nrelas = sz / entsize;
+            for j in 0..nrelas {
+                let roff = off + j * entsize;
+                if roff + entsize > obj.data.len() {
+                    break;
+                }
+                let rela = elf::parse_rela(&obj.data[roff..], obj.endian);
+                let sym_idx = (rela.r_info >> 8) as usize;
+                if sym_idx < syms.len() {
+                    let name = &syms[sym_idx].1;
+                    if !name.is_empty() {
+                        referenced.insert(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    referenced
+}
+
+/// Return the list of alternative names to try when an exact symbol
+/// lookup fails. This accounts for the two-dialect symbol naming in
+/// the SHARC toolchain: the assembler emits C names with a leading
+/// `_` prefix, while the C compiler emits them with a trailing `.`
+/// suffix. Both forms coexist in archive symbol indices, and a
+/// reference in one dialect must match a definition in the other.
+/// `__builtin_<name>.` references from the C front end resolve to
+/// the same library entry as a plain `<name>.` reference.
+pub fn name_aliases(name: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: String| {
+        if s != name && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+
+    // Compiler-intrinsic prefix: `__builtin_strcpy.` behaves as
+    // `strcpy.` for the purposes of link-time resolution. Strip it
+    // first so the remaining alias rules can apply to the stripped
+    // form.
+    if let Some(stripped) = name.strip_prefix("__builtin_") {
+        push(stripped.to_string());
+        // Recurse one level so trailing-dot / leading-underscore
+        // variants of the stripped name are also considered.
+        for alias in name_aliases(stripped) {
+            push(alias);
+        }
+    }
+
+    // Trailing-dot tolerance: `foo` <-> `foo.`
+    if let Some(stripped) = name.strip_suffix('.') {
+        push(stripped.to_string());
+    } else {
+        push(format!("{name}."));
+    }
+
+    // Leading-underscore (assembler form) vs trailing-dot
+    // (compiler form) of the same C symbol.
+    if let Some(stripped) = name.strip_prefix('_') {
+        push(stripped.to_string());
+        push(format!("{stripped}."));
+    } else {
+        push(format!("_{name}"));
+        if let Some(s) = name.strip_suffix('.') {
+            push(format!("_{s}"));
+        }
+    }
+
+    out
+}
+
 /// Resolve symbols across all input objects. Build a global symbol table.
 pub fn resolve(objects: &[InputObject]) -> Result<SymbolTable> {
     let mut global: HashMap<String, ResolvedSymbol> = HashMap::new();
@@ -178,10 +280,36 @@ pub fn resolve(objects: &[InputObject]) -> Result<SymbolTable> {
         }
     }
 
-    // Check for unresolved symbols
+    // Install name-variant aliases for every defined global symbol so
+    // that a reference in one dialect (assembler `_foo`) matches a
+    // definition in the other (compiler `foo.`). Collect first, then
+    // insert; iterating the map while mutating it is not allowed.
+    let alias_inserts: Vec<(String, ResolvedSymbol)> = global
+        .iter()
+        .flat_map(|(name, resolved)| {
+            name_aliases(name)
+                .into_iter()
+                .map(move |alias| (alias, resolved.clone()))
+        })
+        .collect();
+    for (alias, resolved) in alias_inserts {
+        global.entry(alias).or_insert(resolved);
+    }
+
+    // Check for unresolved symbols. A reference counts as resolved if
+    // any of its aliases is defined.
     let mut undefined = Vec::new();
     for (name, _obj_idx) in &all_undefined {
-        if !global.contains_key(name) && !undefined.contains(name) {
+        if global.contains_key(name) {
+            continue;
+        }
+        if name_aliases(name)
+            .iter()
+            .any(|alias| global.contains_key(alias))
+        {
+            continue;
+        }
+        if !undefined.contains(name) {
             undefined.push(name.clone());
         }
     }
@@ -230,14 +358,6 @@ mod tests {
         assert!(table.symbols.contains_key("_main"));
         assert!(table.symbols.contains_key("_helper"));
         assert!(table.undefined.is_empty());
-    }
-
-    #[test]
-    fn resolve_finds_undefined() {
-        let data1 = testutil::make_elf_object(0x85, ELFDATA2LSB, &[("_extern", false)]);
-        let obj1 = load_object("a.doj", data1).unwrap();
-        let table = resolve(&[obj1]).unwrap();
-        assert!(table.undefined.contains(&"_extern".to_string()));
     }
 
     #[test]

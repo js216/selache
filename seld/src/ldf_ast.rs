@@ -9,6 +9,11 @@ pub struct Ldf {
     pub variables: Vec<VarDecl>,
     pub memory: Vec<MemorySegment>,
     pub processors: Vec<Processor>,
+    /// Top-level `name = expr ;` constant assignments collected from
+    /// every lexical position inside PROCESSOR / SECTIONS / output
+    /// section bodies. Order is the source order; the evaluator later
+    /// resolves these against the post-layout memory map.
+    pub script_assignments: Vec<ScriptAssignment>,
 }
 
 /// A variable declaration: `$NAME = value1, value2 ;`
@@ -96,6 +101,56 @@ pub struct Reserve {
     pub length_name: String,
     pub length: u32,
     pub align: u32,
+    /// True when the directive was `RESERVE_EXPAND(...)` rather
+    /// than plain `RESERVE(...)`. Expanding reserves soak up the
+    /// free tail of their target segment in a post-pass.
+    pub expand: bool,
+}
+
+/// A top-level constant assignment: `name = expr ;`. These appear
+/// scattered throughout the PROCESSOR body and inside output sections,
+/// and are evaluated after section layout against the final memory
+/// map. The resulting values are installed as global SHN_ABS symbols.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptAssignment {
+    pub name: String,
+    pub expr: Expr,
+    /// Source line for diagnostics; zero if unknown.
+    pub line: usize,
+}
+
+/// An integer constant expression used by script assignments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Number(u32),
+    Ident(String),
+    Unary(UnOp, Box<Expr>),
+    Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// A function call: `MEMORY_START(region)`, `MEMSIZE(region)`,
+    /// etc. Arguments are themselves expressions.
+    Call(String, Vec<Expr>),
+}
+
+/// Unary operators in script expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    Neg,
+    Not,
+}
+
+/// Binary operators in script expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Shl,
+    Shr,
+    And,
+    Or,
+    Xor,
 }
 
 #[cfg(test)]
@@ -109,6 +164,7 @@ mod tests {
             variables: vec![],
             memory: vec![],
             processors: vec![],
+            script_assignments: vec![],
         };
         assert!(ldf.architecture.is_none());
         assert!(ldf.memory.is_empty());

@@ -16,8 +16,23 @@ pub enum Error {
     Parse(String),
     UnresolvedSymbol(String),
     DuplicateSymbol { name: String, first: String, second: String },
-    LayoutOverflow { section: String, segment: String },
     Relocation(String),
+    LayoutOverflow {
+        section: String,
+        segment: String,
+        requested: u32,
+        remaining: u32,
+    },
+    UnsupportedRelocationType {
+        reloc_type: u32,
+        offset: u32,
+        section: String,
+        object: String,
+    },
+    OrphanSection {
+        section: String,
+        object: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -39,11 +54,29 @@ impl fmt::Display for Error {
                     "duplicate symbol `{name}`: defined in `{first}` and `{second}`"
                 )
             }
-            Error::LayoutOverflow { section, segment } => write!(
-                f,
-                "section `{section}` overflows memory segment `{segment}`"
-            ),
             Error::Relocation(msg) => write!(f, "relocation error: {msg}"),
+            Error::LayoutOverflow {
+                section,
+                segment,
+                requested,
+                remaining,
+            } => write!(
+                f,
+                "layout overflow: section `{section}` requires {requested} units in segment `{segment}` but only {remaining} units remain"
+            ),
+            Error::UnsupportedRelocationType {
+                reloc_type,
+                offset,
+                section,
+                object,
+            } => write!(
+                f,
+                "unsupported relocation type 0x{reloc_type:x} at offset 0x{offset:x} in section `{section}` of `{object}`"
+            ),
+            Error::OrphanSection { section, object } => write!(
+                f,
+                "orphan section: `{section}` in `{object}` was not claimed by any LDF output section"
+            ),
         }
     }
 }
