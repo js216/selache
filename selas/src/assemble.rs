@@ -1073,4 +1073,67 @@ mod tests {
             .expect("seg_pmco section not found");
         assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
     }
+
+    /// `CJUMP local_label` has to become an R_SHARC_ADDR24 relocation
+    /// against a STB_LOCAL symbol: Type 25a has no PC-relative variant,
+    /// so the only way to produce position-independent bytes is to let
+    /// the linker patch the final address from an in-file symbol table
+    /// entry. Without the local-symbol path this would either silently
+    /// encode a section-relative value as absolute (wrong at runtime)
+    /// or declare the local label as an undefined external (fails to
+    /// link).
+    #[test]
+    fn test_cjump_local_label_emits_local_symbol() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             .GLOBAL _start;\n\
+             _start: NOP;\n\
+             my_label: NOP;\n\
+             CJUMP my_label;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+
+        // The symbol table must contain `my_label` as a defined local
+        // symbol pointing at word 1 of seg_pmco.
+        let symtab_shdr = find_section_by_name(&data, &hdr, ".symtab")
+            .expect(".symtab not found");
+        let strtab_shdr = find_section_by_name(&data, &hdr, ".strtab")
+            .expect(".strtab not found");
+        let symtab_off = symtab_shdr.sh_offset as usize;
+        let symtab_end = symtab_off + symtab_shdr.sh_size as usize;
+        let strtab_off = strtab_shdr.sh_offset as usize;
+        let strtab_end = strtab_off + strtab_shdr.sh_size as usize;
+        let strtab = &data[strtab_off..strtab_end];
+
+        let mut found = false;
+        let mut cursor = symtab_off;
+        while cursor + 16 <= symtab_end {
+            let st_name = u32::from_le_bytes([
+                data[cursor],
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+            ]);
+            let st_value = u32::from_le_bytes([
+                data[cursor + 4],
+                data[cursor + 5],
+                data[cursor + 6],
+                data[cursor + 7],
+            ]);
+            let st_info = data[cursor + 12];
+            let st_shndx = u16::from_le_bytes([data[cursor + 14], data[cursor + 15]]);
+            let name = selelf::elf::read_string_at(strtab, st_name);
+            if name == "my_label" {
+                let binding = st_info >> 4;
+                assert_eq!(binding, selelf::elf::STB_LOCAL, "my_label must be STB_LOCAL");
+                assert_ne!(st_shndx, 0, "my_label must be defined (not SHN_UNDEF)");
+                assert_eq!(st_value, 1, "my_label must point at word 1 of seg_pmco");
+                found = true;
+                break;
+            }
+            cursor += 16;
+        }
+        assert!(found, "my_label not found in symbol table");
+    }
 }
