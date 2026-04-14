@@ -329,6 +329,14 @@ pub enum Instruction {
     Nop,
     /// IDLE (bit 39 set).
     Idle,
+    /// RFRAME: restore frame pointer. Part of the SHARC+ C-ABI return
+    /// sequence, placed in the first delay slot of the indirect
+    /// `JUMP (M14,I12) (DB)` return so that the old frame pointer
+    /// (which the caller's delayed CALL stored on the frame stack)
+    /// is popped back into I6 before control leaves the callee.
+    /// This toolchain only emits RFRAME in VISA mode: the 16-bit
+    /// compressed form is the canonical encoding (parcel 0x1901).
+    Rframe,
     /// Type 17: ureg = immediate32.
     LoadImm { ureg: u8, value: u32 },
     /// Type 11a: RTS / RTI, optional compute.
@@ -576,6 +584,13 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
     match *instr {
         Instruction::Nop => Ok(0),
         Instruction::Idle => Ok(1u64 << 39),
+        // RFRAME has no 48-bit ISA form in this toolchain. Return a
+        // placeholder so the encode path does not panic; the VISA
+        // compressor in `visa_encode::try_16bit` catches Rframe
+        // specifically and emits the canonical 16-bit 0x1901 parcel,
+        // so this placeholder is never written to the output of any
+        // VISA PM section.
+        Instruction::Rframe => Ok(0),
         Instruction::LoadImm { ureg, value } => encode_type17(ureg, value),
         Instruction::Return {
             interrupt,

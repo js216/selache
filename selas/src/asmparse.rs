@@ -397,10 +397,21 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
         return Ok((Instruction::Sync, None));
     }
 
-    // SIMD mode and frame instructions — encode as NOP (assembler placeholder)
+    // RFRAME restores the frame pointer (I6) that the caller's delayed
+    // CALL pushed on the frame stack. It appears in the first delay slot
+    // of the SHARC+ C-ABI indirect return `JUMP (M14,I12) (DB)`. VISA
+    // mode emits the canonical 16-bit 0x1901 parcel.
+    if upper == "RFRAME" {
+        return Ok((Instruction::Rframe, None));
+    }
+
+    // Other SIMD mode / frame instructions this toolchain does not yet
+    // model in detail — encode as NOP as a placeholder so the assembler
+    // accepts asm text that names them without breaking downstream
+    // passes.
     if upper.starts_with("ENTER_SIMD") || upper.starts_with("EXIT_SIMD")
         || upper.starts_with("ENTER SIMD") || upper.starts_with("EXIT SIMD")
-        || upper == "RFRAME" || upper == "CFRAME"
+        || upper == "CFRAME"
         || upper.starts_with("FETCH_RETURN")
     {
         return Ok((Instruction::Nop, None));

@@ -14,6 +14,12 @@ pub mod visa_encode;
 pub fn instruction_to_text(
     instr: &encode::Instruction,
 ) -> Result<String, encode::EncodeError> {
+    // Instructions whose 48-bit ISA encoding is not modelled by this
+    // toolchain need direct text output: the encode-then-decode round
+    // trip would lose them. Currently only RFRAME falls in this bucket.
+    if matches!(instr, encode::Instruction::Rframe) {
+        return Ok("RFRAME".to_string());
+    }
     let word = encode::encode_word(instr)?;
     Ok(disasm::decode_instruction(word))
 }

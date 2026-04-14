@@ -90,6 +90,7 @@ fn try_16bit(instr: &Instruction) -> Option<u16> {
         Instruction::Nop => Some(0x0001),
         Instruction::Idle => Some(0x0081),
         Instruction::EmuIdle => Some(0x00C1),
+        Instruction::Rframe => Some(0x1901),
         Instruction::Return { interrupt: false, cond: 31, delayed: true, lr: false, compute: None } => {
             Some(0x0AFE)
         }
