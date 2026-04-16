@@ -376,6 +376,28 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
                 continue;
             }
 
+            // Reject loops whose body contains:
+            // - break (Branch to end_label) or continue (Branch to top)
+            // - ANY backward branch or nested loop (Branch to a label
+            //   defined BEFORE the branch within the body range)
+            // SHARC+ hardware DO loops forbid all of these; violating
+            // any of them desynchronises the loop-end comparator.
+            let body = &ops[info.body_start..info.step_start];
+            let body_labels: std::collections::HashSet<Label> = body.iter().filter_map(|op| {
+                if let IrOp::Label(l) = op { Some(*l) } else { None }
+            }).collect();
+            let has_body_branch = body.iter().any(|op| match op {
+                // break or continue
+                IrOp::Branch(target) if *target == end_label || *target == top_label => true,
+                // backward branch to a label inside the body (nested loop)
+                IrOp::Branch(target) if body_labels.contains(target) => true,
+                IrOp::BranchCond(_, target) if body_labels.contains(target) => true,
+                _ => false,
+            });
+            if has_body_branch {
+                continue;
+            }
+
             // Build the replacement: remove the init, header, step, and
             // back-edge, replacing with HardwareLoop + body + Label(end).
             let mut new_ops = Vec::with_capacity(ops.len());
