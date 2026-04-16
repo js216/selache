@@ -672,6 +672,7 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::FrameAddr(d, _) => Some(*d),
 
         IrOp::Cmp(..)
+        | IrOp::UCmp(..)
         | IrOp::FCmp(..)
         | IrOp::Cmp64(..)
         | IrOp::UCmp64(..)
@@ -720,7 +721,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::FSub(_, a, b)
         | IrOp::FMul(_, a, b)
         | IrOp::FDiv(_, a, b) => vec![*a, *b],
-        IrOp::Cmp(a, b) | IrOp::FCmp(a, b) => vec![*a, *b],
+        IrOp::Cmp(a, b) | IrOp::UCmp(a, b) | IrOp::FCmp(a, b) => vec![*a, *b],
         IrOp::Ret(Some(v)) => vec![*v],
         IrOp::Ret(None) => Vec::new(),
         IrOp::BranchCond(_, _) => Vec::new(),

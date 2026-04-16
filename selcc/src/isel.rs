@@ -244,6 +244,19 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                 });
             }
 
+            IrOp::UCmp(lhs, rhs) => {
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Alu(AluOp::CompU {
+                            rx: *lhs as u8,
+                            ry: *rhs as u8,
+                        }),
+                    },
+                    reloc: None,
+                });
+            }
+
             IrOp::Ret(val) => {
                 // Move the return value into R0 via the pinned
                 // pseudo-vreg `target::RETURN_REG_VREG`, which regalloc

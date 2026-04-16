@@ -2094,6 +2094,7 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         return Ok(dst);
     }
 
+    let is_unsigned = is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
     let dst = ctx.alloc_vreg();
     match op {
         BinaryOp::Add => ctx.emit(IrOp::Add(dst, l, r)),
@@ -2108,20 +2109,24 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         BinaryOp::Shr => ctx.emit(IrOp::Shr(dst, l, r)),
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt
         | BinaryOp::Le | BinaryOp::Ge => {
-            return lower_comparison(ctx, op, l, r);
+            return lower_comparison(ctx, op, l, r, is_unsigned);
         }
         BinaryOp::LogAnd | BinaryOp::LogOr => unreachable!(),
     }
     Ok(dst)
 }
 
-fn lower_comparison(ctx: &mut LowerCtx, op: BinaryOp, l: VReg, r: VReg) -> Result<VReg> {
+fn lower_comparison(ctx: &mut LowerCtx, op: BinaryOp, l: VReg, r: VReg, is_unsigned: bool) -> Result<VReg> {
     let dst = ctx.alloc_vreg();
     let zero = ctx.alloc_vreg();
     let one = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(zero, 0));
     ctx.emit(IrOp::LoadImm(one, 1));
-    ctx.emit(IrOp::Cmp(l, r));
+    if is_unsigned {
+        ctx.emit(IrOp::UCmp(l, r));
+    } else {
+        ctx.emit(IrOp::Cmp(l, r));
+    }
 
     let cond = match op {
         BinaryOp::Eq => Cond::Eq,

@@ -57,8 +57,10 @@ pub enum IrOp {
     Neg(VReg, VReg),
     /// dst = ~src
     BitNot(VReg, VReg),
-    /// Compare lhs, rhs -- sets flags for a subsequent BranchCond
+    /// Compare lhs, rhs (signed) -- sets flags for a subsequent BranchCond
     Cmp(VReg, VReg),
+    /// Compare lhs, rhs (unsigned) -- sets flags for a subsequent BranchCond
+    UCmp(VReg, VReg),
     /// Return with optional value register
     Ret(Option<VReg>),
     /// dst = call name(args...)
