@@ -374,8 +374,23 @@ impl Allocator {
             | Instruction::ImmShift { .. }
             | Instruction::UregAbsAccess { .. }
             | Instruction::ImmStore { .. }
-            | Instruction::DoUntil { .. }
-            | Instruction::UregMemAccess { .. } => mi.instr,
+            | Instruction::DoUntil { .. } => mi.instr,
+
+            Instruction::UregMemAccess { pm, i_reg, write, lw, ureg, offset } => {
+                // The ureg field carries a raw vreg from isel. Map it
+                // to a physical register the same way ComputeLoadStore
+                // handles dreg.
+                if ureg < 0x10 {
+                    let phys = self.get_phys(ureg, &mut spill_pre);
+                    Instruction::UregMemAccess {
+                        pm, i_reg, write, lw,
+                        ureg: target::ureg_r(phys),
+                        offset,
+                    }
+                } else {
+                    mi.instr
+                }
+            }
 
             Instruction::UregTransfer { src_ureg, dst_ureg, compute } => {
                 let new_compute = compute
