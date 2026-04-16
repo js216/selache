@@ -77,8 +77,14 @@ pub enum IrOp {
     Store(VReg, VReg, i32),
     /// dst = address of global symbol
     LoadGlobal(VReg, String),
+    /// dst = value at global symbol (32-bit scalar read)
+    ReadGlobal(VReg, String),
     /// *global_addr = src
     StoreGlobal(VReg, String),
+    /// dst = 64-bit value at global symbol (read lo and hi words)
+    ReadGlobal64(VReg, String),
+    /// Store 64-bit value to global symbol
+    WriteGlobal64(VReg, String),
     /// dst = address of string literal (by index in the string table)
     LoadString(VReg, usize),
     /// dst = address of wide string literal (by index in the wide string table)

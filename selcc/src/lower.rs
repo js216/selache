@@ -1220,10 +1220,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             return Ok(dst);
                         }
                         LocalStorage::Static(ref sym) => {
-                            let addr = ctx.alloc_vreg();
-                            ctx.emit(IrOp::LoadGlobal(addr, sym.clone()));
                             let dst = ctx.alloc_vreg_pair();
-                            ctx.emit(IrOp::Load64(dst, addr, 0));
+                            ctx.emit(IrOp::ReadGlobal64(dst, sym.clone()));
                             return Ok(dst);
                         }
                     }
@@ -1248,10 +1246,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         Ok(dst)
                     }
                     LocalStorage::Static(ref sym) => {
-                        let addr = ctx.alloc_vreg();
-                        ctx.emit(IrOp::LoadGlobal(addr, sym.clone()));
                         let dst = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(dst, addr, 0));
+                        ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
                         Ok(dst)
                     }
                 }
@@ -1266,16 +1262,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let is_global_64 = ctx.globals.get(name)
                     .is_some_and(|t| t.is_long_long());
                 if is_global_64 {
-                    let addr = ctx.alloc_vreg();
-                    ctx.emit(IrOp::LoadGlobal(addr, name.clone()));
                     let dst = ctx.alloc_vreg_pair();
-                    ctx.emit(IrOp::Load64(dst, addr, 0));
+                    ctx.emit(IrOp::ReadGlobal64(dst, name.clone()));
                     return Ok(dst);
                 }
-                let addr = ctx.alloc_vreg();
-                ctx.emit(IrOp::LoadGlobal(addr, name.clone()));
                 let dst = ctx.alloc_vreg();
-                ctx.emit(IrOp::Load(dst, addr, 0));
+                ctx.emit(IrOp::ReadGlobal(dst, name.clone()));
                 Ok(dst)
             } else if let Some(&val) = ctx.enum_constants.get(name) {
                 let dst = ctx.alloc_vreg();
@@ -1504,15 +1496,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                                     )));
                                 }
                                 LocalStorage::Static(ref sym) => {
-                                    let addr = ctx.alloc_vreg();
-                                    ctx.emit(IrOp::LoadGlobal(addr, sym.clone()));
-                                    ctx.emit(IrOp::Store64(val, addr, 0));
+                                    ctx.emit(IrOp::WriteGlobal64(val, sym.clone()));
                                 }
                             }
                         } else if ctx.globals.contains_key(name) {
-                            let addr = ctx.alloc_vreg();
-                            ctx.emit(IrOp::LoadGlobal(addr, name.clone()));
-                            ctx.emit(IrOp::Store64(val, addr, 0));
+                            ctx.emit(IrOp::WriteGlobal64(val, name.clone()));
                         } else {
                             return Err(Error::NotImplemented(format!(
                                 "undefined variable: {name}"
@@ -2497,10 +2485,8 @@ fn lower_inc_dec(
                         dst
                     }
                     LocalStorage::Static(sym) => {
-                        let addr = ctx.alloc_vreg();
-                        ctx.emit(IrOp::LoadGlobal(addr, sym.clone()));
                         let dst = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(dst, addr, 0));
+                        ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
                         dst
                     }
                 };
@@ -2527,10 +2513,8 @@ fn lower_inc_dec(
                 if is_pre { Ok(new_val) } else { Ok(old_val) }
             } else if ctx.globals.contains_key(name) {
                 // Global variable increment/decrement
-                let addr = ctx.alloc_vreg();
-                ctx.emit(IrOp::LoadGlobal(addr, name.clone()));
                 let old_val = ctx.alloc_vreg();
-                ctx.emit(IrOp::Load(old_val, addr, 0));
+                ctx.emit(IrOp::ReadGlobal(old_val, name.clone()));
                 let one = ctx.alloc_vreg();
                 ctx.emit(IrOp::LoadImm(one, 1));
                 let new_val = ctx.alloc_vreg();
@@ -2611,10 +2595,8 @@ fn lower_compound_assign(
                         dst
                     }
                     LocalStorage::Static(ref sym) => {
-                        let addr = ctx.alloc_vreg();
-                        ctx.emit(IrOp::LoadGlobal(addr, sym.clone()));
                         let dst = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(dst, addr, 0));
+                        ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
                         dst
                     }
                 };
@@ -2636,10 +2618,8 @@ fn lower_compound_assign(
                 Ok(result)
             } else if ctx.globals.contains_key(name) {
                 // Compound assignment to a global variable.
-                let addr = ctx.alloc_vreg();
-                ctx.emit(IrOp::LoadGlobal(addr, name.clone()));
                 let lhs = ctx.alloc_vreg();
-                ctx.emit(IrOp::Load(lhs, addr, 0));
+                ctx.emit(IrOp::ReadGlobal(lhs, name.clone()));
                 let rhs = lower_expr(ctx, value)?;
                 let result = emit_compound_op(ctx, op, lhs, rhs)?;
                 ctx.emit(IrOp::StoreGlobal(result, name.clone()));
@@ -3184,8 +3164,8 @@ mod tests {
         // Static local should produce a static local entry.
         assert_eq!(result.static_locals.len(), 1);
         assert_eq!(result.static_locals[0].symbol, "_counter_n");
-        // Access to a static local uses LoadGlobal/StoreGlobal.
-        assert!(result.ops.iter().any(|op| matches!(op, IrOp::LoadGlobal(_, ref s) if s == "_counter_n")));
+        // Access to a static local uses ReadGlobal/StoreGlobal.
+        assert!(result.ops.iter().any(|op| matches!(op, IrOp::ReadGlobal(_, ref s) if s == "_counter_n")));
         assert!(result.ops.iter().any(|op| matches!(op, IrOp::StoreGlobal(_, ref s) if s == "_counter_n")));
     }
 
@@ -3444,11 +3424,12 @@ mod tests {
         let func = &unit.functions[0];
         assert!(func.is_variadic);
         let ops = lower_function(func, &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
-        // Should have 4 Copy + Store pairs for spilling R0-R3.
+        // Should have 3 Copy + Store pairs for spilling the 3 arg regs
+        // (R4, R8, R12). The 4th+ args are already on the stack.
         let copy_count = ops.iter().filter(|op| matches!(op, IrOp::Copy(..))).count();
-        assert!(copy_count >= 4, "expected at least 4 Copy ops for arg reg spill, got {copy_count}");
+        assert!(copy_count >= 3, "expected at least 3 Copy ops for arg reg spill, got {copy_count}");
         let store_count = ops.iter().filter(|op| matches!(op, IrOp::Store(..))).count();
-        assert!(store_count >= 4, "expected at least 4 Store ops for arg reg spill, got {store_count}");
+        assert!(store_count >= 3, "expected at least 3 Store ops for arg reg spill, got {store_count}");
     }
 
     #[test]

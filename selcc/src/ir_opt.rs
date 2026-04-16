@@ -633,6 +633,8 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::BitNot(d, _)
         | IrOp::Load(d, _, _)
         | IrOp::LoadGlobal(d, _)
+        | IrOp::ReadGlobal(d, _)
+        | IrOp::ReadGlobal64(d, _)
         | IrOp::LoadString(d, _)
         | IrOp::LoadWideString(d, _)
         | IrOp::FAdd(d, _, _)
@@ -680,6 +682,7 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::Store(..)
         | IrOp::Store64(..)
         | IrOp::StoreGlobal(..)
+        | IrOp::WriteGlobal64(..)
         | IrOp::StackRestore(_)
         | IrOp::HardwareLoop { .. }
         | IrOp::Nop => None,
@@ -729,8 +732,9 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         }
         IrOp::Load(_, base, _) => vec![*base],
         IrOp::Store(val, base, _) => vec![*val, *base],
-        IrOp::LoadGlobal(..) | IrOp::LoadString(..) | IrOp::LoadWideString(..) => Vec::new(),
-        IrOp::StoreGlobal(val, _) => vec![*val],
+        IrOp::LoadGlobal(..) | IrOp::ReadGlobal(..) | IrOp::ReadGlobal64(..)
+        | IrOp::LoadString(..) | IrOp::LoadWideString(..) => Vec::new(),
+        IrOp::StoreGlobal(val, _) | IrOp::WriteGlobal64(val, _) => vec![*val],
         IrOp::LoadImm64(..) => Vec::new(),
         IrOp::Copy64(_, s)
         | IrOp::Neg64(_, s)

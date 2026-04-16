@@ -565,12 +565,11 @@ pub fn select(ir: &[IrOp]) -> IselResult {
             }
 
             IrOp::StoreGlobal(val, name) => {
-                // Store to a global: load the address into a temporary I
-                // register, then store. For now we use a simpler approach:
-                // emit a LoadImm with relocation for the address, then a
-                // DM write through I4 (a scratch index register).
-                //
-                // Step 1: Load global address into I4.
+                // Store to a global: load the absolute address into I4
+                // via LoadImm (with a symbol relocation), then use a
+                // Type 15 UregMemAccess to write through I4 with zero
+                // offset. This avoids UregTransfer (R->I latency fault)
+                // and matches the standard SHARC+ code generation pattern.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
                         ureg: target::ureg_i(target::SCRATCH_I),
@@ -581,18 +580,119 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         kind: RelocKind::Addr24,
                     }),
                 });
-                // Step 2: Store dreg -> DM(I4 + 0).
                 instrs.push(MachInstr {
-                    instr: Instruction::ComputeLoadStore {
-                        compute: None,
-                        access: MemAccess {
-                            pm: false,
-                            write: true,
-                            i_reg: target::SCRATCH_I,
-                        },
-                        dreg: *val as u8,
+                    instr: Instruction::UregMemAccess {
+                        pm: false,
+                        i_reg: target::SCRATCH_I,
+                        write: true,
+                        lw: false,
+                        ureg: target::ureg_r(*val as u8),
                         offset: 0,
-                        cond: target::COND_TRUE,
+                    },
+                    reloc: None,
+                });
+            }
+
+            IrOp::ReadGlobal(dst, name) => {
+                // Read a 32-bit scalar value from a global symbol.
+                // LoadImm loads the absolute address into I4, then a
+                // Type 15 UregMemAccess reads through I4 at offset 0.
+                instrs.push(MachInstr {
+                    instr: Instruction::LoadImm {
+                        ureg: target::ureg_i(target::SCRATCH_I),
+                        value: 0,
+                    },
+                    reloc: Some(Reloc {
+                        symbol: name.clone(),
+                        kind: RelocKind::Addr24,
+                    }),
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::UregMemAccess {
+                        pm: false,
+                        i_reg: target::SCRATCH_I,
+                        write: false,
+                        lw: false,
+                        ureg: target::ureg_r(*dst as u8),
+                        offset: 0,
+                    },
+                    reloc: None,
+                });
+            }
+
+            IrOp::ReadGlobal64(dst, name) => {
+                // Read a 64-bit value from a global symbol. Two words:
+                // lo at address, hi at address+1.
+                let dst_lo = *dst as u8;
+                let dst_hi = (*dst + 1) as u8;
+                instrs.push(MachInstr {
+                    instr: Instruction::LoadImm {
+                        ureg: target::ureg_i(target::SCRATCH_I),
+                        value: 0,
+                    },
+                    reloc: Some(Reloc {
+                        symbol: name.clone(),
+                        kind: RelocKind::Addr24,
+                    }),
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::UregMemAccess {
+                        pm: false,
+                        i_reg: target::SCRATCH_I,
+                        write: false,
+                        lw: false,
+                        ureg: target::ureg_r(dst_lo),
+                        offset: 0,
+                    },
+                    reloc: None,
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::UregMemAccess {
+                        pm: false,
+                        i_reg: target::SCRATCH_I,
+                        write: false,
+                        lw: false,
+                        ureg: target::ureg_r(dst_hi),
+                        offset: 1,
+                    },
+                    reloc: None,
+                });
+            }
+
+            IrOp::WriteGlobal64(src, name) => {
+                // Write a 64-bit value to a global symbol. Two words:
+                // lo at address, hi at address+1.
+                let src_lo = *src as u8;
+                let src_hi = (*src + 1) as u8;
+                instrs.push(MachInstr {
+                    instr: Instruction::LoadImm {
+                        ureg: target::ureg_i(target::SCRATCH_I),
+                        value: 0,
+                    },
+                    reloc: Some(Reloc {
+                        symbol: name.clone(),
+                        kind: RelocKind::Addr24,
+                    }),
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::UregMemAccess {
+                        pm: false,
+                        i_reg: target::SCRATCH_I,
+                        write: true,
+                        lw: false,
+                        ureg: target::ureg_r(src_lo),
+                        offset: 0,
+                    },
+                    reloc: None,
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::UregMemAccess {
+                        pm: false,
+                        i_reg: target::SCRATCH_I,
+                        write: true,
+                        lw: false,
+                        ureg: target::ureg_r(src_hi),
+                        offset: 1,
                     },
                     reloc: None,
                 });

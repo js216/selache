@@ -1111,6 +1111,9 @@ fn source_regs(instr: &Instruction) -> Vec<u8> {
                 regs.push(dreg);
             }
         }
+        Instruction::UregMemAccess { write: true, ureg, .. } if ureg < 0x10 => {
+            regs.push(ureg & 0xF);
+        }
         Instruction::Return { compute: Some(c), .. } => {
             compute_source_regs(&c, &mut regs);
         }
@@ -1185,6 +1188,15 @@ fn remap_sources(mi: &MachInstr, from: u8, to: u8) -> MachInstr {
                 dreg: new_dreg,
                 offset,
                 cond,
+            }
+        }
+        Instruction::UregMemAccess { pm, i_reg, write: true, lw, ureg, offset }
+            if ureg < 0x10 && (ureg & 0xF) == from =>
+        {
+            Instruction::UregMemAccess {
+                pm, i_reg, write: true, lw,
+                ureg: (ureg & 0xF0) | to,
+                offset,
             }
         }
         Instruction::Return { interrupt, cond, delayed, lr, compute } => {
@@ -1640,22 +1652,19 @@ mod tests {
     }
 
     #[test]
-    fn rt_four_param_r0_not_clobbered() {
-        // The 4th argument (d) arrives in R0, which is also the return
-        // register. Ensure the compiler snapshots R0 into another
-        // register before any computation can overwrite it.
-        // f(1,2,3,4) should yield (1+2)*(3+4) = 3*7 = 21, not 42.
+    fn rt_four_param_from_frame() {
+        // The 4th argument is passed on the stack (not in R0). The
+        // callee should load it from its frame slot via DM(-N,I6).
         let src = "int f(int a, int b, int c, int d) { return (a+b)*(c+d); }";
         let text = round_trip_disasm(src);
-        // The first non-prologue PASS in the body must copy R0 to a
-        // different register, preserving the 4th argument.
-        let has_r0_snapshot = text.iter().any(|t| {
-            t.contains("PASS") && t.contains("R0")
-                && !t.starts_with("R0")
+        // Expect a frame-relative DM load (the 4th arg from the stack).
+        let has_frame_load = text.iter().any(|t| {
+            t.contains("DM (-0x") && t.contains(",I6)")
+                && !t.contains("=R") // it's a READ, not a callee-save store
         });
         assert!(
-            has_r0_snapshot,
-            "expected early PASS R0 -> Rn snapshot for 4th arg, got: {text:?}"
+            has_frame_load,
+            "expected frame-relative load for 4th arg, got: {text:?}"
         );
     }
 

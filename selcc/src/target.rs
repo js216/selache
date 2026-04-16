@@ -21,14 +21,13 @@ pub const INDIRECT_CALL_PMI: u8 = 4;
 pub const INDIRECT_CALL_PMM: u8 = 4;
 
 /// Integer/pointer argument registers for the SHARC+ C-ABI: the
-/// first four scalar args go in R4, R8, R12, R0 (in that order),
-/// not the naive R0-R3 sequence most other ABIs use. Verified
-/// against the call sites the SHARC+ C compiler emits for a
-/// two-argument function, which load `a` into R4 and `b` into R8
-/// before a CJUMP. If selcc pins parameter vregs to R0..R3
-/// instead, the callee reads garbage on entry because the caller
-/// puts the real arguments somewhere else.
-pub const ARG_REGS: &[u8] = &[4, 8, 12, 0];
+/// first three scalar args go in R4, R8, R12 (in that order).
+/// The 4th and subsequent args are passed on the stack, NOT in R0.
+/// R0 is reserved exclusively for the return value.
+///
+/// A 4-argument function reads the 4th arg via DM(M6,I6) from the
+/// caller's frame push, not from R0.
+pub const ARG_REGS: &[u8] = &[4, 8, 12];
 
 /// Data registers that do NOT need to be preserved across a
 /// CJUMP. Listing R0-R7 explicitly keeps the ALU's x-bank fully
@@ -91,7 +90,7 @@ mod tests {
         assert_eq!(FRAME_PTR, 6);
         assert_eq!(RETURN_REG, 0);
         assert_eq!(NUM_REGS, 16);
-        assert_eq!(ARG_REGS, &[4, 8, 12, 0]);
+        assert_eq!(ARG_REGS, &[4, 8, 12]);
         assert_eq!(CALLER_SAVED.len(), 8);
         assert_eq!(CALLEE_SAVED.len(), 8);
         // Caller-saved and callee-saved should cover all 16 registers.
