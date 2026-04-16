@@ -275,13 +275,18 @@ impl Allocator {
 
         let new_instr = match mi.instr {
             Instruction::LoadImm { ureg, value } => {
-                // isel stores the raw vreg number in `ureg`; translate
-                // to the physical register's ureg encoding here.
-                let vreg = ureg;
-                let phys = self.get_phys(vreg, &mut spill_pre);
-                Instruction::LoadImm {
-                    ureg: target::ureg_r(phys),
-                    value,
+                // Non-R-group LoadImm (e.g. I-register loads for global
+                // access) pass through unchanged — they don't carry a
+                // vreg that the allocator should touch.
+                if (ureg >> 4) != 0 {
+                    mi.instr
+                } else {
+                    let vreg = ureg;
+                    let phys = self.get_phys(vreg, &mut spill_pre);
+                    Instruction::LoadImm {
+                        ureg: target::ureg_r(phys),
+                        value,
+                    }
                 }
             }
 
