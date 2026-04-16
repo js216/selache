@@ -275,10 +275,12 @@ impl Allocator {
 
         let new_instr = match mi.instr {
             Instruction::LoadImm { ureg, value } => {
-                // Non-R-group LoadImm (e.g. I-register loads for global
-                // access) pass through unchanged — they don't carry a
-                // vreg that the allocator should touch.
-                if (ureg >> 4) != 0 {
+                // I-register LoadImm instructions (for global access)
+                // carry a relocation and target a DAG I-register, not
+                // a data register vreg. Pass them through unchanged.
+                // All other LoadImm instructions carry raw vreg numbers
+                // that must be mapped to physical R-group registers.
+                if mi.reloc.is_some() && ureg >= 0x10 {
                     mi.instr
                 } else {
                     let vreg = ureg;
