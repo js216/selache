@@ -400,13 +400,18 @@ fn try_type4b(write: bool, i_reg: u8, dreg: u8, offset: i8, cond: u8) -> Option<
 /// Type 5b (32-bit ureg move): `dest_ureg = src_ureg`.
 ///
 /// From visa.rs decode_32_ureg_move:
-///   p1[12:8] = sub5 = 10_group[2:0]
-///   p1[7]    = src_idx[3]
-///   p1[6]    = src_idx[2]
-///   p1[5:1]  = cond
-///   p1[0]    = src_idx[1]
-///   p2[15]   = src_idx[0]
-///   p2[13:7] = dst_ureg (7-bit code)
+///   p1[15:13] = 011 (group-3 selector; required by hardware and by
+///               decode_32's top-3 routing — forgetting this byte made
+///               the encoded word look like a group-0 Type 17b load, so
+///               `I4 = R1` silently assembled to `L14 = DM(...)` and
+///               trampled the DAG on real silicon)
+///   p1[12:8]  = sub5 = 10_group[2:0]
+///   p1[7]     = src_idx[3]
+///   p1[6]     = src_idx[2]
+///   p1[5:1]   = cond
+///   p1[0]     = src_idx[1]
+///   p2[15]    = src_idx[0]
+///   p2[13:7]  = dst_ureg (7-bit code)
 fn try_type5b_move(dest: u8, src: u8) -> Option<u32> {
     if dest > 127 || src > 127 {
         return None;
@@ -417,7 +422,8 @@ fn try_type5b_move(dest: u8, src: u8) -> Option<u32> {
     let sub5 = 0b10_000u16 | src_group as u16;
     let cond = 31u16; // unconditional
 
-    let p1 = (sub5 << 8)
+    let p1 = (0b011u16 << 13)
+        | (sub5 << 8)
         | (((src_idx >> 3) & 1) as u16) << 7
         | (((src_idx >> 2) & 1) as u16) << 6
         | (cond << 1)

@@ -22,6 +22,10 @@ pub struct IselResult {
     pub instrs: Vec<MachInstr>,
     /// Map from IR label to instruction index in `instrs`.
     pub label_positions: Vec<(Label, usize)>,
+    /// Call-return labels: (instruction_index, label_name). Each entry
+    /// marks a position immediately after a CJUMP's delay slots where
+    /// the return-address ImmStore's relocation should resolve.
+    pub call_return_labels: Vec<(usize, String)>,
 }
 
 /// Select instructions for a list of IR ops.
@@ -31,13 +35,24 @@ pub struct IselResult {
 pub fn select(ir: &[IrOp]) -> IselResult {
     let mut instrs = Vec::new();
     let mut label_positions = Vec::new();
+    let mut call_return_labels: Vec<(usize, String)> = Vec::new();
+    let mut call_site_counter = 0u32;
 
     for op in ir {
         match op {
             IrOp::LoadImm(dst, val) => {
+                // Store the raw vreg number in the `ureg` field. The
+                // register allocator's rewrite will translate it to
+                // `ureg_r(phys)` once the vreg has been mapped to a
+                // physical register. Masking the vreg here (via
+                // `ureg_r`, which is `& 0xF`) silently collapses
+                // vregs above 15 onto their low-nibble twins and
+                // desynchronises them from the un-masked 8-bit vregs
+                // that other compute ops carry, which miscompiles
+                // any high-pressure function.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(*dst as u8),
+                        ureg: *dst as u8,
                         value: *val as u32,
                     },
                     reloc: None,
@@ -173,10 +188,10 @@ pub fn select(ir: &[IrOp]) -> IselResult {
             }
 
             IrOp::Shr(dst, lhs, rhs) => {
-                // ASHIFT (arithmetic right shift) with negated count
-                // would be needed, but for simplicity use ASHIFT directly.
-                // The caller is responsible for putting a negative shift
-                // amount in rhs for right shift. We use ASHIFT Rx BY Ry.
+                // ASHIFT Rx BY Ry: positive Ry = left shift,
+                // negative Ry = arithmetic right shift. The caller
+                // (lower.rs) is responsible for ensuring rhs is
+                // negative when a right shift is intended.
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
@@ -337,19 +352,58 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         instrs.push(MachInstr::compute_pass(phys, *arg as u8));
                     }
                 }
-                // CALL target (absolute, to be relocated).
+                // CJUMP (DB) target: the SHARC+ C-ABI call. The two
+                // delay slots execute before the branch takes effect:
+                //   slot 1: DM(I7,M7) = R2  — push R2 onto frame stack
+                //           (I7 post-decrements by M7 = -1)
+                //   slot 2: DM(I7,M7) = return_addr — push the return
+                //           address (I7 decrements again)
+                // The callee reads the return address back with
+                // `I12 = DM(M7,I6)` where I6 = old I7 after RFRAME.
                 instrs.push(MachInstr {
-                    instr: Instruction::Branch {
-                        call: true,
-                        cond: target::COND_TRUE,
-                        delayed: false,
-                        target: BranchTarget::Absolute(0),
+                    instr: Instruction::CJump {
+                        addr: 0,
+                        delayed: true,
                     },
                     reloc: Some(Reloc {
                         symbol: name.clone(),
                         kind: RelocKind::Addr24,
                     }),
                 });
+                // Delay slot 1: DM(I7, M7) = R2 (push R2).
+                instrs.push(MachInstr {
+                    instr: Instruction::UregDagMove {
+                        pm: false,
+                        write: true,
+                        ureg: target::ureg_r(2),
+                        i_reg: target::STACK_PTR,
+                        m_reg: 7, // M7
+                        cond: target::COND_TRUE,
+                        compute: None,
+                    },
+                    reloc: None,
+                });
+                // Delay slot 2: DM(I7, M7) = return_label (push PC).
+                // The return label is the instruction immediately after
+                // these delay slots; emit_asm will insert a synthetic
+                // label and resolve it via relocation.
+                let ret_label_name = format!(".L_ret_{}_{}", name, call_site_counter);
+                call_site_counter += 1;
+                instrs.push(MachInstr {
+                    instr: Instruction::ImmStore {
+                        pm: false,
+                        i_reg: target::STACK_PTR,
+                        m_reg: 7,
+                        value: 0,
+                    },
+                    reloc: Some(Reloc {
+                        symbol: ret_label_name.clone(),
+                        kind: RelocKind::Addr24,
+                    }),
+                });
+                // Mark the instruction after the delay slots with the
+                // return label so selas can resolve the relocation.
+                call_return_labels.push((instrs.len(), ret_label_name));
                 // Result in R0. Use the pinned `RETURN_REG_VREG`
                 // as the source so regalloc reads physical R0 (where
                 // the callee placed the value) instead of whatever
@@ -1374,6 +1428,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
     IselResult {
         instrs,
         label_positions,
+        call_return_labels,
     }
 }
 
@@ -1430,7 +1485,13 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
 
 /// Emit an indirect memory access through a pointer held in a data register.
 /// Transfers the pointer to I4 (scratch index register) via UregTransfer,
-/// then accesses DM(I4, offset).
+/// then accesses DM(I4, offset). SHARC+ has a one-cycle DAG-latch latency
+/// between writing an index register from the register file and using it
+/// as the base of an address-generator cycle, so a NOP is inserted between
+/// the transfer and the memory access to let the new I4 value propagate.
+/// Without the NOP the AG computes the address from the STALE I4, and the
+/// load/store lands at the wrong memory location (typically an instant
+/// hard fault on a read-only or out-of-range address).
 fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u8, dreg: u8, offset: i8, write: bool) {
     instrs.push(MachInstr {
         instr: Instruction::UregTransfer {
@@ -1440,6 +1501,7 @@ fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u8, dreg: u8, offset:
         },
         reloc: None,
     });
+    instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
     instrs.push(MachInstr {
         instr: Instruction::ComputeLoadStore {
             compute: None,

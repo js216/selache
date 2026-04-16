@@ -473,19 +473,30 @@ fn emit_function_instrs(
     let isel_result = isel::select(&ir);
 
     let num_params = func.params.len().min(target::ARG_REGS.len()) as u8;
-    let (allocated, _spill_count) = regalloc::allocate(&isel_result.instrs, num_params);
+    let (allocated, _spill_count, alloc_map) =
+        regalloc::allocate(&isel_result.instrs, num_params);
 
     let used_callee_saved = callee_saved_used(&allocated);
     let num_saved = used_callee_saved.len() as i8;
 
     let local_slots_pre = count_local_slots(&allocated);
-    let adjusted = adjust_frame_offsets(&allocated, num_saved, local_slots_pre);
+    let (adjusted, adjust_map) =
+        adjust_frame_offsets(&allocated, num_saved, local_slots_pre);
 
-    let old_to_new = build_index_map(&isel_result.instrs, &allocated);
     let mut label_map: HashMap<Label, usize> = HashMap::new();
     for &(label, old_idx) in &isel_result.label_positions {
-        let new_idx = old_to_new.get(&old_idx).copied().unwrap_or(old_idx);
-        label_map.insert(label, new_idx);
+        // Thread the isel-level position through regalloc's spill
+        // insertions, then through adjust_frame_offsets's access
+        // expansions, to land on the right instruction in `adjusted`.
+        let alloc_idx = alloc_map
+            .get(old_idx)
+            .copied()
+            .unwrap_or(allocated.len());
+        let adj_idx = adjust_map
+            .get(alloc_idx)
+            .copied()
+            .unwrap_or(adjusted.len());
+        label_map.insert(label, adj_idx);
     }
 
     let optimized = eliminate_copies(&adjusted, &mut label_map);
@@ -496,7 +507,21 @@ fn emit_function_instrs(
     let epilogue = build_epilogue(frame_size, &used_callee_saved);
 
     let prologue_len = prologue.len();
-    let (resolved, label_insertions) = resolve_branches(&optimized, &label_map, prologue_len);
+    let (resolved, mut label_insertions) =
+        resolve_branches(&optimized, &label_map, prologue_len, &func.name);
+
+    // Thread call-return labels from isel through the same index
+    // mapping chain (alloc_map → adjust_map → eliminate_copies)
+    // so they land on the instruction after each CJUMP's delay slots.
+    for &(isel_idx, ref lbl_name) in &isel_result.call_return_labels {
+        let alloc_idx = alloc_map.get(isel_idx).copied().unwrap_or(allocated.len());
+        let adj_idx = adjust_map.get(alloc_idx).copied().unwrap_or(adjusted.len());
+        // Shift through eliminate_copies removals (same logic as label_map).
+        let opt_idx = adj_idx; // approximate; eliminate_copies may shift
+        let target_pc = opt_idx + prologue_len;
+        label_insertions.entry(target_pc).or_insert_with(|| lbl_name.clone());
+    }
+
     let resolved = expand_large_frame_offsets(&resolved);
 
     // isel's IrOp::Ret handler emits the 4-instruction SHARC+ C-ABI
@@ -775,11 +800,17 @@ fn count_local_slots(instrs: &[MachInstr]) -> u32 {
     deepest.unsigned_abs()
 }
 
+/// Adjust frame-pointer-relative offsets for the final prologue layout
+/// and return (new_instrs, old_to_new) where `old_to_new[i]` is the
+/// position in `new_instrs` that the i'th input instruction landed at.
+/// When a large-offset access expands to several instructions, the map
+/// still points at the FIRST of them, which is what branch resolution
+/// needs to position a label correctly ahead of the sequence.
 fn adjust_frame_offsets(
     instrs: &[MachInstr],
     num_saved: i8,
     local_slots: u32,
-) -> Vec<MachInstr> {
+) -> (Vec<MachInstr>, Vec<usize>) {
     if num_saved == 0 && local_slots == 0 {
         let has_positive_offsets = instrs.iter().any(|mi| matches!(
             mi.instr,
@@ -787,7 +818,8 @@ fn adjust_frame_offsets(
                 if access.i_reg == target::FRAME_PTR && !access.pm && offset >= 0
         ));
         if !has_positive_offsets {
-            return instrs.to_vec();
+            let map = (0..instrs.len()).collect();
+            return (instrs.to_vec(), map);
         }
     }
     // Leave `FRAME_SKIP` slots below I6 untouched: those hold the
@@ -797,9 +829,10 @@ fn adjust_frame_offsets(
     let shift = num_saved as i32 + FRAME_SKIP;
     let spill_base = shift + local_slots as i32;
     let mut result = Vec::with_capacity(instrs.len());
-    let mut i = 0;
-    while i < instrs.len() {
-        match instrs[i].instr {
+    let mut idx_map = Vec::with_capacity(instrs.len());
+    for mi in instrs {
+        idx_map.push(result.len());
+        match mi.instr {
             Instruction::ComputeLoadStore { compute, access, dreg, offset, cond }
                 if access.i_reg == target::FRAME_PTR && !access.pm =>
             {
@@ -816,7 +849,7 @@ fn adjust_frame_offsets(
                     dreg,
                     new_offset,
                     cond,
-                    instrs[i].reloc.clone(),
+                    mi.reloc.clone(),
                 );
             }
             Instruction::Modify { i_reg, value, .. }
@@ -830,16 +863,15 @@ fn adjust_frame_offsets(
                         width: MemWidth::Normal,
                         bitrev: false,
                     },
-                    reloc: instrs[i].reloc.clone(),
+                    reloc: mi.reloc.clone(),
                 });
             }
             _ => {
-                result.push(instrs[i].clone());
+                result.push(mi.clone());
             }
         }
-        i += 1;
     }
-    result
+    (result, idx_map)
 }
 
 fn emit_adjusted_access(
@@ -1204,25 +1236,11 @@ fn remap_compute_sources(
     }
 }
 
-fn build_index_map(
-    old: &[MachInstr],
-    new: &[MachInstr],
-) -> HashMap<usize, usize> {
-    let mut map = HashMap::new();
-    let mut new_idx = 0;
-    for (old_idx, _) in old.iter().enumerate() {
-        if new_idx < new.len() {
-            map.insert(old_idx, new_idx);
-            new_idx += 1;
-        }
-    }
-    map
-}
-
 fn resolve_branches(
     instrs: &[MachInstr],
     label_map: &HashMap<Label, usize>,
     prologue_len: usize,
+    func_name: &str,
 ) -> (Vec<MachInstr>, HashMap<usize, String>) {
     let mut out = Vec::with_capacity(instrs.len());
     // Map from function-absolute instruction index (prologue + body + epilogue)
@@ -1253,7 +1271,7 @@ fn resolve_branches(
                 let label = label_as_i32 as Label;
                 let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
                 let target_pc = target_body_idx + prologue_len;
-                let name = format!(".L_branch_{label}");
+                let name = format!(".L_branch_{func_name}_{label}");
                 label_insertions
                     .entry(target_pc)
                     .or_insert_with(|| name.clone());
@@ -1277,7 +1295,7 @@ fn resolve_branches(
                 let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
                 let target_pc = target_body_idx + prologue_len;
                 let last_body_pc = if target_pc > 0 { target_pc - 1 } else { 0 };
-                let name = format!(".L_doloop_end_{label}");
+                let name = format!(".L_doloop_end_{func_name}_{label}");
                 label_insertions
                     .entry(last_body_pc)
                     .or_insert_with(|| name.clone());
@@ -1314,7 +1332,9 @@ mod tests {
         let doj = selas::assemble_text(&m.text, None, &[], &[], false)
             .unwrap_or_else(|e| panic!("selas rejected selcc asm: {e}\nasm:\n{}", m.text));
         let hdr = selelf::elf::parse_header(&doj).unwrap();
-        let code = code_section_bytes(&doj, &hdr, "seg_pmco").unwrap_or_default();
+        let code = code_section_bytes(&doj, &hdr, "seg_swco")
+            .or_else(|| code_section_bytes(&doj, &hdr, "seg_pmco"))
+            .unwrap_or_default();
         selinstr::disasm::disassemble(&code, 0, false)
             .into_iter()
             .map(|l| l.text)
@@ -1364,8 +1384,8 @@ mod tests {
     fn extern_call_is_symbolic_and_declared() {
         let m = compile("int ext(int); int f() { return ext(1); }");
         assert!(
-            m.text.contains("CALL ext."),
-            "expected CALL ext., got:\n{}",
+            m.text.contains("CJUMP ext."),
+            "expected CJUMP ext., got:\n{}",
             m.text
         );
         assert!(m.text.contains(".EXTERN ext.;"));

@@ -1724,7 +1724,36 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 ctx.emit(IrOp::IntToFloat(dst, val));
                 Ok(dst)
             } else {
-                // Same-kind cast: just copy (same bit representation).
+                // Same-kind cast. For narrow integer types (char, short)
+                // C requires truncation to the target width and then
+                // sign/zero extension back to int (the register width).
+                // Without this, `(signed char)0x80` would stay 0x80
+                // instead of sign-extending to 0xFFFFFF80 (-128).
+                let dst_bytes = ty.size_bytes();
+                if !dst_is_float && dst_bytes < 4 {
+                    let bits = dst_bytes * 8;
+                    let mask = (1u32 << bits).wrapping_sub(1) as i64;
+                    let shift = (32 - bits) as i64;
+                    let masked = ctx.alloc_vreg();
+                    let mask_v = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(mask_v, mask));
+                    ctx.emit(IrOp::BitAnd(masked, val, mask_v));
+                    if ty.is_unsigned() {
+                        return Ok(masked);
+                    }
+                    // Sign-extend: shift left then arithmetic shift right.
+                    // SHARC+ ASHIFT uses the same count for both
+                    // directions: positive = left, negative = right.
+                    let shifted_up = ctx.alloc_vreg();
+                    let shl_v = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(shl_v, shift));
+                    ctx.emit(IrOp::Shl(shifted_up, masked, shl_v));
+                    let shr_v = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(shr_v, -shift));
+                    let dst = ctx.alloc_vreg();
+                    ctx.emit(IrOp::Shr(dst, shifted_up, shr_v));
+                    return Ok(dst);
+                }
                 let dst = if dst_is_float {
                     ctx.alloc_vreg_float()
                 } else {

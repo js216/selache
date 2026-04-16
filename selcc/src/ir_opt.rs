@@ -187,7 +187,16 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                 let lv = known.get(lhs).copied();
                 let rv = known.get(rhs).copied();
                 if let (Some(a), Some(b)) = (lv, rv) {
-                    let folded = a.wrapping_shr(b as u32);
+                    // IrOp::Shr maps to SHARC+ ASHIFT: positive b =
+                    // left shift, negative b = arithmetic right shift.
+                    // Fold in 32-bit signed arithmetic so the sign
+                    // bit propagates the same way hardware does.
+                    let a32 = a as i32;
+                    let folded = if b < 0 {
+                        (a32 >> ((-b) as u32)) as i64
+                    } else {
+                        ((a32 as u32).wrapping_shr(b as u32)) as i32 as i64
+                    };
                     result.push(IrOp::LoadImm(*dst, folded));
                     known.insert(*dst, folded);
                     mark_consumed(&use_counts, &mut consumed, *lhs);

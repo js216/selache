@@ -29,15 +29,22 @@ use selinstr::encode::{
 ///
 /// Returns the rewritten instruction stream and the number of stack slots
 /// used for spills (callee must reserve this space in the frame).
-pub fn allocate(instrs: &[MachInstr], num_params: u8) -> (Vec<MachInstr>, u32) {
+/// Allocate registers and return (allocated_instrs, spill_slots, index_map).
+/// `index_map[i]` is the position in `allocated_instrs` where the i'th input
+/// instruction lands (the slot AFTER any spill stores/loads inserted ahead of
+/// it). Labels in the input's position space must map through this so that
+/// a branch target lands on its instruction rather than on an inserted spill.
+pub fn allocate(instrs: &[MachInstr], num_params: u8) -> (Vec<MachInstr>, u32, Vec<usize>) {
     let mut alloc = Allocator::new(num_params);
     let mut out = Vec::new();
+    let mut index_map = Vec::with_capacity(instrs.len());
 
     for mi in instrs {
+        index_map.push(out.len());
         alloc.rewrite(mi, &mut out);
     }
 
-    (out, alloc.spill_slots)
+    (out, alloc.spill_slots, index_map)
 }
 
 struct Allocator {
@@ -52,6 +59,12 @@ struct Allocator {
     /// register instead of whatever register vreg 0 happens to land on
     /// after the allocator evicts it.
     pinned: HashSet<u8>,
+    /// Physical registers pinned for the duration of the current mach
+    /// instruction's rewrite. Cleared at the start of every `rewrite`
+    /// call. This prevents a later operand lookup inside the same op
+    /// from evicting an earlier operand's physical register, which
+    /// would silently miscompile the op at high register pressure.
+    transient_pins: Vec<u8>,
     /// Round-robin index within the caller-saved range for eviction.
     next_evict: u8,
     /// Number of spill stack slots allocated.
@@ -92,9 +105,27 @@ impl Allocator {
             vreg_to_phys,
             phys_to_vreg,
             pinned,
+            transient_pins: Vec::new(),
             next_evict: 0,
             spill_slots: 0,
             spill_map: HashMap::new(),
+        }
+    }
+
+    /// Pin `phys` for the remainder of the current mach-instruction rewrite,
+    /// tracking the reservation so that `clear_transient_pins` can unpin it
+    /// when the next instruction starts. A no-op if `phys` is already pinned.
+    fn transient_pin(&mut self, phys: u8) {
+        if !self.pinned.contains(&phys) {
+            self.pinned.insert(phys);
+            self.transient_pins.push(phys);
+        }
+    }
+
+    /// Release all transient pins taken during the current rewrite.
+    fn clear_transient_pins(&mut self) {
+        for p in self.transient_pins.drain(..) {
+            self.pinned.remove(&p);
         }
     }
 
@@ -126,8 +157,14 @@ impl Allocator {
     /// must be saved/restored in the prologue/epilogue and keeps the frame
     /// size small, avoiding 6-bit signed offset overflows in
     /// ComputeLoadStore instructions.
+    ///
+    /// Every returned physical register is transiently pinned for the
+    /// duration of the current `rewrite` call, so a later `get_phys` in
+    /// the same multi-operand op cannot evict it and leave a stale
+    /// physical in the op's earlier operand slot.
     fn get_phys(&mut self, vreg: u8, spill_instrs: &mut Vec<MachInstr>) -> u8 {
         if let Some(&phys) = self.vreg_to_phys.get(&vreg) {
+            self.transient_pin(phys);
             return phys;
         }
 
@@ -142,6 +179,7 @@ impl Allocator {
                 self.vreg_to_phys.insert(vreg, candidate);
                 self.phys_to_vreg.insert(candidate, vreg);
                 self.emit_reload(vreg, candidate, spill_instrs);
+                self.transient_pin(candidate);
                 return candidate;
             }
         }
@@ -155,6 +193,7 @@ impl Allocator {
                 self.vreg_to_phys.insert(vreg, candidate);
                 self.phys_to_vreg.insert(candidate, vreg);
                 self.emit_reload(vreg, candidate, spill_instrs);
+                self.transient_pin(candidate);
                 return candidate;
             }
         }
@@ -198,6 +237,7 @@ impl Allocator {
         // Reload if previously spilled.
         self.emit_reload(vreg, evict_phys, spill_instrs);
 
+        self.transient_pin(evict_phys);
         evict_phys
     }
 
@@ -230,22 +270,18 @@ impl Allocator {
     }
 
     fn rewrite(&mut self, mi: &MachInstr, out: &mut Vec<MachInstr>) {
+        self.clear_transient_pins();
         let mut spill_pre = Vec::new();
 
         let new_instr = match mi.instr {
             Instruction::LoadImm { ureg, value } => {
-                // ureg encodes the target register. For R-group (0x0n),
-                // map the low nibble through the allocator.
-                let group = ureg >> 4;
-                if group == 0 {
-                    let vreg = ureg & 0xF;
-                    let phys = self.get_phys(vreg, &mut spill_pre);
-                    Instruction::LoadImm {
-                        ureg: target::ureg_r(phys),
-                        value,
-                    }
-                } else {
-                    mi.instr
+                // isel stores the raw vreg number in `ureg`; translate
+                // to the physical register's ureg encoding here.
+                let vreg = ureg;
+                let phys = self.get_phys(vreg, &mut spill_pre);
+                Instruction::LoadImm {
+                    ureg: target::ureg_r(phys),
+                    value,
                 }
             }
 
@@ -823,7 +859,7 @@ mod tests {
                 reloc: None,
             },
         ];
-        let (out, spills) = allocate(&instrs, 0);
+        let (out, spills, _) = allocate(&instrs, 0);
         assert_eq!(spills, 0);
         // Should still have a LoadImm and Return.
         assert!(out.iter().any(|m| matches!(m.instr, Instruction::LoadImm { .. })));
@@ -866,7 +902,7 @@ mod tests {
                 reloc: None,
             },
         ];
-        let (out, _) = allocate(&instrs, 0);
+        let (out, _, _) = allocate(&instrs, 0);
         // Verify all registers in the Add are in 0-15 range.
         for mi in &out {
             if let Instruction::Compute {
@@ -905,7 +941,7 @@ mod tests {
             },
             reloc: None,
         });
-        let (out, _) = allocate(&instrs, 0);
+        let (out, _, _) = allocate(&instrs, 0);
         // Collect the physical registers assigned to LoadImm instructions.
         let mut assigned = Vec::new();
         for mi in &out {
