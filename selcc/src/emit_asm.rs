@@ -1640,6 +1640,26 @@ mod tests {
     }
 
     #[test]
+    fn rt_four_param_r0_not_clobbered() {
+        // The 4th argument (d) arrives in R0, which is also the return
+        // register. Ensure the compiler snapshots R0 into another
+        // register before any computation can overwrite it.
+        // f(1,2,3,4) should yield (1+2)*(3+4) = 3*7 = 21, not 42.
+        let src = "int f(int a, int b, int c, int d) { return (a+b)*(c+d); }";
+        let text = round_trip_disasm(src);
+        // The first non-prologue PASS in the body must copy R0 to a
+        // different register, preserving the 4th argument.
+        let has_r0_snapshot = text.iter().any(|t| {
+            t.contains("PASS") && t.contains("R0")
+                && !t.starts_with("R0")
+        });
+        assert!(
+            has_r0_snapshot,
+            "expected early PASS R0 -> Rn snapshot for 4th arg, got: {text:?}"
+        );
+    }
+
+    #[test]
     fn rt_self_copy_eliminated() {
         let text = round_trip_disasm("int f(int a) { return a; }");
         // No instruction should be `Rn = PASS Rn`.

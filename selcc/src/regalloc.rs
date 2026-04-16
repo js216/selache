@@ -93,9 +93,9 @@ impl Allocator {
         // `Pass { rn: RETURN_REG_VREG, rx: ... }` always resolves to
         // `R0 = ...`. For a 4-argument function this is the same
         // physical register as ARG_REGS[3] -- vreg 3 (the 4th arg)
-        // also lives in R0 -- which is fine because the 4th-arg
-        // vreg's content is dead by the time isel emits the return
-        // move, so overwriting R0 is safe.
+        // also lives in R0. The lowering stage snapshots vreg 3 into
+        // a fresh vreg at function entry so the parameter value is
+        // safe from being clobbered by intermediate writes to R0.
         vreg_to_phys.insert(target::RETURN_REG_VREG, target::RETURN_REG);
         phys_to_vreg
             .entry(target::RETURN_REG)

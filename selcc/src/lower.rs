@@ -512,6 +512,25 @@ pub fn lower_function_with_known(
             ctx.emit(IrOp::Copy(param_vreg, i as VReg));
             ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
             ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
+        } else if i < target::ARG_REGS.len()
+            && target::ARG_REGS[i] == target::RETURN_REG
+        {
+            // The ABI argument register for this parameter is R0, which
+            // is also the return-value register. The regalloc pins both
+            // this param vreg and RETURN_REG_VREG to physical R0, so
+            // any intermediate computation that writes through
+            // RETURN_REG_VREG (or that the allocator spills into R0)
+            // will silently clobber the parameter. Snapshot it into a
+            // fresh vreg immediately so the allocator can place it in a
+            // non-conflicting register.
+            let _identity_vreg = ctx.alloc_vreg();
+            debug_assert_eq!(_identity_vreg, i as VReg);
+            let fresh = ctx.alloc_vreg();
+            if is_float_param {
+                ctx.vreg_is_float.insert(fresh, true);
+            }
+            ctx.emit(IrOp::Copy(fresh, i as VReg));
+            ctx.locals.insert(name.clone(), LocalStorage::Reg(fresh));
         } else {
             let param_vreg = ctx.alloc_vreg();
             debug_assert_eq!(param_vreg, i as VReg);
