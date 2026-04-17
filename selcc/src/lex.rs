@@ -434,31 +434,31 @@ impl<'a> Lexer<'a> {
         let line = self.line;
         let col = self.col;
         self.advance(); // skip opening quote
-        let val = match self.peek() {
-            None => {
-                return Err(Error::Lex {
-                    line,
-                    col,
-                    msg: "unterminated character literal".to_string(),
-                });
+        let mut val: i64 = 0;
+        loop {
+            match self.peek() {
+                None | Some(b'\n') => {
+                    return Err(Error::Lex {
+                        line,
+                        col,
+                        msg: "unterminated character literal".to_string(),
+                    });
+                }
+                Some(b'\'') => {
+                    self.advance(); // skip closing quote
+                    break;
+                }
+                Some(b'\\') => {
+                    self.advance();
+                    let ch = self.read_escape_char(line, col)? as i64;
+                    val = (val << 8) | (ch & 0xFF);
+                }
+                Some(ch) => {
+                    self.advance();
+                    val = (val << 8) | (ch as i64 & 0xFF);
+                }
             }
-            Some(b'\\') => {
-                self.advance();
-                self.read_escape_char(line, col)? as i64
-            }
-            Some(ch) => {
-                self.advance();
-                ch as i64
-            }
-        };
-        if self.peek() != Some(b'\'') {
-            return Err(Error::Lex {
-                line,
-                col,
-                msg: "unterminated character literal".to_string(),
-            });
         }
-        self.advance(); // skip closing quote
         Ok(Token::CharLit(val))
     }
 

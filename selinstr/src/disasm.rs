@@ -342,13 +342,27 @@ fn decode_mul(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
     let r = |i: u32| dreg(i, false);
     let f = |i: u32| dreg(i, true);
     match opcode {
+        // MR register reads: Rn = MRxF/MRxB
+        0x00 => format!("{} = MR0F", r(rn)),
+        0x01 => format!("{} = MR1F", r(rn)),
+        0x02 => format!("{} = MR2F", r(rn)),
+        0x04 => format!("{} = MR0B", r(rn)),
+        0x05 => format!("{} = MR1B", r(rn)),
+        0x06 => format!("{} = MR2B", r(rn)),
         0x08 => format!("{} = SAT MRF", r(rn)),
         0x0A => format!("{} = SAT MRB", r(rn)),
+        // MR register writes: MRxF/MRxB = Rn
+        0x10 => format!("MR0F = {}", r(rn)),
+        0x11 => format!("MR1F = {}", r(rn)),
+        0x12 => format!("MR2F = {}", r(rn)),
         0x14 => "MRF = 0".into(),
         0x16 => "MRB = 0".into(),
         0x18 => "MRF = TRNC MRF".into(),
         0x1A => "MRB = TRNC MRB".into(),
         0x1C => format!("{} = TRNC MRF", r(rn)),
+        0x20 => format!("MR0B = {}", r(rn)),
+        0x21 => format!("MR1B = {}", r(rn)),
+        0x22 => format!("MR2B = {}", r(rn)),
         0x1E => format!("{} = TRNC MRB", r(rn)),
         0x30 => format!("{} = {} * {}", f(rn), f(rx), f(ry)),
         0x4C => format!("MRF = {} * {} (UUF)", r(rx), r(ry)),

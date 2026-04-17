@@ -148,6 +148,22 @@ pub fn struct_field_layout(
             if name == target {
                 return Some((offset, None, None));
             }
+            // Search inside anonymous struct/union members.
+            if name.starts_with("__anon") {
+                match ty {
+                    Type::Struct { fields: inner, .. } => {
+                        if let Some((nested_off, bo, bw)) = struct_field_layout(inner, target) {
+                            return Some((offset + nested_off, bo, bw));
+                        }
+                    }
+                    Type::Union { fields: inner, .. } => {
+                        if let Some((nested_off, bo, bw)) = struct_field_layout(inner, target) {
+                            return Some((offset + nested_off, bo, bw));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             offset += ty.size_bytes();
         }
     }

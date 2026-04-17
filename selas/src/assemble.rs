@@ -62,6 +62,12 @@ fn parse_section_name(raw: &str) -> (String, bool) {
             return (name.to_string(), true);
         }
     }
+    if upper.starts_with("SW") {
+        let name = s[2..].trim();
+        if !name.is_empty() {
+            return (name.to_string(), true);
+        }
+    }
     if upper.starts_with("DM") {
         let name = s[2..].trim();
         if !name.is_empty() {

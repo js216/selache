@@ -93,6 +93,13 @@ struct LowerCtx {
     known_functions: HashSet<String>,
     /// Return type of the current function (for implicit return warning).
     return_type: Type,
+    /// Stack of IR labels for CaseLabel/DefaultLabel statements in nested
+    /// switch bodies.  Each entry is a Vec of labels allocated by
+    /// `lower_switch`; a running index inside `lower_stmt` picks the next
+    /// label to emit when a CaseLabel or DefaultLabel is encountered.
+    switch_labels: Vec<Vec<Label>>,
+    /// Running index into the innermost `switch_labels` entry.
+    switch_label_idx: usize,
 }
 
 /// A static local variable collected during lowering.
@@ -134,6 +141,8 @@ impl LowerCtx {
             vla_dims: HashMap::new(),
             known_functions: HashSet::new(),
             return_type: Type::Void,
+            switch_labels: Vec::new(),
+            switch_label_idx: 0,
         }
     }
 
@@ -259,15 +268,14 @@ fn collect_assigned(stmt: &Stmt, set: &mut HashSet<String>) {
                 collect_assigned(s, set);
             }
         }
-        Stmt::Switch { expr, cases } => {
+        Stmt::Switch { expr, body } => {
             collect_assigned_expr(expr, set);
-            for (_, stmts) in cases {
-                for s in stmts {
-                    collect_assigned(s, set);
-                }
+            for s in body {
+                collect_assigned(s, set);
             }
         }
-        Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Asm(_) => {}
+        Stmt::CaseLabel(_) | Stmt::DefaultLabel
+        | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Asm(_) => {}
         Stmt::Label(_, inner) => collect_assigned(inner, set),
     }
 }
@@ -580,7 +588,10 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
             lower_expr(ctx, expr)?;
         }
         Stmt::VarDecl { name, ty, init, is_static, vla_dim } => {
-            if *is_static {
+            // Standalone struct/union definition (no variable name).
+            if name.is_empty() {
+                // Type already collected by collect_local_struct_defs.
+            } else if *is_static {
                 let mangled = format!("_{}_{}", ctx.func_name, name);
                 ctx.globals.insert(mangled.clone(), ty.clone());
                 ctx.local_types.insert(name.clone(), ty.clone());
@@ -690,8 +701,16 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
         Stmt::Block(stmts) => {
             lower_block_with_vla_scope(ctx, stmts)?;
         }
-        Stmt::Switch { expr, cases } => {
-            lower_switch(ctx, expr, cases)?;
+        Stmt::Switch { expr, body } => {
+            lower_switch(ctx, expr, body)?;
+        }
+        Stmt::CaseLabel(_) | Stmt::DefaultLabel => {
+            // Emit the next IR label allocated by the enclosing lower_switch.
+            if let Some(labels) = ctx.switch_labels.last() {
+                let idx = ctx.switch_label_idx;
+                ctx.emit(IrOp::Label(labels[idx]));
+                ctx.switch_label_idx = idx + 1;
+            }
         }
         Stmt::Break => {
             let lc = ctx.loop_stack.last().ok_or_else(|| {
@@ -789,18 +808,63 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
 
 /// Compute the word offset and type of a named field within a struct.
 fn struct_field_offset(fields: &[(String, Type)], field_name: &str) -> Option<(u32, Type)> {
-    let (byte_off, _, _) = crate::types::struct_field_layout(fields, field_name)?;
-    let word_off = byte_off / 4;
-    let ty = fields.iter()
-        .find(|(n, _)| n == field_name)
-        .map(|(_, t)| t.clone())?;
-    Some((word_off, ty))
+    // Direct lookup in top-level fields.
+    if fields.iter().any(|(n, _)| n == field_name) {
+        let (byte_off, _, _) = crate::types::struct_field_layout(fields, field_name)?;
+        let word_off = byte_off / 4;
+        let ty = fields.iter()
+            .find(|(n, _)| n == field_name)
+            .map(|(_, t)| t.clone())?;
+        return Some((word_off, ty));
+    }
+    // Search inside anonymous struct/union members.
+    for (name, ty) in fields {
+        if !name.starts_with("__anon") { continue; }
+        let (anon_byte_off, _, _) = crate::types::struct_field_layout(fields, name)?;
+        let anon_word_off = anon_byte_off / 4;
+        match ty {
+            Type::Union { fields: inner, .. } => {
+                if let Some(ft) = union_field_type(inner, field_name) {
+                    return Some((anon_word_off, ft));
+                }
+            }
+            Type::Struct { fields: inner, .. } => {
+                if let Some((nested_off, ft)) = struct_field_offset(inner, field_name) {
+                    return Some((anon_word_off + nested_off, ft));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn union_field_type(fields: &[(String, Type)], field_name: &str) -> Option<Type> {
-    fields.iter()
+    // Direct lookup first.
+    if let Some(t) = fields.iter()
         .find(|(n, _)| n == field_name)
         .map(|(_, t)| t.clone())
+    {
+        return Some(t);
+    }
+    // Search inside anonymous struct/union members.
+    for (name, ty) in fields {
+        if !name.starts_with("__anon") { continue; }
+        match ty {
+            Type::Union { fields: inner, .. } => {
+                if let Some(t) = union_field_type(inner, field_name) {
+                    return Some(t);
+                }
+            }
+            Type::Struct { fields: inner, .. } => {
+                if let Some((_, t)) = struct_field_offset(inner, field_name) {
+                    return Some(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_union_type(ty: &Type) -> bool {
@@ -833,10 +897,8 @@ fn collect_local_struct_defs(stmts: &[Stmt], defs: &mut Vec<(String, Vec<(String
                 collect_local_struct_defs(body, defs);
             }
             Stmt::Block(inner) => collect_local_struct_defs(inner, defs),
-            Stmt::Switch { cases, .. } => {
-                for (_, case_body) in cases {
-                    collect_local_struct_defs(case_body, defs);
-                }
+            Stmt::Switch { body, .. } => {
+                collect_local_struct_defs(body, defs);
             }
             _ => {}
         }
@@ -1030,6 +1092,15 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
                 other => Some(other),
             }
         }
+        Expr::Assign { target, .. } | Expr::CompoundAssign { target, .. } => {
+            expr_type(target, ctx)
+        }
+        Expr::Comma(_, rhs) => expr_type(rhs, ctx),
+        Expr::AddrOf(inner) => {
+            expr_type(inner, ctx).map(|t| Type::Pointer(Box::new(t)))
+        }
+        Expr::PostInc(inner) | Expr::PostDec(inner)
+        | Expr::PreInc(inner) | Expr::PreDec(inner) => expr_type(inner, ctx),
         _ => None,
     }
 }
@@ -1163,6 +1234,30 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 ctx.emit(IrOp::Add(addr, ptr, off_vreg));
                 Ok(addr)
             }
+        }
+        // Assignment expression used as lvalue: (b = a).field
+        // Evaluate the full assignment, then return the address of the target.
+        Expr::Assign { target, .. } => {
+            lower_expr(ctx, expr)?;
+            lower_lvalue_addr(ctx, target)
+        }
+        // Compound literal: (type){init} — allocate stack storage and
+        // return its address.
+        Expr::Cast(ty, inner) if matches!(inner.as_ref(), Expr::InitList(_)) => {
+            let resolved_ty = resolve_type(ty, ctx);
+            let num_words = resolved_ty.size_words().max(1) as u32;
+            let slot = ctx.frame_size;
+            ctx.frame_size += num_words;
+            if let Expr::InitList(items) = inner.as_ref() {
+                for (i, item) in items.iter().enumerate() {
+                    if i as u32 >= num_words { break; }
+                    let val = lower_expr(ctx, item)?;
+                    ctx.emit(IrOp::Store(val, 0, (slot + i as u32) as i32));
+                }
+            }
+            let dst = ctx.alloc_vreg();
+            ctx.emit(IrOp::FrameAddr(dst, slot as i32));
+            Ok(dst)
         }
         _ => Err(Error::NotImplemented(
             "address of complex expression".into(),
@@ -2393,48 +2488,80 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
     Ok(())
 }
 
+/// Collect all CaseLabel / DefaultLabel positions from a switch body,
+/// recursing into nested blocks, loops, etc. (Duff's device).
+fn collect_case_labels(stmts: &[Stmt], out: &mut Vec<Option<Expr>>) {
+    for s in stmts {
+        match s {
+            Stmt::CaseLabel(e) => out.push(Some(e.clone())),
+            Stmt::DefaultLabel => out.push(None),
+            Stmt::Block(inner) => collect_case_labels(inner, out),
+            Stmt::If { then_body, else_body, .. } => {
+                collect_case_labels(then_body, out);
+                if let Some(eb) = else_body {
+                    collect_case_labels(eb, out);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::DoWhile { body, .. } => collect_case_labels(body, out),
+            Stmt::Switch { .. } => {} // nested switch owns its own labels
+            Stmt::Label(_, inner) => {
+                collect_case_labels(std::slice::from_ref(inner.as_ref()), out);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn lower_switch(
     ctx: &mut LowerCtx,
     expr: &Expr,
-    cases: &[(Option<Expr>, Vec<Stmt>)],
+    body: &[Stmt],
 ) -> Result<()> {
     let switch_val = lower_expr(ctx, expr)?;
     let break_label = ctx.alloc_label();
 
-    // Allocate a label for each case arm.
-    let case_labels: Vec<Label> = cases.iter().map(|_| ctx.alloc_label()).collect();
+    // Collect all case/default labels from the body (may be nested).
+    let mut labels_info: Vec<Option<Expr>> = Vec::new();
+    collect_case_labels(body, &mut labels_info);
+
+    // Allocate an IR label for each case arm.
+    let ir_labels: Vec<Label> = labels_info.iter().map(|_| ctx.alloc_label()).collect();
 
     // Find the default case index, if any.
-    let default_idx = cases.iter().position(|(val, _)| val.is_none());
+    let default_idx = labels_info.iter().position(|v| v.is_none());
 
-    // Emit the comparison chain: compare switch value against each case
-    // constant and branch to the matching case label.
-    for (i, (case_val, _)) in cases.iter().enumerate() {
-        if let Some(val_expr) = case_val {
+    // Emit the comparison chain.
+    for (i, val) in labels_info.iter().enumerate() {
+        if let Some(val_expr) = val {
             let case_vreg = lower_expr(ctx, val_expr)?;
             ctx.emit(IrOp::Cmp(switch_val, case_vreg));
-            ctx.emit(IrOp::BranchCond(Cond::Eq, case_labels[i]));
+            ctx.emit(IrOp::BranchCond(Cond::Eq, ir_labels[i]));
         }
     }
 
     // After all comparisons: jump to default if present, otherwise break.
     if let Some(di) = default_idx {
-        ctx.emit(IrOp::Branch(case_labels[di]));
+        ctx.emit(IrOp::Branch(ir_labels[di]));
     } else {
         ctx.emit(IrOp::Branch(break_label));
     }
 
-    // Emit case bodies in order (fall-through between cases unless break).
+    // Emit the body.  A counter tracks which CaseLabel/DefaultLabel we
+    // encounter so we can emit the corresponding IR label.
     ctx.loop_stack.push(LoopContext {
         break_label,
         continue_label: None,
     });
-    for (i, (_, stmts)) in cases.iter().enumerate() {
-        ctx.emit(IrOp::Label(case_labels[i]));
-        for s in stmts {
-            lower_stmt(ctx, s)?;
-        }
+    let saved_idx = ctx.switch_label_idx;
+    ctx.switch_label_idx = 0;
+    ctx.switch_labels.push(ir_labels);
+    for s in body {
+        lower_stmt(ctx, s)?;
     }
+    ctx.switch_labels.pop();
+    ctx.switch_label_idx = saved_idx;
     ctx.loop_stack.pop();
 
     ctx.emit(IrOp::Label(break_label));
@@ -2816,7 +2943,7 @@ fn type_size_words(ty: &Type, ctx: &LowerCtx) -> u32 {
 fn is_function_ptr_type(ty: &Type, ctx: &LowerCtx) -> bool {
     match ty {
         Type::FunctionPtr { .. } => true,
-        Type::Pointer(inner) => matches!(inner.as_ref(), Type::FunctionPtr { .. }),
+        Type::Pointer(inner) => is_function_ptr_type(inner, ctx),
         Type::Volatile(inner) | Type::Const(inner) => is_function_ptr_type(inner, ctx),
         Type::Typedef(name) => {
             for (td_name, td_ty) in &ctx.typedefs {

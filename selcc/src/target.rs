@@ -30,11 +30,10 @@ pub const INDIRECT_CALL_PMM: u8 = 4;
 pub const ARG_REGS: &[u8] = &[4, 8, 12];
 
 /// Data registers that do NOT need to be preserved across a
-/// CJUMP. Listing R0-R7 explicitly keeps the ALU's x-bank fully
-/// available to the register allocator for scratch values, while
-/// still covering the SHARC+ C-ABI guarantee that R0 (return /
-/// fourth arg) and R4 (first arg) are caller-saved.
-pub const CALLER_SAVED: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7];
+/// CJUMP. R2 is excluded: it holds the frame-link value (I6)
+/// and is pushed by the CJUMP delayed-branch slot for RFRAME
+/// to restore the caller's frame pointer on return.
+pub const CALLER_SAVED: &[u8] = &[0, 1, 3, 4, 5, 6, 7];
 
 /// Data registers the SHARC+ C-ABI expects to survive a CJUMP:
 /// R8-R15. Selcc's prologue saves each one the body actually
@@ -91,10 +90,10 @@ mod tests {
         assert_eq!(RETURN_REG, 0);
         assert_eq!(NUM_REGS, 16);
         assert_eq!(ARG_REGS, &[4, 8, 12]);
-        assert_eq!(CALLER_SAVED.len(), 8);
+        assert_eq!(CALLER_SAVED.len(), 7);    // R2 reserved for frame link
         assert_eq!(CALLEE_SAVED.len(), 8);
-        // Caller-saved and callee-saved should cover all 16 registers.
-        assert_eq!(CALLER_SAVED.len() + CALLEE_SAVED.len(), NUM_REGS as usize);
+        // Caller-saved + callee-saved + 1 reserved (R2) = 16 registers.
+        assert_eq!(CALLER_SAVED.len() + CALLEE_SAVED.len() + 1, NUM_REGS as usize);
     }
 
     #[test]

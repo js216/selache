@@ -33,6 +33,10 @@ pub struct IselResult {
 /// Virtual register numbers are preserved as physical register indices;
 /// the register allocator will rewrite them to valid physical registers.
 pub fn select(ir: &[IrOp]) -> IselResult {
+    select_with_name(ir, "anon")
+}
+
+pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
     let mut instrs = Vec::new();
     let mut label_positions = Vec::new();
     let mut call_return_labels: Vec<(usize, String)> = Vec::new();
@@ -401,7 +405,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                 // The return label is the instruction immediately after
                 // these delay slots; emit_asm will insert a synthetic
                 // label and resolve it via relocation.
-                let ret_label_name = format!(".L_ret_{}_{}", name, call_site_counter);
+                let ret_label_name = format!(".L_ret_{}_{}_{}", func_name, name, call_site_counter);
                 call_site_counter += 1;
                 instrs.push(MachInstr {
                     instr: Instruction::ImmStore {

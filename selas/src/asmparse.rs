@@ -572,6 +572,7 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
                 && !rhs.contains('-')
                 && !rhs.contains('(')
                 && ureg_code(rhs).is_none()
+                && is_label_token(rhs)
             {
                 return Ok((Instruction::LoadImm { ureg, value: 0 }, Some(rhs.to_string())));
             }

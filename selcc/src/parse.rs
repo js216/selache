@@ -35,6 +35,7 @@ fn is_type_start(t: &Token) -> bool {
         return matches!(
             name.as_str(),
             "__builtin_quad" | "__pm" | "__dm" | "__byte_addressed" | "__word_addressed"
+                | "size_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t"
         );
     }
     false
@@ -237,6 +238,14 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Type::Long
             }
+            Token::Ident(ref name) if matches!(name.as_str(), "size_t" | "uintptr_t") => {
+                self.advance()?;
+                Type::Unsigned(Box::new(Type::Int))
+            }
+            Token::Ident(ref name) if matches!(name.as_str(), "ptrdiff_t" | "intptr_t") => {
+                self.advance()?;
+                Type::Int
+            }
             Token::Ident(name) if self.typedef_names.contains(name) => {
                 let name = name.clone();
                 self.advance()?;
@@ -271,17 +280,11 @@ impl<'a> Parser<'a> {
                 // Check for function pointer typedef: typedef int (*name)(params)
                 if self.current == Token::LParen && self.is_fnptr_declarator() {
                     self.advance()?; // (
-                    self.expect(&Token::Star)?;
-                    let alias = self.expect_ident()?;
-                    self.expect(&Token::RParen)?;
-                    let params = self.parse_fnptr_params()?;
-                    let fnptr_ty = Type::FunctionPtr {
-                        return_type: Box::new(ty),
-                        params,
-                    };
+                    let (stars, alias, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
+                    let final_ty = self.finish_paren_ptr_type(ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias.clone());
-                    typedefs.push((alias, fnptr_ty));
+                    typedefs.push((alias, final_ty));
                     continue;
                 }
                 let mut alias = self.expect_ident()?;
@@ -295,6 +298,14 @@ impl<'a> Parser<'a> {
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias.clone());
                     typedefs.push((alias, fnptr_ty));
+                    continue;
+                }
+                // Check for array typedef: typedef type name[N];
+                if self.current == Token::LBracket {
+                    let (arr_ty, _) = self.parse_array_dimensions(ty)?;
+                    self.expect(&Token::Semicolon)?;
+                    self.typedef_names.insert(alias.clone());
+                    typedefs.push((alias, arr_ty));
                     continue;
                 }
                 // Handle multiple typedef names: typedef struct { ... } A, *B;
@@ -364,27 +375,25 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            // Check for function pointer global: type (*name)(params) = init;
+            // Check for parenthesized pointer declarator: type (*name)(params), type (*name)[N], etc.
             if self.current == Token::LParen && self.is_fnptr_declarator() {
                 self.advance()?; // (
-                self.expect(&Token::Star)?;
-                let name = self.expect_ident()?;
-                self.expect(&Token::RParen)?;
-                let fp_params = self.parse_fnptr_params()?;
-                let fnptr_ty = Type::FunctionPtr {
-                    return_type: Box::new(ty),
-                    params: fp_params,
-                };
+                let (stars, name, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
+                let final_ty = self.finish_paren_ptr_type(ty, stars, has_brackets, array_dim)?;
                 let init = if self.current == Token::Assign {
                     self.advance()?;
-                    Some(self.parse_assign()?)
+                    if self.current == Token::LBrace {
+                        Some(self.parse_init_list()?)
+                    } else {
+                        Some(self.parse_assign()?)
+                    }
                 } else {
                     None
                 };
                 self.expect(&Token::Semicolon)?;
                 globals.push(crate::ast::GlobalDecl {
                     name,
-                    ty: fnptr_ty,
+                    ty: final_ty,
                     init,
                     is_static,
                     is_extern,
@@ -393,7 +402,7 @@ impl<'a> Parser<'a> {
             }
 
             // Handle parenthesized declarator name: type (name)(params)
-            let name = if self.current == Token::LParen && !self.is_fnptr_declarator() {
+            let name = if self.current == Token::LParen && self.is_paren_declarator() {
                 self.advance()?; // skip (
                 let n = self.expect_ident()?;
                 self.expect(&Token::RParen)?;
@@ -407,7 +416,43 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let mut params = Vec::new();
                 let mut is_variadic = false;
-                if self.current != Token::RParen {
+                // Check for K&R-style parameters: ident, ident, ...
+                // Detect by checking if first token is a non-type identifier.
+                let is_kr = if let Token::Ident(name) = &self.current {
+                    !is_type_start(&self.current) && !self.typedef_names.contains(name)
+                } else {
+                    false
+                };
+                if is_kr {
+                    // K&R parameter names only
+                    while let Token::Ident(_) = &self.current {
+                        let pname = self.expect_ident()?;
+                        params.push((pname, Type::Int));
+                        if self.current == Token::Comma {
+                            self.advance()?;
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    // Skip K&R type declarations: `int a; int b;` etc.
+                    while is_type_start(&self.current)
+                        || (matches!(&self.current, Token::Ident(n) if self.typedef_names.contains(n)))
+                    {
+                        let kr_ty = self.parse_type()?;
+                        let kr_ty = self.parse_pointer_type(kr_ty);
+                        let kr_name = self.expect_ident()?;
+                        self.expect(&Token::Semicolon)?;
+                        // Update param type by name
+                        for (pn, pt) in &mut params {
+                            if *pn == kr_name {
+                                *pt = kr_ty.clone();
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    if self.current != Token::RParen {
                     loop {
                         if self.current == Token::Ellipsis {
                             self.advance()?;
@@ -416,7 +461,7 @@ impl<'a> Parser<'a> {
                         }
                         let pty = self.parse_type()?;
                         let pty = self.parse_pointer_type(pty);
-                        // Check for function pointer parameter: type (*name)(params)
+                        // Check for function pointer or pointer-to-array parameter
                         if self.current == Token::LParen && self.is_fnptr_declarator() {
                             self.advance()?; // (
                             self.expect(&Token::Star)?;
@@ -427,12 +472,18 @@ impl<'a> Parser<'a> {
                                 format!("__param{}", params.len())
                             };
                             self.expect(&Token::RParen)?;
-                            let fp_params = self.parse_fnptr_params()?;
-                            let fnptr_ty = Type::FunctionPtr {
-                                return_type: Box::new(pty),
-                                params: fp_params,
+                            let param_ty = if self.current == Token::LParen {
+                                let fp_params = self.parse_fnptr_params()?;
+                                Type::FunctionPtr {
+                                    return_type: Box::new(pty),
+                                    params: fp_params,
+                                }
+                            } else {
+                                // Pointer to array: int (*m)[N]
+                                let (arr_ty, _) = self.parse_array_dimensions(pty)?;
+                                Type::Pointer(Box::new(arr_ty))
                             };
-                            params.push((pname, fnptr_ty));
+                            params.push((pname, param_ty));
                         } else if self.current == Token::RParen || self.current == Token::Comma {
                             // Unnamed parameter (declaration only).
                             let pname = format!("__param{}", params.len());
@@ -471,8 +522,9 @@ impl<'a> Parser<'a> {
                             break;
                         }
                     }
+                    }
+                    self.expect(&Token::RParen)?;
                 }
-                self.expect(&Token::RParen)?;
 
                 if self.current == Token::Semicolon {
                     // Forward declaration -- treat as extern.
@@ -585,19 +637,13 @@ impl<'a> Parser<'a> {
                     fields.push((anon_name, field_ty));
                     continue;
                 }
-                // Check for function pointer field: type (*name)(params)
+                // Check for function pointer or pointer-to-array field
                 if self.current == Token::LParen && self.is_fnptr_declarator() {
                     self.advance()?; // (
-                    self.expect(&Token::Star)?;
-                    let field_name = self.expect_ident()?;
-                    self.expect(&Token::RParen)?;
-                    let fp_params = self.parse_fnptr_params()?;
-                    let fnptr_ty = Type::FunctionPtr {
-                        return_type: Box::new(field_ty),
-                        params: fp_params,
-                    };
+                    let (stars, field_name, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
+                    let final_ty = self.finish_paren_ptr_type(field_ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
-                    fields.push((field_name, fnptr_ty));
+                    fields.push((field_name, final_ty));
                     continue;
                 }
                 // Anonymous bitfield: `type : width;` (no field name)
@@ -683,6 +729,135 @@ impl<'a> Parser<'a> {
             i += 1;
         }
         i < remaining.len() && remaining[i] == b'*'
+    }
+
+    /// Check if the tokens after `(` form a parenthesized declarator name
+    /// `(ident)` rather than a parameter list `(type ...)`.  Called when
+    /// current == LParen and is_fnptr_declarator() returned false.  Peeks
+    /// at raw bytes: skip whitespace, extract the identifier word, reject
+    /// if the word is a C type keyword.
+    fn is_paren_declarator(&self) -> bool {
+        let remaining = self.lexer.remaining_bytes();
+        let mut i = 0;
+        while i < remaining.len() && remaining[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= remaining.len() || !(remaining[i].is_ascii_alphabetic() || remaining[i] == b'_') {
+            return false;
+        }
+        let start = i;
+        while i < remaining.len() && (remaining[i].is_ascii_alphanumeric() || remaining[i] == b'_')
+        {
+            i += 1;
+        }
+        let word = &remaining[start..i];
+        // If followed by `)` (after optional whitespace) and the word is not
+        // a type keyword, this is a parenthesized name.
+        while i < remaining.len() && remaining[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= remaining.len() || remaining[i] != b')' {
+            return false;
+        }
+        !matches!(
+            word,
+            b"void" | b"int" | b"char" | b"short" | b"long" | b"float" | b"double"
+                | b"unsigned" | b"signed" | b"struct" | b"union" | b"enum" | b"const"
+                | b"volatile" | b"_Bool"
+        )
+    }
+
+    /// Parse the interior of a parenthesized pointer declarator after `(`.
+    /// Handles `*name`, `**name`, `*const name`, `*name[N]`, etc.
+    /// Returns (indirection_count, name, has_array_brackets, optional_array_size).
+    fn parse_paren_ptr_decl(&mut self) -> Result<(usize, String, bool, Option<Expr>), Error> {
+        let mut stars = 0;
+        while self.current == Token::Star {
+            self.advance()?;
+            stars += 1;
+        }
+        // Skip const/volatile qualifiers
+        while matches!(self.current, Token::Const | Token::Volatile) {
+            self.advance()?;
+        }
+        // Handle nested parenthesized declarator: (*(*pp)) — skip inner parens
+        if self.current == Token::LParen {
+            self.advance()?; // skip inner (
+            let mut inner_stars = 0;
+            while self.current == Token::Star {
+                self.advance()?;
+                inner_stars += 1;
+            }
+            while matches!(self.current, Token::Const | Token::Volatile) {
+                self.advance()?;
+            }
+            let name = self.expect_ident()?;
+            self.expect(&Token::RParen)?; // inner )
+            self.expect(&Token::RParen)?; // outer )
+            return Ok((stars + inner_stars, name, false, None));
+        }
+        let name = self.expect_ident()?;
+        let (has_brackets, array_dim) = if self.current == Token::LBracket {
+            self.advance()?;
+            if self.current == Token::RBracket {
+                self.advance()?;
+                (true, None) // unsized array []
+            } else {
+                let dim = self.parse_expr()?;
+                self.expect(&Token::RBracket)?;
+                (true, Some(dim))
+            }
+        } else {
+            (false, None)
+        };
+        self.expect(&Token::RParen)?;
+        Ok((stars, name, has_brackets, array_dim))
+    }
+
+    /// Build the final type for a parenthesized pointer declarator.
+    /// `base_ty` is the return/element type, `stars` is the number of `*` seen,
+    /// `array_dim` is the optional array dimension inside parens, and
+    /// we look at the next token to determine if this is a function pointer
+    /// or a pointer to array.
+    fn finish_paren_ptr_type(
+        &mut self,
+        base_ty: Type,
+        stars: usize,
+        has_brackets: bool,
+        array_dim: Option<Expr>,
+    ) -> Result<Type, Error> {
+        if self.current == Token::LParen {
+            // Function pointer: type (*[*...]name[array])(params)
+            let fp_params = self.parse_fnptr_params()?;
+            let fnptr_ty = Type::FunctionPtr {
+                return_type: Box::new(base_ty),
+                params: fp_params,
+            };
+            // Wrap in extra pointer indirection for **, ***, etc.
+            let mut ty = fnptr_ty;
+            for _ in 1..stars {
+                ty = Type::Pointer(Box::new(ty));
+            }
+            if has_brackets {
+                let dim = array_dim.map(|d| match d {
+                    Expr::IntLit(n, _) => Ok(n as usize),
+                    _ => Err(self.err(
+                        "non-constant array dimension for function pointer array".into(),
+                    )),
+                }).transpose()?;
+                Ok(Type::Array(Box::new(ty), dim))
+            } else {
+                Ok(ty)
+            }
+        } else {
+            // Pointer to array: type (*name)[N]
+            let (arr_ty, _) = self.parse_array_dimensions(base_ty)?;
+            let mut ty = Type::Pointer(Box::new(arr_ty));
+            for _ in 1..stars {
+                ty = Type::Pointer(Box::new(ty));
+            }
+            Ok(ty)
+        }
     }
 
     /// Parse the parameter list of a function pointer type: `(type, type, ...)`
@@ -810,6 +985,17 @@ impl<'a> Parser<'a> {
             Token::For => self.parse_for(),
             Token::Do => self.parse_do_while(),
             Token::Switch => self.parse_switch(),
+            Token::Case => {
+                self.advance()?;
+                let val = self.parse_expr()?;
+                self.expect(&Token::Colon)?;
+                Ok(Stmt::CaseLabel(val))
+            }
+            Token::Default => {
+                self.advance()?;
+                self.expect(&Token::Colon)?;
+                Ok(Stmt::DefaultLabel)
+            }
             Token::Break => {
                 self.advance()?;
                 self.expect(&Token::Semicolon)?;
@@ -879,10 +1065,8 @@ impl<'a> Parser<'a> {
                 let _ty = self.parse_pointer_type(ty);
                 if self.current == Token::LParen && self.is_fnptr_declarator() {
                     self.advance()?;
-                    self.expect(&Token::Star)?;
-                    let alias = self.expect_ident()?;
-                    self.expect(&Token::RParen)?;
-                    let _params = self.parse_fnptr_params()?;
+                    let (stars, alias, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
+                    let _ = self.finish_paren_ptr_type(_ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias);
                 } else {
@@ -890,6 +1074,20 @@ impl<'a> Parser<'a> {
                     self.typedef_names.insert(alias);
                     self.expect(&Token::Semicolon)?;
                 }
+                Ok(Stmt::Block(Vec::new()))
+            }
+            Token::Extern => {
+                // Local extern declaration: just skip it (the symbol is
+                // already visible at file scope).
+                self.advance()?;
+                let _ty = self.parse_type()?;
+                let _ty = self.parse_pointer_type(_ty);
+                let _name = self.expect_ident()?;
+                // Skip function parameter list: extern int fn(int, int);
+                if self.current == Token::LParen {
+                    let _params = self.parse_fnptr_params()?;
+                }
+                self.expect(&Token::Semicolon)?;
                 Ok(Stmt::Block(Vec::new()))
             }
             Token::Static => {
@@ -928,8 +1126,8 @@ impl<'a> Parser<'a> {
         if is_volatile {
             self.advance()?;
         }
-        let base_ty = self.parse_type()?;
-        let base_ty = self.parse_pointer_type(base_ty);
+        let decl_base_ty = self.parse_type()?;
+        let base_ty = self.parse_pointer_type(decl_base_ty.clone());
         let base_ty = if is_volatile && !base_ty.is_volatile() {
             Type::Volatile(Box::new(base_ty))
         } else {
@@ -942,6 +1140,46 @@ impl<'a> Parser<'a> {
         };
 
         let mut stmts = Vec::new();
+
+        // Standalone struct/union/enum definition: `struct S { ... };` with no variable.
+        // Preserve the type in a VarDecl so collect_local_struct_defs can
+        // extract the struct/union definition for later use.
+        if self.current == Token::Semicolon {
+            self.advance()?;
+            match &base_ty {
+                Type::Struct { name: Some(_), fields }
+                | Type::Union { name: Some(_), fields } if !fields.is_empty() => {
+                    return Ok(Stmt::VarDecl {
+                        name: String::new(),
+                        ty: base_ty,
+                        init: None,
+                        is_static: false,
+                        vla_dim: None,
+                    });
+                }
+                _ => return Ok(Stmt::Block(Vec::new())),
+            }
+        }
+
+        // Parenthesized pointer declarator: type (*name)(params), type (*name[N])(params),
+        // type (**name)(params), type (*const name)(params), or type (*name)[N].
+        if self.current == Token::LParen && self.is_fnptr_declarator() {
+            self.advance()?; // (
+            let (stars, name, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
+            let final_ty = self.finish_paren_ptr_type(base_ty, stars, has_brackets, array_dim)?;
+            let init = if self.current == Token::Assign {
+                self.advance()?;
+                if self.current == Token::LBrace {
+                    Some(self.parse_init_list()?)
+                } else {
+                    Some(self.parse_assign()?)
+                }
+            } else {
+                None
+            };
+            self.expect(&Token::Semicolon)?;
+            return Ok(Stmt::VarDecl { name, ty: final_ty, init, is_static, vla_dim: None });
+        }
 
         // Parse first declarator.
         let name = self.expect_ident()?;
@@ -963,10 +1201,18 @@ impl<'a> Parser<'a> {
         };
         stmts.push(Stmt::VarDecl { name, ty, init, is_static, vla_dim });
 
-        // Parse additional comma-separated declarators.
+        // Parse additional comma-separated declarators.  Each declarator
+        // applies its own pointer/array syntax to the declaration specifier
+        // type (`decl_base_ty`), not the fully-decorated first-declarator type.
         while self.current == Token::Comma {
             self.advance()?;
-            let ptr_ty = self.parse_pointer_type(base_ty.clone());
+            let mut ptr_ty = self.parse_pointer_type(decl_base_ty.clone());
+            if is_volatile && !ptr_ty.is_volatile() {
+                ptr_ty = Type::Volatile(Box::new(ptr_ty));
+            }
+            if is_const && !ptr_ty.is_const() {
+                ptr_ty = Type::Const(Box::new(ptr_ty));
+            }
             let decl_name = self.expect_ident()?;
             let (decl_ty, decl_vla_dim) = self.parse_array_dimensions(ptr_ty)?;
             let decl_init = if self.current == Token::Assign {
@@ -1210,34 +1456,18 @@ impl<'a> Parser<'a> {
         self.expect(&Token::RParen)?;
         self.expect(&Token::LBrace)?;
 
-        let mut cases: Vec<(Option<Expr>, Vec<Stmt>)> = Vec::new();
+        // Parse the switch body as a flat list of statements.  Case and
+        // default labels are represented as CaseLabel / DefaultLabel
+        // statements and may appear at any nesting depth (Duff's device).
+        let mut body = Vec::new();
         while self.current != Token::RBrace {
-            let label = match &self.current {
-                Token::Case => {
-                    self.advance()?;
-                    let val = self.parse_expr()?;
-                    self.expect(&Token::Colon)?;
-                    Some(val)
-                }
-                Token::Default => {
-                    self.advance()?;
-                    self.expect(&Token::Colon)?;
-                    None
-                }
-                _ => return Err(self.err("expected case or default".into())),
-            };
-            let mut stmts = Vec::new();
-            while self.current != Token::RBrace
-                && !matches!(&self.current, Token::Case | Token::Default)
-            {
-                stmts.push(self.parse_stmt()?);
-            }
-            cases.push((label, stmts));
+            body.push(self.parse_stmt()?);
         }
         self.expect(&Token::RBrace)?;
 
-        Ok(Stmt::Switch { expr, cases })
+        Ok(Stmt::Switch { expr, body })
     }
+
 
     fn parse_do_while(&mut self) -> Result<Stmt, Error> {
         self.expect(&Token::Do)?;
@@ -1576,15 +1806,36 @@ impl<'a> Parser<'a> {
             }
             Token::Sizeof => {
                 self.advance()?;
-                self.expect(&Token::LParen)?;
-                // Try to parse as type first, then fall back to expression.
-                if self.is_type_token() {
-                    let ty = self.parse_type()?;
-                    self.expect(&Token::RParen)?;
-                    Ok(Expr::Sizeof(Box::new(crate::ast::SizeofArg::Type(ty))))
+                if self.current == Token::LParen {
+                    self.advance()?;
+                    // Try to parse as type first, then fall back to expression.
+                    if self.is_type_token() {
+                        let ty = self.parse_type()?;
+                        let ty = self.parse_pointer_type(ty);
+                        // Function pointer type: sizeof(rettype (*)(params))
+                        let ty = if self.current == Token::LParen && self.is_fnptr_declarator() {
+                            self.advance()?;
+                            self.expect(&Token::Star)?;
+                            self.expect(&Token::RParen)?;
+                            let fp_params = self.parse_fnptr_params()?;
+                            Type::FunctionPtr {
+                                return_type: Box::new(ty),
+                                params: fp_params,
+                            }
+                        } else {
+                            ty
+                        };
+                        let (ty, _) = self.parse_array_dimensions(ty)?;
+                        self.expect(&Token::RParen)?;
+                        Ok(Expr::Sizeof(Box::new(crate::ast::SizeofArg::Type(ty))))
+                    } else {
+                        let expr = self.parse_expr()?;
+                        self.expect(&Token::RParen)?;
+                        Ok(Expr::Sizeof(Box::new(crate::ast::SizeofArg::Expr(expr))))
+                    }
                 } else {
-                    let expr = self.parse_expr()?;
-                    self.expect(&Token::RParen)?;
+                    // sizeof without parens: sizeof unary-expression
+                    let expr = self.parse_unary()?;
                     Ok(Expr::Sizeof(Box::new(crate::ast::SizeofArg::Expr(expr))))
                 }
             }
@@ -1594,6 +1845,21 @@ impl<'a> Parser<'a> {
                 if self.is_type_token() {
                     let ty = self.parse_type()?;
                     let ty = self.parse_pointer_type(ty);
+                    // Function pointer type cast: (rettype (*)(params))
+                    let ty = if self.current == Token::LParen && self.is_fnptr_declarator() {
+                        self.advance()?; // (
+                        self.expect(&Token::Star)?;
+                        self.expect(&Token::RParen)?;
+                        let fp_params = self.parse_fnptr_params()?;
+                        Type::FunctionPtr {
+                            return_type: Box::new(ty),
+                            params: fp_params,
+                        }
+                    } else {
+                        ty
+                    };
+                    // Handle array type in cast/compound literal: (int[3]) or (int[])
+                    let (ty, _) = self.parse_array_dimensions(ty)?;
                     self.expect(&Token::RParen)?;
                     if self.current == Token::LBrace {
                         // Compound literal: (type){initializer-list}
@@ -2237,12 +2503,13 @@ mod tests {
         let src = "int f(int x) { switch(x) { case 0: return 1; case 1: return 2; default: return 0; } }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::Switch { expr, cases } => {
+            Stmt::Switch { expr, body } => {
                 assert_eq!(*expr, Expr::Ident("x".into()));
-                assert_eq!(cases.len(), 3);
-                assert_eq!(cases[0].0, Some(Expr::IntLit(0, IntSuffix::None)));
-                assert_eq!(cases[1].0, Some(Expr::IntLit(1, IntSuffix::None)));
-                assert_eq!(cases[2].0, None);
+                // body: CaseLabel(0), Return(1), CaseLabel(1), Return(2), DefaultLabel, Return(0)
+                assert_eq!(body.len(), 6);
+                assert!(matches!(&body[0], Stmt::CaseLabel(Expr::IntLit(0, _))));
+                assert!(matches!(&body[2], Stmt::CaseLabel(Expr::IntLit(1, _))));
+                assert!(matches!(&body[4], Stmt::DefaultLabel));
             }
             other => panic!("expected switch, got {other:?}"),
         }
@@ -2406,10 +2673,9 @@ mod tests {
         let src = "int f(int x) { int r; switch(x) { case 0: r = 10; break; default: r = 0; break; } return r; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[1] {
-            Stmt::Switch { cases, .. } => {
-                for (_, body) in cases {
-                    assert!(body.iter().any(|s| matches!(s, Stmt::Break)));
-                }
+            Stmt::Switch { body, .. } => {
+                // body: CaseLabel(0), Expr(r=10), Break, DefaultLabel, Expr(r=0), Break
+                assert!(body.iter().any(|s| matches!(s, Stmt::Break)));
             }
             other => panic!("expected switch, got {other:?}"),
         }

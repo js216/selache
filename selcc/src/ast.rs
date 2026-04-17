@@ -138,8 +138,10 @@ pub enum Stmt {
     Block(Vec<Stmt>),
     Switch {
         expr: Expr,
-        cases: Vec<(Option<Expr>, Vec<Stmt>)>,
+        body: Vec<Stmt>,
     },
+    CaseLabel(Expr),
+    DefaultLabel,
     Break,
     Continue,
     Goto(String),

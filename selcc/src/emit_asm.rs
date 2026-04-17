@@ -68,20 +68,28 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
         label_insertions: HashMap<usize, String>,
     }
     let mut compiled: Vec<CompiledFunction> = Vec::new();
+    let mut skipped_functions: Vec<String> = Vec::new();
 
     for func in &unit.functions {
         let mut func_global_types = global_types.clone();
         for sl in &all_static_locals {
             func_global_types.insert(sl.symbol.clone(), sl.ty.clone());
         }
-        let fr = emit_function_instrs(
+        let fr = match emit_function_instrs(
             func,
             &func_global_types,
             &unit.struct_defs,
             &unit.enum_constants,
             &unit.typedefs,
             &known_functions,
-        )?;
+        ) {
+            Ok(fr) => fr,
+            Err(e) => {
+                eprintln!("selcc: {e}: not yet implemented");
+                skipped_functions.push(func.name.clone());
+                continue;
+            }
+        };
         for s in fr.strings {
             if !all_strings.contains(&s) {
                 all_strings.push(s);
@@ -142,7 +150,7 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
 
     // Code section: all functions.
     if !compiled.is_empty() {
-        out.push_str(".SECTION/PM seg_pmco;\n");
+        out.push_str(".SECTION/SW seg_swco;\n");
         for cf in &compiled {
             let sym = with_abi_suffix(&cf.name);
             let _ = writeln!(out, ".GLOBAL {sym};");
@@ -155,6 +163,15 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
                 let _ = writeln!(out, "    {line};");
             }
         }
+        // Emit stub functions for skipped (not-yet-implemented) functions.
+        // Return 0xDEAD to make failures visible in test results.
+        for name in &skipped_functions {
+            let sym = with_abi_suffix(name);
+            let _ = writeln!(out, ".GLOBAL {sym};");
+            let _ = writeln!(out, "{sym}:");
+            let _ = writeln!(out, "    R0 = 0xDEAD;");
+            let _ = writeln!(out, "    RTS;");
+        }
         out.push_str(".ENDSEG;\n\n");
     }
 
@@ -165,19 +182,45 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
             continue;
         }
         if let Some(init) = &global.init {
-            data_entries.push(DataEntry {
-                name: global.name.clone(),
-                values: build_init_words(init, global.ty.size_bytes())?,
-            });
+            match build_init_words(init, global.ty.size_bytes()) {
+                Ok(values) => data_entries.push(DataEntry {
+                    name: global.name.clone(),
+                    values,
+                }),
+                Err(e) => {
+                    eprintln!("selcc: {e}: not yet implemented");
+                    // Fall back to zero-init so the symbol is still defined.
+                    let words = global.ty.size_bytes().div_ceil(4).max(1);
+                    data_entries.push(DataEntry {
+                        name: global.name.clone(),
+                        values: vec![0u32; words as usize],
+                    });
+                }
+            }
         }
     }
     for sl in &all_static_locals {
         if let Some(init) = &sl.init {
-            data_entries.push(DataEntry {
-                name: sl.symbol.clone(),
-                values: build_init_words(init, sl.ty.size_bytes())?,
-            });
+            match build_init_words(init, sl.ty.size_bytes()) {
+                Ok(values) => data_entries.push(DataEntry {
+                    name: sl.symbol.clone(),
+                    values,
+                }),
+                Err(e) => eprintln!("selcc: {e}: not yet implemented"),
+            }
         }
+    }
+    // Deduplicate data entries (later entry wins — handles tentative then init).
+    {
+        let mut seen = HashSet::new();
+        let mut deduped = Vec::new();
+        for e in data_entries.into_iter().rev() {
+            if seen.insert(e.name.clone()) {
+                deduped.push(e);
+            }
+        }
+        deduped.reverse();
+        data_entries = deduped;
     }
     if !data_entries.is_empty() {
         out.push_str(".SECTION/DM seg_dmda;\n");
@@ -190,12 +233,15 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
     }
 
     // BSS: uninitialized globals and static locals.
+    // Skip names already emitted in the data section (tentative + init).
+    let data_names: HashSet<String> = data_entries.iter().map(|e| e.name.clone()).collect();
     let mut bss_entries: Vec<(String, u32)> = Vec::new();
+    let mut bss_seen: HashSet<String> = HashSet::new();
     for global in &unit.globals {
         if global.is_extern {
             continue;
         }
-        if global.init.is_none() {
+        if global.init.is_none() && !data_names.contains(&global.name) && bss_seen.insert(global.name.clone()) {
             bss_entries.push((global.name.clone(), global.ty.size_bytes()));
         }
     }
@@ -348,7 +394,33 @@ fn eval_const_expr(expr: &Expr) -> Result<i32> {
             };
             Ok(size as i32)
         }
-        Expr::AddrOf(_) | Expr::Ident(_) => Ok(0),
+        Expr::Ternary { cond, then_expr, else_expr } => {
+            let c = eval_const_expr(cond)?;
+            if c != 0 {
+                eval_const_expr(then_expr)
+            } else {
+                eval_const_expr(else_expr)
+            }
+        }
+        Expr::Binary { op: BinaryOp::Eq, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? == eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::Ne, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? != eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::Lt, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? < eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::Gt, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? > eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::Le, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? <= eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::Ge, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? >= eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::AddrOf(_) | Expr::Ident(_) | Expr::StringLit(_) => Ok(0),
         Expr::InitList(items) => {
             if let Some(first) = items.first() {
                 eval_const_expr(first)
@@ -356,7 +428,7 @@ fn eval_const_expr(expr: &Expr) -> Result<i32> {
                 Ok(0)
             }
         }
-        _ => Err(Error::NotImplemented("non-constant initializer".into())),
+        other => Err(Error::NotImplemented(format!("non-constant initializer: {other:?}"))),
     }
 }
 
@@ -474,7 +546,7 @@ fn emit_function_instrs(
     let ir = ir_opt::dead_code_eliminate(&ir);
     let ir = ir_opt::detect_hardware_loops(&ir);
 
-    let isel_result = isel::select(&ir);
+    let isel_result = isel::select_with_name(&ir, &func.name);
 
     let num_params = func.params.len().min(target::ARG_REGS.len()) as u8;
     let (allocated, _spill_count, alloc_map) =
@@ -540,26 +612,88 @@ fn emit_function_instrs(
     instrs.extend(epilogue);
     instrs.extend(body_tail);
 
-    // Place call-return labels by scanning the final instruction list
-    // for ImmStore instructions with `.L_ret_*` relocations (the
-    // CJUMP delay-slot 2 that pushes the return address). The return
-    // label goes at the instruction immediately following the ImmStore
-    // — i.e. the first instruction the CPU executes after returning
-    // from the callee.
+    // After each call returns, RFRAME sets I7 = I6 (the restored frame
+    // pointer). Subsequent CJUMPs would push their delay-slot words at
+    // DM(I6) and DM(I6-1), overwriting the caller's frame link and
+    // return address. Restore I7 to its allocated frame position after
+    // every call so the next CJUMP pushes below the frame.
+    //
+    // Target: I7 = I6 - 2 - frame_size (the 2 accounts for the frame
+    // link and return address pushed by the caller's CJUMP delay slots).
+    let i7_restore_offset = -(frame_size as i32) - FRAME_SKIP;
+    let has_calls = instrs.iter().any(|mi| matches!(mi.instr, Instruction::CJump { .. }));
+    let needs_i7_restore = has_calls && frame_size > 0;
+
+    // Scan for CJUMP delay-slot-2 (ImmStore with .L_ret_* relocation)
+    // and place both the return label and the I7 restore instruction
+    // right after. Build a new vector with the insertions.
+    let mut final_instrs = Vec::with_capacity(instrs.len() + 16);
+    let mut new_label_insertions: HashMap<usize, String> = HashMap::new();
+
+    // Copy existing label insertions, adjusting indices as we go.
+    // First pass: find all call-return ImmStore positions.
+    let mut insert_after: Vec<usize> = Vec::new();
     for (i, mi) in instrs.iter().enumerate() {
         if let Some(ref reloc) = mi.reloc {
             if reloc.symbol.starts_with(".L_ret_")
                 && matches!(mi.instr, Instruction::ImmStore { .. })
             {
-                let target_pc = i + 1;
-                label_insertions
-                    .entry(target_pc)
-                    .or_insert_with(|| reloc.symbol.clone());
+                insert_after.push(i);
             }
         }
     }
 
-    Ok(FnEmitResult { instrs, strings, wide_strings, static_locals, label_insertions })
+    // Second pass: build final_instrs with I7 restores inserted.
+    let mut offset = 0usize; // tracks how many extra instructions inserted so far
+    for (i, mi) in instrs.into_iter().enumerate() {
+        final_instrs.push(mi);
+        // Check if any existing label_insertions point at the original index
+        let new_idx = i + offset;
+        if let Some(label) = label_insertions.remove(&i) {
+            new_label_insertions.insert(new_idx, label);
+        }
+
+        if insert_after.contains(&i) {
+            // The instruction after this ImmStore is the call return point.
+            let ret_idx = new_idx + 1;
+            // Insert return label at ret_idx (the next instruction).
+            if let Some(reloc) = final_instrs.last().and_then(|mi| mi.reloc.as_ref()) {
+                if reloc.symbol.starts_with(".L_ret_") {
+                    new_label_insertions
+                        .entry(ret_idx)
+                        .or_insert_with(|| reloc.symbol.clone());
+                }
+            }
+            // Insert I7 restore if needed.
+            if needs_i7_restore {
+                final_instrs.push(MachInstr {
+                    instr: Instruction::Modify {
+                        i_reg: target::STACK_PTR,
+                        value: i7_restore_offset,
+                        width: selinstr::encode::MemWidth::Normal,
+                        bitrev: false,
+                    },
+                    reloc: None,
+                });
+                offset += 1;
+            }
+        }
+    }
+
+    // Transfer any remaining label insertions with adjusted indices.
+    for (old_idx, label) in label_insertions {
+        let shift = insert_after.iter().filter(|&&pos| pos < old_idx).count();
+        let extra = if needs_i7_restore { shift } else { 0 };
+        new_label_insertions.entry(old_idx + extra).or_insert(label);
+    }
+
+    Ok(FnEmitResult {
+        instrs: final_instrs,
+        strings,
+        wide_strings,
+        static_locals,
+        label_insertions: new_label_insertions,
+    })
 }
 
 /// Detach the 4-instruction SHARC+ C-ABI return sequence from the tail
