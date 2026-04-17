@@ -122,6 +122,50 @@ impl Allocator {
         }
     }
 
+    /// Move live vregs from caller-saved registers (R0-R7) to callee-
+    /// saved registers (R8-R15) before a CJUMP so they survive the call.
+    /// Before a CJump, spill all live vregs in caller-saved registers
+    /// to the stack frame. After the call returns, any subsequent use
+    /// of those vregs will trigger a reload from the spill slot via
+    /// the normal get_phys → emit_reload path.
+    fn spill_caller_saved(&mut self, spill: &mut Vec<MachInstr>) {
+        let to_spill: Vec<(u8, u8)> = self.vreg_to_phys.iter()
+            .filter(|(&vreg, &phys)| {
+                target::CALLER_SAVED.contains(&phys)
+                    && vreg != target::RETURN_REG_VREG
+            })
+            .map(|(&vreg, &phys)| (vreg, phys))
+            .collect();
+
+        for (vreg, phys) in to_spill {
+            // Allocate a spill slot if not already spilled.
+            let slot = *self.spill_map.entry(vreg).or_insert_with(|| {
+                let s = self.spill_slots;
+                self.spill_slots += 1;
+                s
+            });
+            // Store to the spill slot.
+            spill.push(MachInstr {
+                instr: Instruction::ComputeLoadStore {
+                    compute: None,
+                    access: MemAccess {
+                        pm: false,
+                        write: true,
+                        i_reg: target::FRAME_PTR,
+                    },
+                    dreg: phys,
+                    offset: slot as i8,
+                    cond: target::COND_TRUE,
+                },
+                reloc: None,
+            });
+            // Remove from register maps so get_phys will reload.
+            self.phys_to_vreg.remove(&phys);
+            self.vreg_to_phys.remove(&vreg);
+            self.pinned.remove(&phys);
+        }
+    }
+
     /// Release all transient pins taken during the current rewrite.
     fn clear_transient_pins(&mut self) {
         for p in self.transient_pins.drain(..) {
@@ -356,6 +400,14 @@ impl Allocator {
                 Instruction::URegMove { dest: new_dest, src: new_src }
             }
 
+            Instruction::CJump { .. } => {
+                // A call clobbers all caller-saved registers (R0-R7).
+                // Spill any live vregs in those registers to the stack
+                // so they can be reloaded after the call returns.
+                self.spill_caller_saved(&mut spill_pre);
+                mi.instr
+            }
+
             Instruction::Nop
             | Instruction::Idle
             | Instruction::Rframe
@@ -367,7 +419,6 @@ impl Allocator {
             | Instruction::IndirectBranch { .. }
             | Instruction::BitOp { .. }
             | Instruction::StackOp { .. }
-            | Instruction::CJump { .. }
             | Instruction::UregDagMove { .. }
             | Instruction::DagModify { .. }
             | Instruction::RegisterSwap { .. }
