@@ -365,9 +365,10 @@ impl<'a> Parser<'a> {
             {
                 self.advance()?;
                 // Record struct/union definition in struct_defs.
+                // Skip forward declarations (empty fields).
                 match &ty {
                     Type::Struct { name: Some(n), fields } |
-                    Type::Union { name: Some(n), fields } => {
+                    Type::Union { name: Some(n), fields } if !fields.is_empty() => {
                         struct_defs.push((n.clone(), fields.clone()));
                     }
                     _ => {}

@@ -85,7 +85,7 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
         ) {
             Ok(fr) => fr,
             Err(e) => {
-                eprintln!("selcc: {e}: not yet implemented");
+                eprintln!("selcc: {}: {e}", func.name);
                 skipped_functions.push(func.name.clone());
                 continue;
             }
@@ -188,7 +188,7 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
                     values,
                 }),
                 Err(e) => {
-                    eprintln!("selcc: {e}: not yet implemented");
+                    eprintln!("selcc: {}: {e}", global.name);
                     // Fall back to zero-init so the symbol is still defined.
                     let words = global.ty.size_bytes().div_ceil(4).max(1);
                     data_entries.push(DataEntry {
@@ -419,6 +419,19 @@ fn eval_const_expr(expr: &Expr) -> Result<i32> {
         }
         Expr::Binary { op: BinaryOp::Ge, lhs, rhs } => {
             Ok(if eval_const_expr(lhs)? >= eval_const_expr(rhs)? { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::BitXor, lhs, rhs } => {
+            Ok(eval_const_expr(lhs)? ^ eval_const_expr(rhs)?)
+        }
+        Expr::Binary { op: BinaryOp::LogAnd, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? != 0 && eval_const_expr(rhs)? != 0 { 1 } else { 0 })
+        }
+        Expr::Binary { op: BinaryOp::LogOr, lhs, rhs } => {
+            Ok(if eval_const_expr(lhs)? != 0 || eval_const_expr(rhs)? != 0 { 1 } else { 0 })
+        }
+        Expr::Unary { op: UnaryOp::BitNot, operand } => Ok(!eval_const_expr(operand)?),
+        Expr::Unary { op: UnaryOp::LogNot, operand } => {
+            Ok(if eval_const_expr(operand)? == 0 { 1 } else { 0 })
         }
         Expr::AddrOf(_) | Expr::Ident(_) | Expr::StringLit(_) => Ok(0),
         Expr::InitList(items) => {

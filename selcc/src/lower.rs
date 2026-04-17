@@ -908,8 +908,13 @@ fn collect_local_struct_defs(stmts: &[Stmt], defs: &mut Vec<(String, Vec<(String
 fn collect_type_defs(ty: &Type, defs: &mut Vec<(String, Vec<(String, Type)>)>) {
     match ty {
         Type::Struct { name: Some(n), fields } | Type::Union { name: Some(n), fields } => {
-            if !fields.is_empty() && !defs.iter().any(|(dn, _)| dn == n) {
-                defs.push((n.clone(), fields.clone()));
+            if !fields.is_empty() {
+                // Replace any existing entry (local shadows file-scope).
+                if let Some(pos) = defs.iter().position(|(dn, _)| dn == n) {
+                    defs[pos].1 = fields.clone();
+                } else {
+                    defs.push((n.clone(), fields.clone()));
+                }
             }
             for (_, fty) in fields {
                 collect_type_defs(fty, defs);
@@ -930,7 +935,7 @@ fn resolve_struct_fields<'a>(ty: &'a Type, ctx: &'a LowerCtx) -> Option<&'a [(St
                 // Named struct/union reference with no inline fields — look up in defs.
                 if let Some(sname) = name {
                     for (def_name, def_fields) in &ctx.struct_defs {
-                        if def_name == sname {
+                        if def_name == sname && !def_fields.is_empty() {
                             return Some(def_fields.as_slice());
                         }
                     }
@@ -1591,10 +1596,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                                 LocalStorage::Stack(offset) => {
                                     ctx.emit(IrOp::Store64(val, 0, offset as i32));
                                 }
-                                LocalStorage::Reg(_) => {
-                                    return Err(Error::NotImplemented(format!(
-                                        "assignment to register-allocated 64-bit variable: {name}"
-                                    )));
+                                LocalStorage::Reg(vreg) => {
+                                    ctx.emit(IrOp::Copy(vreg, val));
+                                    ctx.emit(IrOp::Copy(vreg + 1, val + 1));
                                 }
                                 LocalStorage::Static(ref sym) => {
                                     ctx.emit(IrOp::WriteGlobal64(val, sym.clone()));
@@ -1627,10 +1631,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             LocalStorage::Stack(offset) => {
                                 ctx.emit(IrOp::Store(val, 0, offset as i32));
                             }
-                            LocalStorage::Reg(_) => {
-                                return Err(Error::NotImplemented(format!(
-                                    "assignment to register-allocated variable: {name}"
-                                )));
+                            LocalStorage::Reg(vreg) => {
+                                ctx.emit(IrOp::Copy(vreg, val));
                             }
                             LocalStorage::Static(ref sym) => {
                                 ctx.emit(IrOp::StoreGlobal(val, sym.clone()));
@@ -1660,9 +1662,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::Store(val, addr, 0));
                 }
                 _ => {
-                    return Err(Error::NotImplemented(
-                        "assignment to non-identifier target".into(),
-                    ));
+                    let addr = lower_lvalue_addr(ctx, target)?;
+                    ctx.emit(IrOp::Store(val, addr, 0));
                 }
             }
             Ok(val)
@@ -2070,6 +2071,22 @@ fn lower_complex_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr
             ctx.emit(IrOp::FDiv(imag, num_imag, denom));
             Ok(ComplexPair { real, imag })
         }
+        BinaryOp::Eq | BinaryOp::Ne => {
+            // Complex equality: (a+bi) == (c+di) iff a==c && b==d
+            let real_eq = lower_float_comparison(ctx, BinaryOp::Eq, l.real, r.real)?;
+            let imag_eq = lower_float_comparison(ctx, BinaryOp::Eq, l.imag, r.imag)?;
+            let both = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitAnd(both, real_eq, imag_eq));
+            if op == BinaryOp::Ne {
+                let one = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(one, 1));
+                let neg = ctx.alloc_vreg();
+                ctx.emit(IrOp::BitXor(neg, both, one));
+                Ok(ComplexPair { real: neg, imag: neg })
+            } else {
+                Ok(ComplexPair { real: both, imag: both })
+            }
+        }
         _ => Err(Error::NotImplemented(format!(
             "complex binary op: {op:?}"
         ))),
@@ -2127,9 +2144,35 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
             BinaryOp::Sub => ctx.emit(IrOp::FSub(dst, l, r)),
             BinaryOp::Mul => ctx.emit(IrOp::FMul(dst, l, r)),
             BinaryOp::Div => ctx.emit(IrOp::FDiv(dst, l, r)),
+            BinaryOp::Mod => {
+                // fmod: a % b = a - b * trunc(a / b)
+                let quot = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::FDiv(quot, l, r));
+                let trunc = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::FloatToInt(trunc, quot));
+                let trunc_f = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::IntToFloat(trunc_f, trunc));
+                let prod = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::FMul(prod, r, trunc_f));
+                ctx.emit(IrOp::FSub(dst, l, prod));
+            }
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt
             | BinaryOp::Le | BinaryOp::Ge => {
                 return lower_float_comparison(ctx, op, l, r);
+            }
+            BinaryOp::LogAnd | BinaryOp::LogOr => {
+                // Logical ops on floats: compare each with 0.0
+                let zero = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::LoadImm(zero, 0));
+                let l_bool = lower_float_comparison(ctx, BinaryOp::Ne, l, zero)?;
+                let r_bool = lower_float_comparison(ctx, BinaryOp::Ne, r, zero)?;
+                let int_dst = ctx.alloc_vreg();
+                if op == BinaryOp::LogAnd {
+                    ctx.emit(IrOp::BitAnd(int_dst, l_bool, r_bool));
+                } else {
+                    ctx.emit(IrOp::BitOr(int_dst, l_bool, r_bool));
+                }
+                return Ok(int_dst);
             }
             _ => {
                 return Err(Error::NotImplemented(format!(
@@ -2744,10 +2787,8 @@ fn lower_compound_assign(
                     LocalStorage::Stack(offset) => {
                         ctx.emit(IrOp::Store(result, 0, offset as i32));
                     }
-                    LocalStorage::Reg(_) => {
-                        return Err(Error::NotImplemented(
-                            "compound assignment to register-allocated variable".into(),
-                        ));
+                    LocalStorage::Reg(vreg) => {
+                        ctx.emit(IrOp::Copy(vreg, result));
                     }
                     LocalStorage::Static(ref sym) => {
                         ctx.emit(IrOp::StoreGlobal(result, sym.clone()));
@@ -2775,9 +2816,15 @@ fn lower_compound_assign(
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
         }
-        _ => Err(Error::NotImplemented(
-            "compound assignment to complex target".into(),
-        )),
+        _ => {
+            let addr = lower_lvalue_addr(ctx, target)?;
+            let lhs = ctx.alloc_vreg();
+            ctx.emit(IrOp::Load(lhs, addr, 0));
+            let rhs_val = lower_expr(ctx, value)?;
+            let result = emit_compound_op(ctx, op, lhs, rhs_val)?;
+            ctx.emit(IrOp::Store(result, addr, 0));
+            Ok(result)
+        }
     }
 }
 
