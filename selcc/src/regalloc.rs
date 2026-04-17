@@ -144,7 +144,9 @@ impl Allocator {
                 self.spill_slots += 1;
                 s
             });
-            // Store to the spill slot.
+            // Store to the spill slot. Use negative offsets from I6
+            // so adjust_frame_offsets places them in the local frame
+            // region below the callee-saved saves.
             spill.push(MachInstr {
                 instr: Instruction::ComputeLoadStore {
                     compute: None,
@@ -154,7 +156,7 @@ impl Allocator {
                         i_reg: target::FRAME_PTR,
                     },
                     dreg: phys,
-                    offset: slot as i8,
+                    offset: -(slot as i8) - 1,
                     cond: target::COND_TRUE,
                 },
                 reloc: None,
@@ -186,7 +188,7 @@ impl Allocator {
                         i_reg: target::FRAME_PTR,
                     },
                     dreg: phys,
-                    offset: slot as i8,
+                    offset: -(slot as i8) - 1,
                     cond: target::COND_TRUE,
                 },
                 reloc: None,
