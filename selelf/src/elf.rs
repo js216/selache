@@ -107,6 +107,12 @@ pub const R_SHARC_PM32_SUB: u32 = 0xe1;
 /// internal `.__operator` placeholder. Applying it is a no-op, but the
 /// reloc must be decoded rather than rejected so that the containing
 /// group links cleanly. `r_offset` counts 16-bit words.
+/// Expression-add marker: the second operand of a two-symbol
+/// addition expression. The first operand was deposited by a
+/// preceding `R_SHARC_PM_SW_BRANCHRETURN`; this relocation adds
+/// its target value to the already-written field. Symbol is
+/// typically the second LDF expression operand.
+pub const R_SHARC_PM_EXPR_ADD: u32 = 0xe2;
 pub const R_SHARC_PM_EXPR_MARKER: u32 = 0xe3;
 pub const R_SHARC_DATA6: u32 = 0x11;
 pub const R_SHARC_DATA7: u32 = 0x12;

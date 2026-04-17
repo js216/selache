@@ -5,8 +5,9 @@
 use selelf::elf::{
     self, Elf32Rela, R_SHARC_ADDR32, R_SHARC_ADDR_VAR, R_SHARC_DATA16, R_SHARC_DATA32,
     R_SHARC_DATA6, R_SHARC_DATA7, R_SHARC_DM_ADDR32, R_SHARC_NONE, R_SHARC_PCREL, R_SHARC_PM24,
-    R_SHARC_PM32, R_SHARC_PM32_SUB, R_SHARC_PM_EXPR_MARKER, R_SHARC_PM_LOOP16, R_SHARC_PM_PCREL6,
-    R_SHARC_PM_PCREL24, R_SHARC_PM_SW_BRANCHRETURN, SHN_UNDEF, SHT_RELA,
+    R_SHARC_PM32, R_SHARC_PM32_SUB, R_SHARC_PM_EXPR_ADD, R_SHARC_PM_EXPR_MARKER,
+    R_SHARC_PM_LOOP16, R_SHARC_PM_PCREL6, R_SHARC_PM_PCREL24, R_SHARC_PM_SW_BRANCHRETURN,
+    SHN_UNDEF, SHT_RELA,
 };
 
 use crate::error::{Error, Result};
@@ -26,6 +27,7 @@ use crate::resolve::{InputObject, SymbolTable};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelocEffect {
     Write,
+    Add,
     Subtract,
     Noop,
 }
@@ -82,7 +84,12 @@ fn compute_reloc_value(
         // slot of a 48-bit PM instruction. The difference between
         // the two is which expression the source symbol is part of,
         // not how the value gets laid out in the instruction.
-        R_SHARC_PM32 | R_SHARC_PM_SW_BRANCHRETURN => Ok((target, RelocEffect::Write)),
+        R_SHARC_PM32 => Ok((target, RelocEffect::Write)),
+        // Expression operand: ADD to the field rather than overwrite.
+        // The field starts at zero (from encoding), so the first 0xe0
+        // effectively writes; a second 0xe0 in the same expression
+        // group accumulates (e.g. ldf_stack_space + ldf_stack_length).
+        R_SHARC_PM_SW_BRANCHRETURN => Ok((target, RelocEffect::Add)),
         // PC-relative 24-bit PM branch: the delta is `target - pc`
         // where both sides are in 16-bit PM word units. The result
         // is masked to 24 bits and, because the field is signed,
@@ -135,6 +142,10 @@ fn compute_reloc_value(
         // `.__operator`, which was already handled at the top of
         // this function; reaching this arm means the relocation
         // escaped the placeholder check and something is off.
+        // Expression-add: add the target value to the already-written
+        // field. Part of a two-symbol addition expression group where
+        // the first operand was written by R_SHARC_PM_SW_BRANCHRETURN.
+        R_SHARC_PM_EXPR_ADD => Ok((target, RelocEffect::Add)),
         R_SHARC_PM_EXPR_MARKER => Err(Error::Relocation(format!(
             "R_SHARC_PM_EXPR_MARKER at offset 0x{:x} in `{}` references `{}`, expected `{}`",
             rela.r_offset, section_name, sym_name, SYM_OPERATOR
@@ -164,6 +175,14 @@ fn compute_reloc_value(
 /// an internal invariant violation.
 fn patch_reloc(data: &mut [u8], offset: usize, rela_type: u32, value: u32, effect: RelocEffect) {
     if effect == RelocEffect::Noop {
+        return;
+    }
+    if effect == RelocEffect::Add {
+        // Expression-add: read back the big-endian 32-bit field at
+        // bytes 2..5, add the new value, and write it back. This
+        // composes with the base value already written by an earlier
+        // R_SHARC_PM_SW_BRANCHRETURN in the same expression group.
+        patch_pm32_add(data, offset, value);
         return;
     }
     if effect == RelocEffect::Subtract {
@@ -198,7 +217,7 @@ fn patch_reloc(data: &mut [u8], offset: usize, rela_type: u32, value: u32, effec
             }
         }
         R_SHARC_PM24 => patch_pm24(data, offset, value),
-        R_SHARC_PM32 | R_SHARC_PM_SW_BRANCHRETURN => patch_pm32(data, offset, value),
+        R_SHARC_PM32 => patch_pm32(data, offset, value),
         R_SHARC_PM_PCREL24 => patch_pm_pcrel24(data, offset, value),
         R_SHARC_PM_LOOP16 => patch_pm_loop16(data, offset, value),
         R_SHARC_PM_PCREL6 => patch_pm_pcrel6(data, offset, value),
@@ -231,6 +250,25 @@ fn patch_pm32(data: &mut [u8], offset: usize, value: u32) {
 /// arithmetic, and written back the same way. Used only by the
 /// `R_SHARC_PM32_SUB` expression reloc; the value being subtracted
 /// was supplied in the reloc's addend.
+/// Add a 32-bit value to the big-endian 32-bit immediate at bytes 2..5
+/// of a 48-bit program-memory instruction. Used by `R_SHARC_PM_EXPR_ADD`
+/// to compose the second operand of an addition expression with the base
+/// value already written by `R_SHARC_PM_SW_BRANCHRETURN`.
+fn patch_pm32_add(data: &mut [u8], offset: usize, value: u32) {
+    if offset + 6 > data.len() {
+        return;
+    }
+    let current = ((data[offset + 2] as u32) << 24)
+        | ((data[offset + 3] as u32) << 16)
+        | ((data[offset + 4] as u32) << 8)
+        | (data[offset + 5] as u32);
+    let updated = current.wrapping_add(value);
+    data[offset + 2] = ((updated >> 24) & 0xff) as u8;
+    data[offset + 3] = ((updated >> 16) & 0xff) as u8;
+    data[offset + 4] = ((updated >> 8) & 0xff) as u8;
+    data[offset + 5] = (updated & 0xff) as u8;
+}
+
 fn patch_pm32_subtract(data: &mut [u8], offset: usize, value: u32) {
     if offset + 6 > data.len() {
         return;
@@ -854,7 +892,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(val, 0x001c_0a0f);
-        assert_eq!(effect, RelocEffect::Write);
+        assert_eq!(effect, RelocEffect::Add);
     }
 
     #[test]
