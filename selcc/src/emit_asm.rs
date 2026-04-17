@@ -480,16 +480,6 @@ fn emit_function_instrs(
     let (allocated, _spill_count, alloc_map) =
         regalloc::allocate(&isel_result.instrs, num_params);
 
-    // Detect non-leaf functions: any CJump or indirect CALL means this
-    // function calls another and must save/restore I12 (the return
-    // address) in its prologue/return-sequence because the inner call's
-    // delay-slot pushes clobber the DM(M7,I6) slot the leaf return
-    // sequence reads.
-    let is_non_leaf = allocated.iter().any(|mi| {
-        matches!(mi.instr, Instruction::CJump { .. })
-            || matches!(mi.instr, Instruction::IndirectBranch { call: true, .. })
-    });
-
     let used_callee_saved = callee_saved_used(&allocated);
     let num_saved = used_callee_saved.len() as i8;
 
@@ -517,41 +507,15 @@ fn emit_function_instrs(
 
     let body_depth = count_local_slots(&optimized);
     let frame_size = body_depth.max(used_callee_saved.len() as u32);
-    let mut prologue = build_prologue(frame_size, &used_callee_saved);
+    let prologue = build_prologue(frame_size, &used_callee_saved);
     let epilogue = build_epilogue(frame_size, &used_callee_saved);
 
-    // Non-leaf prologue: save the return address from DM(M7,I6) into
-    // frame slot -2 so it survives inner calls. The leaf return
-    // sequence reads I12 = DM(M7,I6); in a non-leaf function we
-    // replace that with I12 = DM(-2,I6) via UregMemAccess (below).
-    if is_non_leaf {
-        // I12 = DM(M7, I6) -- read caller's return address.
-        prologue.push(MachInstr {
-            instr: Instruction::UregDagMove {
-                pm: false,
-                write: false,
-                ureg: 0x1C, // I12
-                i_reg: target::FRAME_PTR,
-                m_reg: 7,
-                cond: target::COND_TRUE,
-                compute: None,
-                post_modify: false,
-            },
-            reloc: None,
-        });
-        // DM(-2, I6) = I12 -- save to frame slot -2.
-        prologue.push(MachInstr {
-            instr: Instruction::UregMemAccess {
-                pm: false,
-                i_reg: target::FRAME_PTR,
-                write: true,
-                lw: false,
-                ureg: 0x1C, // I12
-                offset: -2,
-            },
-            reloc: None,
-        });
-    }
+    // Non-leaf functions do NOT need to save I12 in the prologue.
+    // The SHARC+ C-ABI reads I12 = DM(M7, I6) right before each
+    // return. After RFRAME restores I6 to the current frame, the
+    // slot at DM(M7, I6) still contains the correct return address
+    // — even after recursive calls, because each call pushes its
+    // own return address to a deeper stack position.
 
     let prologue_len = prologue.len();
     let (resolved, mut label_insertions) =
@@ -565,32 +529,6 @@ fn emit_function_instrs(
     // that sequence, otherwise the delayed indirect JUMP transfers
     // control first and the restores are dead code. Split the body at
     // the trailing return sequence and splice the epilogue between.
-    // Non-leaf return: replace every `I12 = DM(M7, I6)` in the body
-    // (including early-return sequences) with `I12 = DM(-2, I6)` so
-    // each return reads the saved copy instead of the clobbered slot.
-    let resolved = if is_non_leaf {
-        resolved.into_iter().map(|mi| {
-            if matches!(mi.instr, Instruction::UregDagMove {
-                pm: false, write: false, ureg: 0x1C, i_reg: 6, m_reg: 7, ..
-            }) {
-                MachInstr {
-                    instr: Instruction::UregMemAccess {
-                        pm: false,
-                        i_reg: target::FRAME_PTR,
-                        write: false,
-                        lw: false,
-                        ureg: 0x1C,
-                        offset: -2,
-                    },
-                    reloc: None,
-                }
-            } else {
-                mi
-            }
-        }).collect()
-    } else {
-        resolved
-    };
 
     let (body_head, body_tail) = split_trailing_return_sequence(resolved);
 
@@ -626,9 +564,7 @@ fn emit_function_instrs(
 
 /// Detach the 4-instruction SHARC+ C-ABI return sequence from the tail
 /// of the body so the epilogue can be spliced in front of it. The
-/// sequence is `I12 = DM(...,I6)` + `JUMP (M14,I12) (DB)` + RFRAME + NOP.
-/// The I12 load is either `DM(M7,I6)` (leaf, UregDagMove) or
-/// `DM(-2,I6)` (non-leaf, UregMemAccess). Both forms are accepted.
+/// sequence is `I12 = DM(M7,I6)` + `JUMP (M14,I12) (DB)` + RFRAME + NOP.
 fn split_trailing_return_sequence(
     mut body: Vec<MachInstr>,
 ) -> (Vec<MachInstr>, Vec<MachInstr>) {
@@ -636,7 +572,7 @@ fn split_trailing_return_sequence(
     if n < 4 {
         return (body, Vec::new());
     }
-    let i12_load = matches!(
+    let matches = matches!(
         body[n - 4].instr,
         Instruction::UregDagMove {
             pm: false,
@@ -646,17 +582,7 @@ fn split_trailing_return_sequence(
             m_reg: 7,
             ..
         },
-    ) || matches!(
-        body[n - 4].instr,
-        Instruction::UregMemAccess {
-            pm: false,
-            write: false,
-            ureg: 0x1C,
-            i_reg: 6,
-            ..
-        },
-    );
-    let matches = i12_load && matches!(
+    ) && matches!(
         body[n - 3].instr,
         Instruction::IndirectBranch {
             call: false,
