@@ -599,8 +599,11 @@ fn process_directives(
             );
             let (var_name, init_val) = parse_var_body(raw_body);
             let sec = &mut sections[idx].1;
-            let word_off = sec.word_offset();
-            sec.symbols.push((var_name, word_off));
+            // DM data sections use byte offsets in symbol values so
+            // the linker (which treats BW sections as byte-addressed)
+            // places each variable at the correct byte boundary.
+            let byte_off = sec.code.len() as u32;
+            sec.symbols.push((var_name, byte_off));
 
             if let Some(val) = init_val {
                 sec.code.extend_from_slice(&val.to_le_bytes());
