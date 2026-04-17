@@ -578,58 +578,35 @@ pub fn select(ir: &[IrOp]) -> IselResult {
             }
 
             IrOp::StoreGlobal(val, name) => {
-                // Store to a global: load the absolute address into I4
-                // via LoadImm (with a symbol relocation), then use a
-                // Type 15 UregMemAccess to write through I4 with zero
-                // offset. This avoids UregTransfer (R->I latency fault)
-                // and matches the standard SHARC+ code generation pattern.
+                // Type 14 absolute DM store: DM(addr) = Rn.
+                // selas resolves the symbol and emits a relocation.
                 instrs.push(MachInstr {
-                    instr: Instruction::LoadImm {
-                        ureg: target::ureg_i(target::SCRATCH_I),
-                        value: 0,
+                    instr: Instruction::UregAbsAccess {
+                        pm: false,
+                        write: true,
+                        ureg: *val as u8,
+                        addr: 0,
                     },
                     reloc: Some(Reloc {
                         symbol: name.clone(),
                         kind: RelocKind::Addr24,
                     }),
-                });
-                instrs.push(MachInstr {
-                    instr: Instruction::UregMemAccess {
-                        pm: false,
-                        i_reg: target::SCRATCH_I,
-                        write: true,
-                        lw: false,
-                        ureg: target::ureg_r(*val as u8),
-                        offset: 0,
-                    },
-                    reloc: None,
                 });
             }
 
             IrOp::ReadGlobal(dst, name) => {
-                // Read a 32-bit scalar value from a global symbol.
-                // LoadImm loads the absolute address into I4, then a
-                // Type 15 UregMemAccess reads through I4 at offset 0.
+                // Type 14 absolute DM read: Rn = DM(addr).
                 instrs.push(MachInstr {
-                    instr: Instruction::LoadImm {
-                        ureg: target::ureg_i(target::SCRATCH_I),
-                        value: 0,
+                    instr: Instruction::UregAbsAccess {
+                        pm: false,
+                        write: false,
+                        ureg: *dst as u8,
+                        addr: 0,
                     },
                     reloc: Some(Reloc {
                         symbol: name.clone(),
                         kind: RelocKind::Addr24,
                     }),
-                });
-                instrs.push(MachInstr {
-                    instr: Instruction::UregMemAccess {
-                        pm: false,
-                        i_reg: target::SCRATCH_I,
-                        write: false,
-                        lw: false,
-                        ureg: target::ureg_r(*dst as u8),
-                        offset: 0,
-                    },
-                    reloc: None,
                 });
             }
 

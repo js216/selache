@@ -1406,7 +1406,7 @@ mod tests {
     #[test]
     fn global_address_load_uses_symbol_text() {
         let m = compile("int counter;\nint get() { return counter; }");
-        assert!(m.text.contains("= counter."), "got:\n{}", m.text);
+        assert!(m.text.contains("counter."), "got:\n{}", m.text);
     }
 
     #[test]

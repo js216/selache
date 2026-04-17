@@ -372,9 +372,21 @@ impl Allocator {
             | Instruction::DagModify { .. }
             | Instruction::RegisterSwap { .. }
             | Instruction::ImmShift { .. }
-            | Instruction::UregAbsAccess { .. }
             | Instruction::ImmStore { .. }
             | Instruction::DoUntil { .. } => mi.instr,
+
+            Instruction::UregAbsAccess { pm, write, ureg, addr } => {
+                if ureg < 0x10 {
+                    let phys = self.get_phys(ureg, &mut spill_pre);
+                    Instruction::UregAbsAccess {
+                        pm, write,
+                        ureg: target::ureg_r(phys),
+                        addr,
+                    }
+                } else {
+                    mi.instr
+                }
+            }
 
             Instruction::UregMemAccess { pm, i_reg, write, lw, ureg, offset } => {
                 // The ureg field carries a raw vreg from isel. Map it

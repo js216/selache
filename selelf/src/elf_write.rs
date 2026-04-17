@@ -429,6 +429,9 @@ impl ElfWriter {
             let sec = &self.sections[(sec_idx - 1) as usize];
             rela_name_offs.push(shstrtab.len() as u32);
             shstrtab.extend_from_slice(b".rela");
+            if !sec.name.starts_with('.') {
+                shstrtab.push(b'.');
+            }
             shstrtab.extend_from_slice(sec.name.as_bytes());
             shstrtab.push(0);
         }

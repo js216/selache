@@ -497,8 +497,8 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
     if upper.contains("DM(") || upper.contains("PM(")
         || upper.contains("DM (") || upper.contains("PM (")
     {
-        let instr = parse_mem_access(&upper, line)?;
-        return Ok((instr, None));
+        let (instr, sym) = parse_mem_access(&upper, line)?;
+        return Ok((instr, sym));
     }
 
     // Compound: "compute , MODIFY(Ii, Mm)"
@@ -1065,7 +1065,7 @@ fn parse_conditional_mem(text: &str, cond: u8, line: u32) -> Result<Instruction>
     // Handle "IF cond [compute ,] mem_op" where mem_op is a DM/PM access
     // The text here is everything after "IF cond "
     // Try to parse the whole thing as a memory instruction, then set the cond
-    let instr = parse_mem_access(text, line)?;
+    let (instr, _sym) = parse_mem_access(text, line)?;
     // Override the condition code
     match instr {
         Instruction::ComputeLoadStore {
@@ -1597,19 +1597,19 @@ fn parse_modify_assign_inner(text: &str, line: u32) -> Result<Instruction> {
 // Memory access
 // ---------------------------------------------------------------------------
 
-fn parse_mem_access(text: &str, line: u32) -> Result<Instruction> {
+fn parse_mem_access(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
     // Extract memory width modifier before stripping
     let (text, width_mod) = extract_width_modifier(text);
     let is_lw = width_mod == Some("(LW)");
 
     // Check for dual DM+PM move without compute
     if let Some(dual) = try_parse_dual_move("", text, line)? {
-        return Ok(dual);
+        return Ok((dual, None));
     }
 
     // Handle possible compound instructions: "compute , mem_op"
     if let Some(compound) = try_parse_compound_mem(text, line)? {
-        return Ok(compound);
+        return Ok((compound, None));
     }
 
     // Split on the first '=' that is outside parentheses
@@ -1631,9 +1631,9 @@ fn parse_mem_access(text: &str, line: u32) -> Result<Instruction> {
         let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
         if parts.len() == 1 {
             // Single operand: absolute address (Type 14)
-            let addr = resolve_abs_addr(parts[0], line);
+            let (addr, sym) = resolve_abs_addr(parts[0], line);
             let ureg = parse_ureg_or_dreg(rhs, line)?;
-            return Ok(Instruction::UregAbsAccess { pm, write: true, ureg, addr });
+            return Ok((Instruction::UregAbsAccess { pm, write: true, ureg, addr }, sym));
         }
         if parts.len() != 2 {
             return Err(Error::Parse {
@@ -1641,16 +1641,16 @@ fn parse_mem_access(text: &str, line: u32) -> Result<Instruction> {
                 msg: format!("expected two operands in memory expression: {inner}"),
             });
         }
-        parse_mem_store(pm, parts[0], parts[1], rhs, is_lw, line)
+        parse_mem_store(pm, parts[0], parts[1], rhs, is_lw, line).map(|i| (i, None))
     } else if rhs_has_mem {
         // Load: Rn = DM(Ii, x) or ureg=DM (Ii,Mm) or ureg=DM(abs_addr)
         let (pm, inner) = extract_mem_inner(rhs, line)?;
         let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
         if parts.len() == 1 {
             // Single operand: absolute address (Type 14)
-            let addr = resolve_abs_addr(parts[0], line);
+            let (addr, sym) = resolve_abs_addr(parts[0], line);
             let ureg = parse_ureg_or_dreg(lhs, line)?;
-            return Ok(Instruction::UregAbsAccess { pm, write: false, ureg, addr });
+            return Ok((Instruction::UregAbsAccess { pm, write: false, ureg, addr }, sym));
         }
         if parts.len() != 2 {
             return Err(Error::Parse {
@@ -1658,7 +1658,7 @@ fn parse_mem_access(text: &str, line: u32) -> Result<Instruction> {
                 msg: format!("expected two operands in memory expression: {inner}"),
             });
         }
-        parse_mem_load(pm, lhs, parts[0], parts[1], is_lw, line)
+        parse_mem_load(pm, lhs, parts[0], parts[1], is_lw, line).map(|i| (i, None))
     } else {
         Err(Error::Parse {
             line,
@@ -3869,16 +3869,19 @@ fn parse_clip(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp>
 // ---------------------------------------------------------------------------
 
 /// Resolve an absolute address: parse as number, eval as constant expression,
-/// or treat as unresolved symbol (placeholder 0 with warning).
-fn resolve_abs_addr(text: &str, line: u32) -> u32 {
+/// or treat as a symbolic reference (placeholder 0 with the symbol name
+/// for relocation). Returns (value, optional_symbol_name).
+fn resolve_abs_addr(text: &str, _line: u32) -> (u32, Option<String>) {
     if let Some(v) = parse_signed_number(text) {
-        return v as u32;
+        return (v as u32, None);
     }
     if let Some(v) = eval_const_expr(text) {
-        return v as u32;
+        return (v as u32, None);
     }
-    eprintln!("warning: line {line}: unresolved symbol \"{text}\", using 0");
-    0
+    // Treat as a forward-referenced symbol. Return 0 as placeholder;
+    // the caller must emit a relocation so the linker patches the
+    // absolute address at link time.
+    (0, Some(text.to_string()))
 }
 
 /// Find the closing ')' that matches the '(' at `open`, respecting nesting.
