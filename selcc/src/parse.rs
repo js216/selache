@@ -870,6 +870,28 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_stmt()?;
                 Ok(Stmt::Label(label, Box::new(inner)))
             }
+            Token::Typedef => {
+                // Local typedef: register the alias in typedef_names
+                // and emit a no-op statement (the alias only affects
+                // subsequent parsing, not code generation).
+                self.advance()?;
+                let ty = self.parse_type()?;
+                let _ty = self.parse_pointer_type(ty);
+                if self.current == Token::LParen && self.is_fnptr_declarator() {
+                    self.advance()?;
+                    self.expect(&Token::Star)?;
+                    let alias = self.expect_ident()?;
+                    self.expect(&Token::RParen)?;
+                    let _params = self.parse_fnptr_params()?;
+                    self.expect(&Token::Semicolon)?;
+                    self.typedef_names.insert(alias);
+                } else {
+                    let alias = self.expect_ident()?;
+                    self.typedef_names.insert(alias);
+                    self.expect(&Token::Semicolon)?;
+                }
+                Ok(Stmt::Block(Vec::new()))
+            }
             Token::Static => {
                 self.advance()?;
                 self.parse_var_decl_static(true)
