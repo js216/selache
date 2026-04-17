@@ -11,6 +11,7 @@ use selelf::elf::{
 
 use crate::error::{Error, Result};
 use crate::layout::PlacedSection;
+use crate::ldf_ast::SectionQualifier;
 use crate::resolve::{InputObject, SymbolTable};
 
 /// Classification of a relocation's effect on the target slot.
@@ -408,7 +409,17 @@ pub fn apply_relocations(
                     }
                 };
 
-                let pc_addr = placed[site_ps_idx].address + rela.r_offset;
+                // The PC address is the relocation site in PM space.
+                // For SW sections: address is BW, r_offset is in
+                // 16-bit parcels; convert (addr + offset*2) / 2.
+                // For PM48 and other sections: address is already in
+                // the native unit and r_offset is in those units.
+                let pc_addr = match placed[site_ps_idx].qualifier {
+                    SectionQualifier::Sw => {
+                        (placed[site_ps_idx].address + rela.r_offset * 2) / 2
+                    }
+                    _ => placed[site_ps_idx].address + rela.r_offset,
+                };
                 let section_name = obj
                     .section_names
                     .get(*target_sec_idx)
@@ -422,7 +433,7 @@ pub fn apply_relocations(
                     &section_name,
                     &obj.path,
                 )?;
-                let offset = reloc_byte_offset(rela_type, rela.r_offset);
+                let offset = reloc_byte_offset(rela_type, rela.r_offset, placed[site_ps_idx].qualifier);
                 patch_reloc(
                     &mut placed[site_ps_idx].data,
                     offset,
@@ -438,6 +449,8 @@ pub fn apply_relocations(
 }
 
 /// Find a symbol's final address given its defining object, section, and value.
+/// Returns the PM-space address for SW code sections (BW addr / 2) so
+/// that PM-family relocations (R_SHARC_PM32, etc.) resolve correctly.
 fn find_symbol_address(
     object_idx: usize,
     section_idx: usize,
@@ -446,7 +459,12 @@ fn find_symbol_address(
 ) -> Option<u32> {
     for ps in placed {
         if ps.object_idx == object_idx && ps.input_section_idx == section_idx {
-            return Some(ps.address + st_value);
+            let bw_addr = ps.address + st_value;
+            let addr = match ps.qualifier {
+                SectionQualifier::Sw => bw_addr / 2,
+                _ => bw_addr,
+            };
+            return Some(addr);
         }
     }
     None
@@ -488,7 +506,7 @@ fn collect_relas(obj: &InputObject) -> Vec<(usize, Vec<Elf32Rela>)> {
 /// program-memory instruction relocation numbers its offsets in
 /// 16-bit word units because PM instructions are addressed in 16-bit
 /// word granularity, so the value is doubled.
-fn reloc_byte_offset(rela_type: u32, r_offset: u32) -> usize {
+fn reloc_byte_offset(rela_type: u32, r_offset: u32, qualifier: SectionQualifier) -> usize {
     match rela_type {
         R_SHARC_PM24
         | R_SHARC_PM32
@@ -497,7 +515,14 @@ fn reloc_byte_offset(rela_type: u32, r_offset: u32) -> usize {
         | R_SHARC_PM_LOOP16
         | R_SHARC_PM_SW_BRANCHRETURN
         | R_SHARC_PM32_SUB
-        | R_SHARC_PM_EXPR_MARKER => (r_offset as usize) * 2,
+        | R_SHARC_PM_EXPR_MARKER => {
+            // SW sections address in 16-bit parcels (byte = parcel*2).
+            // PM 48-bit sections address in instructions (byte = instr*6).
+            match qualifier {
+                SectionQualifier::Pm => (r_offset as usize) * 6,
+                _ => (r_offset as usize) * 2,
+            }
+        }
         _ => r_offset as usize,
     }
 }
@@ -682,8 +707,9 @@ mod tests {
 
     #[test]
     fn reloc_byte_offset_converts_pm24_word_units() {
-        assert_eq!(reloc_byte_offset(R_SHARC_PM24, 9), 18);
-        assert_eq!(reloc_byte_offset(R_SHARC_ADDR32, 9), 9);
+        assert_eq!(reloc_byte_offset(R_SHARC_PM24, 9, SectionQualifier::Sw), 18);
+        assert_eq!(reloc_byte_offset(R_SHARC_PM24, 9, SectionQualifier::Pm), 54);
+        assert_eq!(reloc_byte_offset(R_SHARC_ADDR32, 9, SectionQualifier::Sw), 9);
     }
 
     #[test]
@@ -916,7 +942,7 @@ mod tests {
 
     #[test]
     fn reloc_byte_offset_converts_pm_pcrel6_word_units() {
-        assert_eq!(reloc_byte_offset(R_SHARC_PM_PCREL6, 0x12c), 0x258);
+        assert_eq!(reloc_byte_offset(R_SHARC_PM_PCREL6, 0x12c, SectionQualifier::Sw), 0x258);
     }
 
     #[test]
@@ -947,14 +973,14 @@ mod tests {
         let mut data = vec![0u8; 0x18];
         patch_reloc(
             &mut data,
-            reloc_byte_offset(R_SHARC_DM_ADDR32, 0),
+            reloc_byte_offset(R_SHARC_DM_ADDR32, 0, SectionQualifier::Bw),
             R_SHARC_DM_ADDR32,
             0x0025_8934,
             RelocEffect::Write,
         );
         patch_reloc(
             &mut data,
-            reloc_byte_offset(R_SHARC_DM_ADDR32, 4),
+            reloc_byte_offset(R_SHARC_DM_ADDR32, 4, SectionQualifier::Bw),
             R_SHARC_DM_ADDR32,
             0x0001_76cc,
             RelocEffect::Write,
@@ -972,8 +998,8 @@ mod tests {
         // `r_offset` is a plain byte offset, not a 16-bit-word
         // index. Unlike the PM-instruction relocs, the value must
         // pass through unchanged.
-        assert_eq!(reloc_byte_offset(R_SHARC_DM_ADDR32, 4), 4);
-        assert_eq!(reloc_byte_offset(R_SHARC_DM_ADDR32, 0x10), 0x10);
+        assert_eq!(reloc_byte_offset(R_SHARC_DM_ADDR32, 4, SectionQualifier::Bw), 4);
+        assert_eq!(reloc_byte_offset(R_SHARC_DM_ADDR32, 0x10, SectionQualifier::Bw), 0x10);
     }
 
     #[test]

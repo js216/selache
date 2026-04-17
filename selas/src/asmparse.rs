@@ -1641,7 +1641,7 @@ fn parse_mem_access(text: &str, line: u32) -> Result<(Instruction, Option<String
                 msg: format!("expected two operands in memory expression: {inner}"),
             });
         }
-        parse_mem_store(pm, parts[0], parts[1], rhs, is_lw, line).map(|i| (i, None))
+        parse_mem_store(pm, parts[0], parts[1], rhs, is_lw, line)
     } else if rhs_has_mem {
         // Load: Rn = DM(Ii, x) or ureg=DM (Ii,Mm) or ureg=DM(abs_addr)
         let (pm, inner) = extract_mem_inner(rhs, line)?;
@@ -1715,14 +1715,8 @@ fn parse_mem_store(
     rhs: &str,
     is_lw: bool,
     line: u32,
-) -> Result<Instruction> {
-    // Type 16: DM|PM(Ii, Mm) = imm32 — immediate data store (both operands
-    // are I+M registers and the RHS is a numeric literal, not a register name).
-    // Must check before try_build_dag_move, which would error on numeric rhs.
-    // The outer `pm` flag (from whether the source wrote "DM(" or "PM(")
-    // picks DAG1 vs DAG2; the I/M field is the 0-7 index within that DAG,
-    // so PM-addressed registers I8-I15 / M8-M15 are stored as 0-7 after
-    // subtracting 8.
+) -> Result<(Instruction, Option<String>)> {
+    // Type 16: DM|PM(Ii, Mm) = imm32 or symbolic label
     if op1.starts_with('I') && op2.starts_with('M')
         || op1.starts_with('M') && op2.starts_with('I')
     {
@@ -1733,33 +1727,32 @@ fn parse_mem_store(
             let m_raw = parse_reg_index(m_str, 'M', line)?;
             let i_reg = if pm { i_raw.wrapping_sub(8) } else { i_raw };
             let m_reg = if pm { m_raw.wrapping_sub(8) } else { m_raw };
-            let value = parse_signed_number(rhs).unwrap_or(0) as u32;
-            return Ok(Instruction::ImmStore { pm, i_reg, m_reg, value });
+            let (value, sym) = if let Some(v) = parse_signed_number(rhs) {
+                (v as u32, None)
+            } else {
+                (0, Some(rhs.to_string()))
+            };
+            return Ok((Instruction::ImmStore { pm, i_reg, m_reg, value }, sym));
         }
     }
 
     if let Some(dag_move) = try_build_dag_move(op1, op2, rhs, true, None, line)? {
-        return Ok(dag_move);
+        return Ok((dag_move, None));
     }
 
-    // Numeric offset: DM(imm, Ii) = dreg or DM(Ii, imm) = dreg
-    // Always use Type 15 for standalone stores with integer offsets.
-    // Type 4 is only used when a parallel compute is present.
     let (i_reg, offset) = parse_ireg_and_offset(op1, op2, line)?;
     let i_field = if pm { i_reg.wrapping_sub(8) } else { i_reg };
     if let Ok(dreg) = parse_dreg(rhs, line) {
-        let ureg = dreg;  // R0-R15 have ureg codes 0x00-0x0F
-        return Ok(Instruction::UregMemAccess {
+        return Ok((Instruction::UregMemAccess {
             pm, i_reg: i_field, write: true, lw: is_lw,
-            ureg, offset,
-        });
+            ureg: dreg, offset,
+        }, None));
     }
-    // Non-dreg source: Type 15 (ureg -> DM/PM with 32-bit offset)
     if let Some(ureg) = ureg_code(rhs) {
-        return Ok(Instruction::UregMemAccess {
+        return Ok((Instruction::UregMemAccess {
             pm, i_reg: i_field, write: true, lw: is_lw,
             ureg, offset,
-        });
+        }, None));
     }
     Err(Error::UnknownRegister {
         line,

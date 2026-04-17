@@ -555,7 +555,19 @@ fn find_entry_address(
                 let sec_idx = sym.st_shndx as usize;
                 for ps in placed {
                     if ps.object_idx == obj_idx && ps.input_section_idx == sec_idx {
-                        return Some(ps.address + sym.st_value);
+                        let bw_addr = ps.address + sym.st_value;
+                        // SW (short-word) code sections use 16-bit
+                        // parcel addressing: the PM address is half
+                        // the BW (byte) address. PM sections with
+                        // 48-bit instructions use BW/6*4 = 2/3 of
+                        // the byte address. Other sections (BW/DM)
+                        // are byte-addressed as-is.
+                        let pm_addr = match ps.qualifier {
+                            SectionQualifier::Sw => bw_addr / 2,
+                            SectionQualifier::Pm => bw_addr / 6 * 4,
+                            _ => bw_addr,
+                        };
+                        return Some(pm_addr);
                     }
                 }
             }

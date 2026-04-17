@@ -115,8 +115,8 @@ pub fn generate(
         for (i, _sec) in output_sections.iter().enumerate() {
             let mut entry = [0u8; SYM_ENTRY_SIZE];
             // st_name = 0
-            // st_value = section address
-            let addr = output_sections[i].address;
+            // st_value = section address (PM-space for code)
+            let addr = output_sections[i].elf_address();
             entry[4..8].copy_from_slice(&e.write_u32(addr));
             // st_info = STB_LOCAL << 4 | STT_SECTION
             entry[12] = (STB_LOCAL << 4) | STT_SECTION;
@@ -146,7 +146,13 @@ pub fn generate(
                         && ps.input_section_idx == resolved.section_idx as usize
                     {
                         shndx = (i + 1) as u16;
-                        sym_value = ps.address + resolved.value;
+                        let bw_addr = ps.address + resolved.value;
+                        // Convert to PM-space address for SW code
+                        sym_value = if sec.is_short_word {
+                            bw_addr / 2
+                        } else {
+                            bw_addr
+                        };
                         break;
                     }
                 }
@@ -224,11 +230,11 @@ pub fn generate(
 
         out[phdr_pos..phdr_pos + 4].copy_from_slice(&e.write_u32(PT_LOAD));
         out[phdr_pos + 4..phdr_pos + 8].copy_from_slice(&e.write_u32(section_file_offsets[i]));
-        out[phdr_pos + 8..phdr_pos + 12].copy_from_slice(&e.write_u32(sec.address));
-        out[phdr_pos + 12..phdr_pos + 16].copy_from_slice(&e.write_u32(sec.address)); // p_paddr
+        out[phdr_pos + 8..phdr_pos + 12].copy_from_slice(&e.write_u32(sec.elf_address()));
+        out[phdr_pos + 12..phdr_pos + 16].copy_from_slice(&e.write_u32(sec.elf_address())); // p_paddr
         let filesz = if sec.is_nobits { 0 } else { sec.data.len() as u32 };
         out[phdr_pos + 16..phdr_pos + 20].copy_from_slice(&e.write_u32(filesz));
-        out[phdr_pos + 20..phdr_pos + 24].copy_from_slice(&e.write_u32(sec.size));
+        out[phdr_pos + 20..phdr_pos + 24].copy_from_slice(&e.write_u32(sec.elf_size()));
         out[phdr_pos + 24..phdr_pos + 28].copy_from_slice(&e.write_u32(flags));
         out[phdr_pos + 28..phdr_pos + 32].copy_from_slice(&e.write_u32(4)); // p_align
         phdr_pos += PHDR_SIZE;
@@ -280,9 +286,9 @@ pub fn generate(
             sh_name: shstrtab_offsets[i + 1],
             sh_type,
             sh_flags,
-            sh_addr: sec.address,
+            sh_addr: sec.elf_address(),
             sh_offset: section_file_offsets[i],
-            sh_size: if sec.is_nobits { sec.size } else { sec.data.len() as u32 },
+            sh_size: if sec.is_nobits { sec.elf_size() } else { sec.data.len() as u32 },
             sh_link: 0,
             sh_info: 0,
             sh_addralign: 4,
@@ -359,6 +365,29 @@ struct MergedSection {
     /// one; plain-PM output sections keep `sh_entsize = 0`.
     is_short_word: bool,
     placed: Vec<PlacedSection>,
+}
+
+impl MergedSection {
+    /// Return the PM-space address for the ELF headers. SW code
+    /// sections live in byte-addressed RAM but the ELF encodes their
+    /// addresses in 16-bit parcel (PM) units so the boot ROM and
+    /// disassemblers see PM addresses. BW/DM sections are already
+    /// byte-addressed.
+    fn elf_address(&self) -> u32 {
+        if self.is_short_word {
+            self.address / 2
+        } else {
+            self.address
+        }
+    }
+
+    fn elf_size(&self) -> u32 {
+        if self.is_short_word {
+            self.size / 2
+        } else {
+            self.size
+        }
+    }
 }
 
 fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {

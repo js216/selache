@@ -472,10 +472,22 @@ impl Allocator {
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
-            Pass { rn, rx } => Pass {
-                rn: self.get_phys(rn, spill),
-                rx: self.get_phys(rx, spill),
-            },
+            Pass { rn, rx } => {
+                // Forced-physical arg setup: rn = 0xC0 | phys (phys < 16).
+                // The 0xC0 prefix uniquely identifies arg-setup copies
+                // without colliding with RETURN_REG_VREG (0xFF).
+                if (0xC0..0xD0).contains(&rn) {
+                    Pass {
+                        rn: rn & 0x0F,
+                        rx: self.get_phys(rx, spill),
+                    }
+                } else {
+                    Pass {
+                        rn: self.get_phys(rn, spill),
+                        rx: self.get_phys(rx, spill),
+                    }
+                }
+            }
             Neg { rn, rx } => Neg {
                 rn: self.get_phys(rn, spill),
                 rx: self.get_phys(rx, spill),

@@ -285,13 +285,12 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                 // function that returns via RTS jumps into garbage
                 // on the first return and the board hangs.
                 //
-                // Only correct for leaf functions today: a non-leaf
-                // callee clobbers DM(M7, I6) when it makes its own
-                // delayed call, so a general fix needs selcc to save
-                // I12 into its own frame in the prologue and restore
-                // from that slot here. The C backend in this tree
-                // does not yet emit such calls, so the leaf form is
-                // sufficient for now.
+                // For non-leaf functions, the prologue saves I12 into
+                // frame slot DM(-2,I6) and the return sequence reads
+                // it back from there instead of DM(M7,I6). This is
+                // handled in emit_asm.rs (build_prologue / return
+                // sequence rewrite) transparently after isel, so isel
+                // always emits the leaf form here.
 
                 // I12 = DM(M7, I6) -- reload the saved return PC into
                 // the DAG2 index register that the indirect jump uses.
@@ -355,15 +354,15 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         });
                     }
                 }
-                // Register arguments (args 0-3).
+                // Register arguments: use forced-physical markers
+                // (0x80 | phys) so regalloc knows not to remap the
+                // destination. The source vreg IS remapped normally.
                 for (i, arg) in args.iter().enumerate() {
                     if i >= target::ARG_REGS.len() {
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    if *arg as u8 != phys {
-                        instrs.push(MachInstr::compute_pass(phys, *arg as u8));
-                    }
+                    instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
                 }
                 // CJUMP (DB) target: the SHARC+ C-ABI call. The two
                 // delay slots execute before the branch takes effect:
