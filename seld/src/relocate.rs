@@ -487,8 +487,12 @@ pub fn apply_relocations(
 }
 
 /// Find a symbol's final address given its defining object, section, and value.
-/// Returns the PM-space address for SW code sections (BW addr / 2) so
-/// that PM-family relocations (R_SHARC_PM32, etc.) resolve correctly.
+/// Returns the PM-space address for SW code sections so that PM-family
+/// relocations (R_SHARC_PM32, etc.) resolve correctly.
+///
+/// For SW sections: `ps.address` is a BW (byte) address; `st_value` is
+/// in parcel (16-bit PM) units, already a PM-relative offset. The final
+/// PM address is `ps.address/2 + st_value`, NOT `(ps.address + st_value)/2`.
 fn find_symbol_address(
     object_idx: usize,
     section_idx: usize,
@@ -497,10 +501,9 @@ fn find_symbol_address(
 ) -> Option<u32> {
     for ps in placed {
         if ps.object_idx == object_idx && ps.input_section_idx == section_idx {
-            let bw_addr = ps.address + st_value;
             let addr = match ps.qualifier {
-                SectionQualifier::Sw => bw_addr / 2,
-                _ => bw_addr,
+                SectionQualifier::Sw => ps.address / 2 + st_value,
+                _ => ps.address + st_value,
             };
             return Some(addr);
         }

@@ -421,7 +421,20 @@ fn place_output_section(
 
                 let input_align = sec.sh_addralign;
                 let effective_align = sec_align.max(input_align);
-                let addr = cursor.allocate(size, effective_align, &out_sec.name)?;
+                // SW/PM code sections: rounds each
+                // input section's allocation to a 4-byte boundary
+                // (2-parcel alignment). Sections whose byte size is
+                // 2 mod 4 get 2 bytes of padding so the next section
+                // starts at a 4-byte-aligned offset.
+                let alloc_size = if matches!(
+                    out_sec.qualifier,
+                    SectionQualifier::Sw | SectionQualifier::Pm
+                ) {
+                    (size + 3) & !3
+                } else {
+                    size
+                };
+                let addr = cursor.allocate(alloc_size, effective_align, &out_sec.name)?;
 
                 placed.push(PlacedSection {
                     output_name: out_sec.name.clone(),
@@ -555,17 +568,13 @@ fn find_entry_address(
                 let sec_idx = sym.st_shndx as usize;
                 for ps in placed {
                     if ps.object_idx == obj_idx && ps.input_section_idx == sec_idx {
-                        let bw_addr = ps.address + sym.st_value;
-                        // SW (short-word) code sections use 16-bit
-                        // parcel addressing: the PM address is half
-                        // the BW (byte) address. PM sections with
-                        // 48-bit instructions use BW/6*4 = 2/3 of
-                        // the byte address. Other sections (BW/DM)
-                        // are byte-addressed as-is.
+                        // For SW code: ps.address is BW, st_value is
+                        // in parcel units (PM-relative). Convert base
+                        // to PM then add the parcel offset.
                         let pm_addr = match ps.qualifier {
-                            SectionQualifier::Sw => bw_addr / 2,
-                            SectionQualifier::Pm => bw_addr / 6 * 4,
-                            _ => bw_addr,
+                            SectionQualifier::Sw => ps.address / 2 + sym.st_value,
+                            SectionQualifier::Pm => ps.address / 6 * 4 + sym.st_value,
+                            _ => ps.address + sym.st_value,
                         };
                         return Some(pm_addr);
                     }

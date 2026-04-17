@@ -146,12 +146,13 @@ pub fn generate(
                         && ps.input_section_idx == resolved.section_idx as usize
                     {
                         shndx = (i + 1) as u16;
-                        let bw_addr = ps.address + resolved.value;
-                        // Convert to PM-space address for SW code
+                        // For SW code: ps.address is BW, resolved.value
+                        // is in parcel units (PM-relative). Convert base
+                        // to PM then add the parcel offset.
                         sym_value = if sec.is_short_word {
-                            bw_addr / 2
+                            ps.address / 2 + resolved.value
                         } else {
-                            bw_addr
+                            ps.address + resolved.value
                         };
                         break;
                     }
@@ -234,7 +235,7 @@ pub fn generate(
         out[phdr_pos + 12..phdr_pos + 16].copy_from_slice(&e.write_u32(sec.elf_address())); // p_paddr
         let filesz = if sec.is_nobits { 0 } else { sec.data.len() as u32 };
         out[phdr_pos + 16..phdr_pos + 20].copy_from_slice(&e.write_u32(filesz));
-        out[phdr_pos + 20..phdr_pos + 24].copy_from_slice(&e.write_u32(sec.elf_size()));
+        out[phdr_pos + 20..phdr_pos + 24].copy_from_slice(&e.write_u32(sec.size));
         out[phdr_pos + 24..phdr_pos + 28].copy_from_slice(&e.write_u32(flags));
         out[phdr_pos + 28..phdr_pos + 32].copy_from_slice(&e.write_u32(4)); // p_align
         phdr_pos += PHDR_SIZE;
@@ -288,7 +289,7 @@ pub fn generate(
             sh_flags,
             sh_addr: sec.elf_address(),
             sh_offset: section_file_offsets[i],
-            sh_size: if sec.is_nobits { sec.elf_size() } else { sec.data.len() as u32 },
+            sh_size: if sec.is_nobits { sec.size } else { sec.data.len() as u32 },
             sh_link: 0,
             sh_info: 0,
             sh_addralign: 4,
@@ -381,13 +382,6 @@ impl MergedSection {
         }
     }
 
-    fn elf_size(&self) -> u32 {
-        if self.is_short_word {
-            self.size / 2
-        } else {
-            self.size
-        }
-    }
 }
 
 fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
@@ -438,7 +432,19 @@ fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
         if !ps.is_nobits {
             let expected_offset = (ps.address - merged.address) as usize;
             if expected_offset > merged.data.len() {
-                merged.data.resize(expected_offset, 0);
+                // Code sections use FILL(0x1) = big-endian 16-bit
+                // value 0x0001, i.e. the two-byte pattern [0x00, 0x01].
+                // Data sections use zero fill.
+                if merged.is_executable {
+                    while merged.data.len() < expected_offset {
+                        merged.data.push(0x00);
+                        if merged.data.len() < expected_offset {
+                            merged.data.push(0x01);
+                        }
+                    }
+                } else {
+                    merged.data.resize(expected_offset, 0x00);
+                }
             }
             merged.data.extend_from_slice(&ps.data);
         }
