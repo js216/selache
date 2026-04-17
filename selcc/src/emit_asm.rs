@@ -433,7 +433,8 @@ fn eval_const_expr(expr: &Expr) -> Result<i32> {
         Expr::Unary { op: UnaryOp::LogNot, operand } => {
             Ok(if eval_const_expr(operand)? == 0 { 1 } else { 0 })
         }
-        Expr::AddrOf(_) | Expr::Ident(_) | Expr::StringLit(_) => Ok(0),
+        Expr::AddrOf(_) | Expr::Ident(_) | Expr::StringLit(_)
+        | Expr::WideStringLit(_) | Expr::Deref(_) => Ok(0),
         Expr::InitList(items) => {
             if let Some(first) = items.first() {
                 eval_const_expr(first)

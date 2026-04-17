@@ -1264,6 +1264,17 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             ctx.emit(IrOp::FrameAddr(dst, slot as i32));
             Ok(dst)
         }
+        // Comma operator: &(a, b) — evaluate a for side effects, return &b
+        Expr::Comma(lhs, rhs) => {
+            lower_expr(ctx, lhs)?;
+            lower_lvalue_addr(ctx, rhs)
+        }
+        // Pre/post-increment as lvalue (GNU extension, but common):
+        // &(++x) — increment x, return &x
+        Expr::PreInc(inner) | Expr::PreDec(inner) => {
+            lower_expr(ctx, expr)?;
+            lower_lvalue_addr(ctx, inner)
+        }
         _ => Err(Error::NotImplemented(
             "address of complex expression".into(),
         )),
