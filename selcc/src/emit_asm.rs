@@ -163,8 +163,8 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
                 let _ = writeln!(out, "    {line};");
             }
         }
-        // Emit stub functions for skipped (not-yet-implemented) functions.
-        // Return 0xDEAD to make failures visible in test results.
+        // Emit stubs for functions that failed to compile (e.g. internal
+        // encoder errors).  Return 0xDEAD to make failures visible.
         for name in &skipped_functions {
             let sym = with_abi_suffix(name);
             let _ = writeln!(out, ".GLOBAL {sym};");
@@ -206,7 +206,14 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
                     name: sl.symbol.clone(),
                     values,
                 }),
-                Err(e) => eprintln!("selcc: {e}: not yet implemented"),
+                Err(e) => {
+                    eprintln!("selcc: {}: {e}", sl.symbol);
+                    let words = sl.ty.size_bytes().div_ceil(4).max(1);
+                    data_entries.push(DataEntry {
+                        name: sl.symbol.clone(),
+                        values: vec![0u32; words as usize],
+                    });
+                }
             }
         }
     }
