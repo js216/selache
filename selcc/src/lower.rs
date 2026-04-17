@@ -1273,6 +1273,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let dst = ctx.alloc_vreg();
                 ctx.emit(IrOp::LoadImm(dst, val));
                 Ok(dst)
+            } else if ctx.known_functions.contains(name) {
+                // Function name used as a value (function pointer).
+                // Emit a LoadGlobal to get its PM address.
+                let dst = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadGlobal(dst, name.clone()));
+                Ok(dst)
             } else {
                 Err(Error::NotImplemented(format!(
                     "undefined variable: {name}"
