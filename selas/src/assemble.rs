@@ -170,6 +170,7 @@ struct PendingReloc {
     byte_offset: u32,
     symbol: String,
     rela_type: u8,
+    addend: i32,
 }
 
 /// Pick the ELF relocation type that matches the byte layout of a given
@@ -553,11 +554,21 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     // 16-bit parcel units. `pi.byte_offset` is the byte
                     // offset inside the section; dividing by 2 gives
                     // the parcel offset the linker expects.
+                    // For ImmStore with a non-zero value (e.g. from
+                    // a `symbol-1` expression), the value becomes the
+                    // relocation addend so the linker computes
+                    // symbol_address + addend.
+                    let addend = if let selinstr::encode::Instruction::ImmStore { value, .. } = &pi.instr {
+                        *value as i32
+                    } else {
+                        0
+                    };
                     relocs.push(PendingReloc {
                         section_idx: pi.section_idx,
                         byte_offset: (pi.byte_offset / 2) as u32,
                         symbol: pi.label_ref.clone(),
                         rela_type: reloc_type_for(&pi.instr),
+                        addend,
                     });
                 }
             }
@@ -762,7 +773,7 @@ fn emit_elf_bytes(
     // Emit deferred relocations against undefined symbols.
     for r in relocs {
         let elf_idx = elf_indices[r.section_idx];
-        writer.add_relocation(elf_idx, r.byte_offset, &r.symbol, r.rela_type, 0);
+        writer.add_relocation(elf_idx, r.byte_offset, &r.symbol, r.rela_type, r.addend);
     }
 
     // Emit `.align.<name>` sections for every PM section. The linker

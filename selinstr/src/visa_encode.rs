@@ -97,7 +97,7 @@ fn try_16bit(instr: &Instruction) -> Option<u16> {
         Instruction::Compute { cond: 31, compute } => try_type2c(&compute),
         Instruction::UregDagMove {
             pm: false, write, ureg, i_reg, m_reg, cond: 31,
-            compute: None,
+            compute: None, ..
         } => try_type3c(write, ureg, i_reg, m_reg),
         _ => None,
     }
@@ -207,7 +207,7 @@ fn try_32bit(instr: &Instruction) -> Option<u32> {
         Instruction::LoadImm { ureg, value } => try_type17b(ureg, value),
         Instruction::UregDagMove {
             pm: false, write, ureg, i_reg, m_reg, cond,
-            compute: None,
+            compute: None, ..
         } => try_type3b(write, ureg, i_reg, m_reg, cond),
         Instruction::ComputeLoadStore {
             compute: None, access, dreg, offset, cond,

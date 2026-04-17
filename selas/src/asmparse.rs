@@ -626,6 +626,29 @@ fn has_label_ident(expr: &str) -> bool {
     split_identifiers(expr).any(is_label_token)
 }
 
+/// Check if an expression is `label-N` or `label+N`.
+fn has_label_with_addend(expr: &str) -> bool {
+    split_label_addend(expr).is_some()
+}
+
+/// Split `label-N` or `label+N` into (label, addend). Returns None if
+/// the expression is not in that form.
+fn split_label_addend(expr: &str) -> Option<(&str, i64)> {
+    // Find the last '-' or '+' that separates the label from the number
+    for (i, c) in expr.char_indices().rev() {
+        if (c == '-' || c == '+') && i > 0 {
+            let label = expr[..i].trim();
+            let num_str = &expr[i..];
+            if has_label_ident(label) {
+                if let Some(v) = parse_signed_number(num_str) {
+                    return Some((label, v));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract the first label-like identifier from an expression.
 fn extract_first_label(expr: &str) -> Option<&str> {
     split_identifiers(expr).find(|tok| is_label_token(tok))
@@ -1097,6 +1120,7 @@ fn parse_conditional_mem(text: &str, cond: u8, line: u32) -> Result<Instruction>
             m_reg,
             cond,
             compute,
+            post_modify: false,
         }),
         other => Ok(other),
     }
@@ -1704,6 +1728,7 @@ fn try_build_dag_move(
         m_reg,
         cond: 31,
         compute,
+        post_modify: false,
     }))
 }
 
@@ -1720,7 +1745,9 @@ fn parse_mem_store(
     if op1.starts_with('I') && op2.starts_with('M')
         || op1.starts_with('M') && op2.starts_with('I')
     {
-        let is_imm = parse_signed_number(rhs).is_some() || has_label_ident(rhs);
+        let is_imm = parse_signed_number(rhs).is_some()
+            || has_label_ident(rhs)
+            || has_label_with_addend(rhs);
         if is_imm {
             let (i_str, m_str) = if op1.starts_with('I') { (op1, op2) } else { (op2, op1) };
             let i_raw = parse_reg_index(i_str, 'I', line)?;
@@ -1729,6 +1756,8 @@ fn parse_mem_store(
             let m_reg = if pm { m_raw.wrapping_sub(8) } else { m_raw };
             let (value, sym) = if let Some(v) = parse_signed_number(rhs) {
                 (v as u32, None)
+            } else if let Some((label, adj)) = split_label_addend(rhs) {
+                (adj as i32 as u32, Some(label.to_string()))
             } else {
                 (0, Some(rhs.to_string()))
             };

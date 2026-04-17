@@ -304,6 +304,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         m_reg: 7,
                         cond: target::COND_TRUE,
                         compute: None,
+                        post_modify: false,
                     },
                     reloc: None,
                 });
@@ -392,6 +393,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
                         m_reg: 7, // M7
                         cond: target::COND_TRUE,
                         compute: None,
+                        post_modify: true,
                     },
                     reloc: None,
                 });

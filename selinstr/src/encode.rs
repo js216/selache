@@ -433,6 +433,9 @@ pub enum Instruction {
         cond: u8,
         /// Optional compute
         compute: Option<ComputeOp>,
+        /// true=DM(Ii,Mm) post-modify (addr=Ii, then Ii+=Mm)
+        /// false=DM(Mm,Ii) pre-modify  (addr=Ii+Mm, Ii unchanged)
+        post_modify: bool,
     },
     /// Type 7: Compute + MODIFY(Ii, Mm) with DAG register.
     DagModify {
@@ -640,8 +643,8 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             let db = if delayed { 1u64 << 34 } else { 0 };
             Ok((0x18u64 << 40) | db | (addr as u64 & 0xFFFFFF))
         }
-        Instruction::UregDagMove { pm, write, ureg, i_reg, m_reg, cond, compute } => {
-            encode_type3(pm, write, ureg, i_reg, m_reg, cond, &compute)
+        Instruction::UregDagMove { pm, write, ureg, i_reg, m_reg, cond, compute, post_modify } => {
+            encode_type3(&UregDagMoveArgs { _pm: pm, write, ureg, i_reg, m_reg, cond, post_modify }, &compute)
         }
         Instruction::DagModify { pm, i_reg, m_reg, cond, compute } => {
             let comp = encode_compute_opt(&compute)?;
@@ -1146,37 +1149,44 @@ fn encode_type9a(call: bool, cond: u8, pm_i: u8, pm_m: u8, delayed: bool) -> Res
 //   bits[22:0]  = compute
 // ---------------------------------------------------------------------------
 
-fn encode_type3(
+struct UregDagMoveArgs {
     _pm: bool,
     write: bool,
     ureg: u8,
     i_reg: u8,
     m_reg: u8,
     cond: u8,
+    post_modify: bool,
+}
+
+fn encode_type3(
+    a: &UregDagMoveArgs,
     compute: &Option<ComputeOp>,
 ) -> Result<u64, EncodeError> {
-    if i_reg > 7 {
+    if a.i_reg > 7 {
         return Err(EncodeError {
-            msg: format!("Type 3 I register index {} out of range (0-7)", i_reg),
+            msg: format!("Type 3 I register index {} out of range (0-7)", a.i_reg),
         });
     }
-    if m_reg > 7 {
+    if a.m_reg > 7 {
         return Err(EncodeError {
-            msg: format!("Type 3 M register {} out of range (0-7)", m_reg),
+            msg: format!("Type 3 M register {} out of range (0-7)", a.m_reg),
         });
     }
     let comp = encode_compute_opt(compute)?;
-    let d = if write { 1u64 } else { 0 };
-    let m_field = m_reg as u64 & 0x7;
+    let d = if a.write { 1u64 } else { 0 };
+    let m_field = a.m_reg as u64 & 0x7;
 
-    // bit44=0 (M,I operand order), matching standard output.
+    // bit44: 0=DM(M,I) pre-modify, 1=DM(I,M) post-modify.
+    let im = if a.post_modify { 1u64 } else { 0 };
     let word = (0b010u64 << 45)
-        | ((i_reg as u64 & 0x7) << 41)          // bits[43:41]
-        | (m_field << 38)                        // bits[40:38]
-        | ((cond as u64 & 0x1F) << 33)           // bits[37:33]
-        | (d << 31)                              // bit[31]
-        | ((ureg as u64 & 0x7F) << 23)           // bits[29:23]
-        | (comp as u64);                         // bits[22:0]
+        | (im << 44)
+        | ((a.i_reg as u64 & 0x7) << 41)
+        | (m_field << 38)
+        | ((a.cond as u64 & 0x1F) << 33)
+        | (d << 31)
+        | ((a.ureg as u64 & 0x7F) << 23)
+        | (comp as u64);
     Ok(word)
 }
 

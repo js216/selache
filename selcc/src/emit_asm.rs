@@ -374,7 +374,11 @@ fn emit_instr_line(mi: &MachInstr) -> std::result::Result<String, encode::Encode
     // `.L_doloop_end_N` tags this backend uses for hardware DO loops)
     // must NOT get the SHARC C-ABI trailing-dot suffix applied; the
     // suffix only decorates real C symbol names.
-    let sym = if reloc.symbol.starts_with(".L") {
+    let sym = if reloc.symbol.starts_with(".L_ret_") {
+        // CJUMP return labels push (label - 1) because the
+        // callee's `JUMP (M14, I12)` adds M14 (= +1) to I12.
+        format!("{}-1", reloc.symbol)
+    } else if reloc.symbol.starts_with(".L") {
         reloc.symbol.clone()
     } else {
         with_abi_suffix(&reloc.symbol)
@@ -531,6 +535,7 @@ fn emit_function_instrs(
                 m_reg: 7,
                 cond: target::COND_TRUE,
                 compute: None,
+                post_modify: false,
             },
             reloc: None,
         });
