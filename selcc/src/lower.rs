@@ -556,7 +556,41 @@ pub fn lower_function_with_known(
     }
 
     // If the function falls through without a return, emit an implicit one.
-    let needs_ret = ctx.ops.last().is_none_or(|op| !matches!(op, IrOp::Ret(_)));
+    // Check whether the code after the LAST label (the final basic block)
+    // ends with Ret or unconditional Branch.  If the last op is itself a
+    // Label with nothing after it, the block is empty — which means
+    // fallthrough into it is possible and a return is needed, UNLESS
+    // every predecessor of that label is an unconditional Branch or Ret
+    // (e.g. a switch break label where all cases returned).
+    let last_label_pos = ctx.ops.iter().rposition(|op| matches!(op, IrOp::Label(_)));
+    let needs_ret = match last_label_pos {
+        None => {
+            // No labels at all — check if the function ends with Ret.
+            ctx.ops.last().is_none_or(|op| !matches!(op, IrOp::Ret(_)))
+        }
+        Some(pos) => {
+            let label_id = match &ctx.ops[pos] {
+                IrOp::Label(id) => *id,
+                _ => unreachable!(),
+            };
+            let tail = &ctx.ops[pos + 1..];
+            if tail.is_empty() {
+                // Empty block after the last label.  It needs a return
+                // if the label is reachable by fallthrough (preceding op
+                // is not a terminator) or by any conditional branch.
+                let fallthrough = pos == 0
+                    || !matches!(&ctx.ops[pos - 1], IrOp::Ret(_) | IrOp::Branch(_));
+                let cond_target = ctx.ops.iter().any(|op| {
+                    matches!(op, IrOp::BranchCond(_, tgt) if *tgt == label_id)
+                });
+                fallthrough || cond_target
+            } else {
+                let last_tail = tail.iter().rev()
+                    .find(|op| !matches!(op, IrOp::Nop));
+                last_tail.is_none_or(|op| !matches!(op, IrOp::Ret(_) | IrOp::Branch(_)))
+            }
+        }
+    };
     if needs_ret {
         if !matches!(ctx.return_type, Type::Void) {
             eprintln!(
