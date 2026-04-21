@@ -822,8 +822,31 @@ impl Preprocessor {
                                 let (args, end) =
                                     collect_macro_args(text, j)?;
                                 i = end;
-                                let expanded_body =
-                                    substitute_params(&body, &params, &args, variadic);
+                                // Pre-expand arguments for use in
+                                // parameter positions that are not
+                                // adjacent to # or ## (C99 6.10.3.1:
+                                // arguments get rescanned before
+                                // substitution unless they feed
+                                // stringification or token-paste).
+                                let mut expanded_args =
+                                    Vec::with_capacity(args.len());
+                                for arg in &args {
+                                    let ea = self.expand_macros_inner(
+                                        arg,
+                                        filename,
+                                        line_num,
+                                        expanding,
+                                        depth + 1,
+                                    )?;
+                                    expanded_args.push(ea);
+                                }
+                                let expanded_body = substitute_params(
+                                    &body,
+                                    &params,
+                                    &args,
+                                    &expanded_args,
+                                    variadic,
+                                );
                                 let mut new_expanding = expanding.clone();
                                 new_expanding.insert(ident.to_string());
                                 let expanded = self.expand_macros_inner(
@@ -1310,10 +1333,62 @@ fn stringify_arg(arg: &str) -> String {
 }
 
 /// Substitute parameters in a function-like macro body.
-fn substitute_params(body: &str, params: &[String], args: &[String], variadic: bool) -> String {
+// Return true if the identifier spanning bytes[start..end] in the
+// macro body is immediately adjacent (after skipping whitespace
+// only) to a ## token paste operator -- either the `##` digraph or
+// `%:%:`. Parameters in such positions must be substituted with
+// raw (unexpanded) argument text per C99 6.10.3.1.
+fn is_adjacent_to_paste(bytes: &[u8], start: usize, end: usize) -> bool {
+    // Look backwards from `start` past whitespace.
+    let mut b = start;
+    while b > 0 && (bytes[b - 1] == b' ' || bytes[b - 1] == b'\t') {
+        b -= 1;
+    }
+    if b >= 2 && bytes[b - 1] == b'#' && bytes[b - 2] == b'#' {
+        return true;
+    }
+    if b >= 4
+        && bytes[b - 1] == b':'
+        && bytes[b - 2] == b'%'
+        && bytes[b - 3] == b':'
+        && bytes[b - 4] == b'%'
+    {
+        return true;
+    }
+    // Look forwards from `end` past whitespace.
+    let mut f = end;
+    while f < bytes.len() && (bytes[f] == b' ' || bytes[f] == b'\t') {
+        f += 1;
+    }
+    if f + 1 < bytes.len() && bytes[f] == b'#' && bytes[f + 1] == b'#' {
+        return true;
+    }
+    if f + 3 < bytes.len()
+        && bytes[f] == b'%'
+        && bytes[f + 1] == b':'
+        && bytes[f + 2] == b'%'
+        && bytes[f + 3] == b':'
+    {
+        return true;
+    }
+    false
+}
+
+fn substitute_params(
+    body: &str,
+    params: &[String],
+    args: &[String],
+    expanded_args: &[String],
+    variadic: bool,
+) -> String {
     // Build the variadic argument text (trailing args beyond named params).
     let va_args_text = if variadic && args.len() > params.len() {
         args[params.len()..].join(", ")
+    } else {
+        String::new()
+    };
+    let va_args_expanded = if variadic && expanded_args.len() > params.len() {
+        expanded_args[params.len()..].join(", ")
     } else {
         String::new()
     };
@@ -1378,11 +1453,23 @@ fn substitute_params(body: &str, params: &[String], args: &[String], variadic: b
                 i += 1;
             }
             let ident = &body[start..i];
+            // Look at the non-whitespace token before `start` and
+            // after `i` in the body to decide whether this parameter
+            // occurrence is adjacent to ## (or the %:%: digraph). If
+            // it is, the raw argument text must be substituted; if
+            // not, the pre-expanded argument text must be used so
+            // that later rescans see macro expansion of nested names.
+            let adjacent_to_paste = is_adjacent_to_paste(bytes, start, i);
             if has_va_args && ident == "__VA_ARGS__" {
-                result.push_str(&va_args_text);
+                if adjacent_to_paste {
+                    result.push_str(&va_args_text);
+                } else {
+                    result.push_str(&va_args_expanded);
+                }
             } else if let Some(pos) = params.iter().position(|p| p == ident) {
-                if pos < args.len() {
-                    result.push_str(&args[pos]);
+                let src = if adjacent_to_paste { args } else { expanded_args };
+                if pos < src.len() {
+                    result.push_str(&src[pos]);
                 }
             } else {
                 result.push_str(ident);
