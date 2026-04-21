@@ -46,6 +46,28 @@ pub fn select_with_name(
     let mut call_return_labels: Vec<(usize, String)> = Vec::new();
     let mut call_site_counter = 0u32;
 
+    // Reserve a small block of scratch vregs for helpers that need
+    // fixed-purpose temporaries (inline 32-bit divide/modulo). Picking
+    // these above the IR's own vreg range guarantees they cannot alias
+    // a live IR value: without this, `emit_inline_mod_32`'s scratch
+    // slots would collide with IR vregs holding live values across the
+    // mod expansion, and the regalloc would silently map both names to
+    // the same physical register (corrupting the live value when the
+    // scratch write landed).
+    let max_ir_vreg = max_vreg(ir);
+    // Seven scratch vregs: numerator, denominator, constant 2.0f, two
+    // Newton-iteration scratch registers, and two save slots for the
+    // original lhs/rhs that the modulo compensation step rereads.
+    // Scratch vreg ids must fit in a u8 with room for s0..s6 above the
+    // IR range, so `max_ir_vreg + 7 <= 255`.
+    let div_scratch_base: u8 = {
+        let base = max_ir_vreg.saturating_add(1);
+        if base > u8::MAX as u32 - 6 {
+            panic!("function uses too many vregs for an inline divide to fit scratch");
+        }
+        base as u8
+    };
+
     for op in ir {
         match op {
             IrOp::LoadImm(dst, val) => {
@@ -129,13 +151,13 @@ pub fn select_with_name(
             IrOp::Div(dst, lhs, rhs) => {
                 // Inline signed 32-bit integer divide via float
                 // reciprocal (see `emit_inline_div_32`).
-                emit_inline_div_32(&mut instrs, *dst, *lhs, *rhs);
+                emit_inline_div_32(&mut instrs, *dst, *lhs, *rhs, div_scratch_base);
             }
 
             IrOp::Mod(dst, lhs, rhs) => {
                 // Inline signed 32-bit integer modulo via float
                 // reciprocal (see `emit_inline_mod_32`).
-                emit_inline_mod_32(&mut instrs, *dst, *lhs, *rhs);
+                emit_inline_mod_32(&mut instrs, *dst, *lhs, *rhs, div_scratch_base);
             }
 
             IrOp::BitAnd(dst, lhs, rhs) => {
@@ -2062,6 +2084,117 @@ fn emit_runtime_call_64_binop(
     }
 }
 
+/// Largest vreg id referenced anywhere in `ir`, or 0 if no vreg is
+/// referenced. Used to pick scratch vreg ids above the IR's own
+/// range so inline helpers cannot collide with live IR values.
+fn max_vreg(ir: &[IrOp]) -> u32 {
+    let mut m = 0u32;
+    let mut bump = |v: u32| {
+        if v > m {
+            m = v;
+        }
+    };
+    for op in ir {
+        match op {
+            IrOp::LoadImm(a, _) | IrOp::LoadImm64(a, _) => bump(*a),
+            IrOp::Copy(a, b)
+            | IrOp::Copy64(a, b)
+            | IrOp::Neg(a, b)
+            | IrOp::Neg64(a, b)
+            | IrOp::BitNot(a, b)
+            | IrOp::BitNot64(a, b)
+            | IrOp::FNeg(a, b)
+            | IrOp::IntToFloat(a, b)
+            | IrOp::FloatToInt(a, b)
+            | IrOp::IntToLongLong(a, b)
+            | IrOp::SExtToLongLong(a, b)
+            | IrOp::LongLongToInt(a, b)
+            | IrOp::StackAlloc(a, b) => {
+                bump(*a);
+                bump(*b);
+            }
+            IrOp::Add(a, b, c)
+            | IrOp::Sub(a, b, c)
+            | IrOp::Mul(a, b, c)
+            | IrOp::Div(a, b, c)
+            | IrOp::Mod(a, b, c)
+            | IrOp::BitAnd(a, b, c)
+            | IrOp::BitOr(a, b, c)
+            | IrOp::BitXor(a, b, c)
+            | IrOp::Shl(a, b, c)
+            | IrOp::Shr(a, b, c)
+            | IrOp::Lshr(a, b, c)
+            | IrOp::FAdd(a, b, c)
+            | IrOp::FSub(a, b, c)
+            | IrOp::FMul(a, b, c)
+            | IrOp::FDiv(a, b, c)
+            | IrOp::Add64(a, b, c)
+            | IrOp::Sub64(a, b, c)
+            | IrOp::Mul64(a, b, c)
+            | IrOp::Div64(a, b, c)
+            | IrOp::UDiv64(a, b, c)
+            | IrOp::Mod64(a, b, c)
+            | IrOp::UMod64(a, b, c)
+            | IrOp::BitAnd64(a, b, c)
+            | IrOp::BitOr64(a, b, c)
+            | IrOp::BitXor64(a, b, c)
+            | IrOp::Shl64(a, b, c)
+            | IrOp::Shr64(a, b, c)
+            | IrOp::UShr64(a, b, c) => {
+                bump(*a);
+                bump(*b);
+                bump(*c);
+            }
+            IrOp::Cmp(a, b)
+            | IrOp::UCmp(a, b)
+            | IrOp::FCmp(a, b)
+            | IrOp::Cmp64(a, b)
+            | IrOp::UCmp64(a, b) => {
+                bump(*a);
+                bump(*b);
+            }
+            IrOp::Ret(v) => {
+                if let Some(v) = v {
+                    bump(*v);
+                }
+            }
+            IrOp::Call(dst, _, args) => {
+                bump(*dst);
+                for a in args {
+                    bump(*a);
+                }
+            }
+            IrOp::CallIndirect(dst, addr, args) => {
+                bump(*dst);
+                bump(*addr);
+                for a in args {
+                    bump(*a);
+                }
+            }
+            IrOp::Load(a, b, _) | IrOp::Store(a, b, _) | IrOp::Load64(a, b, _) | IrOp::Store64(a, b, _) => {
+                bump(*a);
+                bump(*b);
+            }
+            IrOp::LoadGlobal(a, _)
+            | IrOp::ReadGlobal(a, _)
+            | IrOp::StoreGlobal(a, _)
+            | IrOp::ReadGlobal64(a, _)
+            | IrOp::WriteGlobal64(a, _)
+            | IrOp::LoadString(a, _)
+            | IrOp::LoadWideString(a, _)
+            | IrOp::StackSave(a)
+            | IrOp::StackRestore(a)
+            | IrOp::FrameAddr(a, _) => bump(*a),
+            IrOp::Branch(_)
+            | IrOp::BranchCond(_, _)
+            | IrOp::Label(_)
+            | IrOp::HardwareLoop { .. }
+            | IrOp::Nop => {}
+        }
+    }
+    m
+}
+
 /// Emit an inline signed 32-bit integer divide via the float
 /// reciprocal-seed path: convert operands to single-precision float,
 /// run the same Newton-Raphson reciprocal refinement used by `FDiv`,
@@ -2075,15 +2208,24 @@ fn emit_runtime_call_64_binop(
 /// round at the low bits, identical to the precision envelope of
 /// the corresponding float path.
 ///
-/// Calling-sequence notes: the inputs are copied into R0 (lhs) and
-/// R1 (rhs) so the FDiv-style code can run unchanged. R2 holds the
-/// constant `2.0f`; R3 and R4 are scratch registers for the
-/// Newton-Raphson refinement. The final truncated quotient lands in
-/// R0 and is then copied to the destination vreg.
-fn emit_inline_div_32(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32) {
-    emit_int32_div_core(instrs, lhs, rhs);
-    if dst as u8 != 0 {
-        instrs.push(MachInstr::compute_pass(dst as u8, 0));
+/// Calling-sequence notes: the inputs are copied into scratch
+/// vregs `s0` (lhs) and `s1` (rhs). `s2` holds the constant `2.0f`;
+/// `s3` and `s4` are scratch registers for the Newton-Raphson
+/// refinement. The scratch vregs are allocated above the IR's own
+/// vreg range so they cannot alias live IR values. The final
+/// truncated quotient lands in `s0` and is then copied to the
+/// destination vreg.
+fn emit_inline_div_32(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    scratch_base: u8,
+) {
+    emit_int32_div_core(instrs, lhs, rhs, scratch_base);
+    let s0 = scratch_base;
+    if dst as u8 != s0 {
+        instrs.push(MachInstr::compute_pass(dst as u8, s0));
     }
 }
 
@@ -2095,35 +2237,54 @@ fn emit_inline_div_32(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
 /// The multiply uses `MulSsi` (signed low-32-bit integer multiply)
 /// so the result matches C's `int % int` semantics modulo `2^32`,
 /// matching the `IrOp::Mul` lowering in this file.
-fn emit_inline_mod_32(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32) {
-    // Record the original rhs register so the final compensation
-    // step can still reach it. `emit_int32_div_core` copies rhs into
-    // R1 and clobbers R1 on its way through the float path, so we
-    // stash the original value in R5 (not in any of R0..R4, which
-    // the divide core uses for numerator/denom/scratch/two).
+fn emit_inline_mod_32(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    scratch_base: u8,
+) {
+    // Scratch layout: s0..s4 match `emit_int32_div_core`, and s5/s6
+    // preserve the original rhs/lhs across the divide (the core
+    // clobbers s0 and s1 on its way through the float path). All
+    // seven scratch vregs live above the IR's own vreg range, so the
+    // pre-divide saves cannot overwrite a live IR vreg (which was the
+    // root cause of the `(a/b)*K + (a%b)` miscompile where the saved
+    // `a/b*K` shared a physical register with scratch s6).
+    let s0 = scratch_base;
+    let s5 = scratch_base + 5;
+    let s6 = scratch_base + 6;
     let lhs_reg = lhs as u8;
     let rhs_reg = rhs as u8;
-    instrs.push(MachInstr::compute_pass(5, rhs_reg));
-    instrs.push(MachInstr::compute_pass(6, lhs_reg));
-    emit_int32_div_core(instrs, lhs, rhs);
-    // R0 = quotient. R0 = quotient * original_rhs.
+    instrs.push(MachInstr::compute_pass(s5, rhs_reg));
+    instrs.push(MachInstr::compute_pass(s6, lhs_reg));
+    emit_int32_div_core(instrs, lhs, rhs, scratch_base);
+    // s0 = quotient. s0 = quotient * original_rhs.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::MulSsi { rn: 0, rx: 0, ry: 5 }),
+            compute: ComputeOp::Mul(MulOp::MulSsi {
+                rn: s0,
+                rx: s0,
+                ry: s5,
+            }),
         },
         reloc: None,
     });
-    // R0 = original_lhs - R0 = remainder.
+    // s0 = original_lhs - s0 = remainder.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Sub { rn: 0, rx: 6, ry: 0 }),
+            compute: ComputeOp::Alu(AluOp::Sub {
+                rn: s0,
+                rx: s6,
+                ry: s0,
+            }),
         },
         reloc: None,
     });
-    if dst as u8 != 0 {
-        instrs.push(MachInstr::compute_pass(dst as u8, 0));
+    if dst as u8 != s0 {
+        instrs.push(MachInstr::compute_pass(dst as u8, s0));
     }
 }
 
@@ -2142,64 +2303,76 @@ fn emit_inline_mod_32(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
 ///     q  = f0 * y2                    // f0 / f1 ~= q
 ///     R0 = trunc(q)                   // back to int
 /// ```
-fn emit_int32_div_core(instrs: &mut Vec<MachInstr>, lhs: u32, rhs: u32) {
-    if lhs as u8 != 0 {
-        instrs.push(MachInstr::compute_pass(0, lhs as u8));
+fn emit_int32_div_core(
+    instrs: &mut Vec<MachInstr>,
+    lhs: u32,
+    rhs: u32,
+    scratch_base: u8,
+) {
+    // Scratch vregs: s0 = numerator / quotient, s1 = denominator,
+    // s2 = constant 2.0f, s3 = reciprocal iterate, s4 = Newton scratch.
+    let s0 = scratch_base;
+    let s1 = scratch_base + 1;
+    let s2 = scratch_base + 2;
+    let s3 = scratch_base + 3;
+    let s4 = scratch_base + 4;
+    if lhs as u8 != s0 {
+        instrs.push(MachInstr::compute_pass(s0, lhs as u8));
     }
-    if rhs as u8 != 1 {
-        instrs.push(MachInstr::compute_pass(1, rhs as u8));
+    if rhs as u8 != s1 {
+        instrs.push(MachInstr::compute_pass(s1, rhs as u8));
     }
-    // F0 = FLOAT R0  (int to single-precision).
+    // F(s0) = FLOAT s0  (int to single-precision).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Falu(FaluOp::Float { rn: 0, rx: 0 }),
+            compute: ComputeOp::Falu(FaluOp::Float { rn: s0, rx: s0 }),
         },
         reloc: None,
     });
-    // F1 = FLOAT R1.
+    // F(s1) = FLOAT s1.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Falu(FaluOp::Float { rn: 1, rx: 1 }),
+            compute: ComputeOp::Falu(FaluOp::Float { rn: s1, rx: s1 }),
         },
         reloc: None,
     });
-    // R2 = 2.0f.
+    // s2 = 2.0f.
     instrs.push(MachInstr {
         instr: Instruction::LoadImm {
-            ureg: target::ureg_r(2),
+            ureg: s2,
             value: 0x4000_0000,
         },
         reloc: None,
     });
-    // F3 = RECIPS F1  (initial seed for 1 / rhs).
+    // F(s3) = RECIPS F(s1)  (initial seed for 1 / rhs).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Falu(FaluOp::Recips { rn: 3, rx: 1 }),
+            compute: ComputeOp::Falu(FaluOp::Recips { rn: s3, rx: s1 }),
         },
         reloc: None,
     });
-    // First Newton iteration: F4 = F1 * F3; F4 = F2 - F4; F3 = F3 * F4.
+    // First Newton iteration: s4 = s1 * s3; s4 = s2 - s4; s3 = s3 * s4.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 1, ry: 3 }),
-        },
-        reloc: None,
-    });
-    instrs.push(MachInstr {
-        instr: Instruction::Compute {
-            cond: target::COND_TRUE,
-            compute: ComputeOp::Falu(FaluOp::Sub { rn: 4, rx: 2, ry: 4 }),
+            compute: ComputeOp::Mul(MulOp::FMul { rn: s4, rx: s1, ry: s3 }),
         },
         reloc: None,
     });
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::FMul { rn: 3, rx: 3, ry: 4 }),
+            compute: ComputeOp::Falu(FaluOp::Sub { rn: s4, rx: s2, ry: s4 }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Mul(MulOp::FMul { rn: s3, rx: s3, ry: s4 }),
         },
         reloc: None,
     });
@@ -2207,37 +2380,37 @@ fn emit_int32_div_core(instrs: &mut Vec<MachInstr>, lhs: u32, rhs: u32) {
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 1, ry: 3 }),
+            compute: ComputeOp::Mul(MulOp::FMul { rn: s4, rx: s1, ry: s3 }),
         },
         reloc: None,
     });
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Falu(FaluOp::Sub { rn: 4, rx: 2, ry: 4 }),
+            compute: ComputeOp::Falu(FaluOp::Sub { rn: s4, rx: s2, ry: s4 }),
         },
         reloc: None,
     });
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::FMul { rn: 3, rx: 3, ry: 4 }),
+            compute: ComputeOp::Mul(MulOp::FMul { rn: s3, rx: s3, ry: s4 }),
         },
         reloc: None,
     });
-    // F0 = F0 * F3 (quotient in float form).
+    // F(s0) = F(s0) * F(s3) (quotient in float form).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::FMul { rn: 0, rx: 0, ry: 3 }),
+            compute: ComputeOp::Mul(MulOp::FMul { rn: s0, rx: s0, ry: s3 }),
         },
         reloc: None,
     });
-    // R0 = TRUNC F0 (back to signed 32-bit int).
+    // s0 = TRUNC F(s0) (back to signed 32-bit int).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Falu(FaluOp::Trunc { rn: 0, rx: 0 }),
+            compute: ComputeOp::Falu(FaluOp::Trunc { rn: s0, rx: s0 }),
         },
         reloc: None,
     });
