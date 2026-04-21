@@ -2,8 +2,8 @@
 /* printf.c --- Tiny formatted output via putchar */
 /* Copyright (c) 2026 Jakob Kastelic */
 
-/* Supports %s, %c, %d, %x with optional zero-pad and width. Hex
-   avoids any divide/modulo work. Output is pushed byte-by-byte
+/* Supports %s, %c, %d, %u, %x with optional zero-pad and width.
+   Hex avoids any divide/modulo work. Output is pushed byte-by-byte
    through putchar(), which the application supplies.
 
    Every walk over a byte pointer uses the post-increment idiom
@@ -20,6 +20,33 @@ static const uint32_t pow10[] = {
    1000000000U, 100000000U, 10000000U, 1000000U,
    100000U, 10000U, 1000U, 100U, 10U, 1U
 };
+
+static void emit_udec(uint32_t uval, int min_width, char pad)
+{
+   // Find the first non-zero power-of-ten index (i.e. count digits).
+   int first = 9; // index of 1 => single digit
+   for (int i = 0; i < 9; i++) {
+      if (uval >= pow10[i]) {
+         first = i;
+         break;
+      }
+   }
+   int digits  = 10 - first;
+   int leading = min_width - digits;
+   while (leading > 0) {
+      putchar(pad);
+      leading--;
+   }
+
+   for (int i = first; i < 10; i++) {
+      char d = '0';
+      while (uval >= pow10[i]) {
+         uval -= pow10[i];
+         d++;
+      }
+      putchar(d);
+   }
+}
 
 static void emit_dec(int32_t value, int min_width, char pad)
 {
@@ -139,6 +166,7 @@ int printf(const char *fmt, ...)
          case 's': emit_str(va_arg(ap, const char *)); break;
          case 'c': putchar((char)va_arg(ap, int)); break;
          case 'd': emit_dec(va_arg(ap, int32_t), width, pad); break;
+         case 'u': emit_udec(va_arg(ap, uint32_t), width, pad); break;
          case 'x': emit_hex(va_arg(ap, uint32_t), width, pad); break;
          case '%': putchar('%'); break;
          case '\0':

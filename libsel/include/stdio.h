@@ -13,8 +13,8 @@
    or a negative value on error. */
 int putchar(const int c);
 
-/* Minimal printf supporting %s, %c, %d, %x (with optional zero-pad
-   and width). Output is routed through putchar. */
+/* Minimal printf supporting %s, %c, %d, %u, %x (with optional
+   zero-pad and width). Output is routed through putchar. */
 int printf(const char *fmt, ...);
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
