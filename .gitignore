@@ -4,4 +4,7 @@
 .gstack
 build
 target
-xtest
+
+xtest/AGENTS.md
+xtest/REVIEW.md
+xtest/run.py
