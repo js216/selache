@@ -124,8 +124,22 @@ impl ElfWriter {
     }
 
     /// Add a data section (SHT_PROGBITS, SHF_ALLOC|SHF_WRITE).
+    ///
+    /// Sets `sh_entsize = 1` (byte) and `sh_addralign = 8` to match
+    /// the SHARC+ BW (byte-width) data section layout. The SHARC+
+    /// linker uses `sh_entsize` to identify byte-addressable sections
+    /// when laying them out in memory; without `entsize=1` it treats
+    /// the section as word-addressed and emits relocations whose
+    /// runtime addresses point 4x too high (or to a different memory
+    /// bank entirely). The `addralign=8` matches the expected symbol
+    /// alignment for byte-width data.
     pub fn add_data_section(&mut self, name: &str, data: &[u8]) -> u16 {
-        self.add_section(name, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, data)
+        let idx = self.add_section(name, SHT_PROGBITS, SHF_ALLOC | SHF_WRITE, data);
+        if let Some(sec) = self.sections.last_mut() {
+            sec.entsize = 1;
+            sec.alignment = 8;
+        }
+        idx
     }
 
     /// Add a read-only data section (SHT_PROGBITS, SHF_ALLOC).
@@ -234,6 +248,24 @@ impl ElfWriter {
             size: 0,
             binding: STB_LOCAL,
             sym_type: STT_NOTYPE,
+        });
+    }
+
+    /// Add a local data-object symbol. Used for static / file-scope
+    /// initialised data (e.g. string literals). The SHARC+ linker walks
+    /// `STT_OBJECT` symbols when laying out a byte-width data section
+    /// and assigns them byte-addressed positions; a `STT_NOTYPE` local
+    /// at the same offset is treated as just a label (its address is
+    /// emitted as a *word*-relative offset), so byte loads through the
+    /// symbol read garbage.
+    pub fn add_local_object(&mut self, name: &str, section: u16, offset: u32, size: u32) {
+        self.symbols.push(Symbol {
+            name: name.to_string(),
+            section_idx: section,
+            value: offset,
+            size,
+            binding: STB_LOCAL,
+            sym_type: STT_OBJECT,
         });
     }
 

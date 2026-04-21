@@ -33,10 +33,14 @@ pub struct IselResult {
 /// Virtual register numbers are preserved as physical register indices;
 /// the register allocator will rewrite them to valid physical registers.
 pub fn select(ir: &[IrOp]) -> IselResult {
-    select_with_name(ir, "anon")
+    select_with_name(ir, "anon", &std::collections::HashSet::new())
 }
 
-pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
+pub fn select_with_name(
+    ir: &[IrOp],
+    func_name: &str,
+    variadic_callees: &std::collections::HashSet<String>,
+) -> IselResult {
     let mut instrs = Vec::new();
     let mut label_positions = Vec::new();
     let mut call_return_labels: Vec<(usize, String)> = Vec::new();
@@ -209,6 +213,24 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 });
             }
 
+            IrOp::Lshr(dst, lhs, rhs) => {
+                // LSHIFT Rx BY Ry: positive = left, negative = logical
+                // right (zero-fill). Lower.rs negates rhs for right
+                // shifts, so emitting LSHIFT here gives the unsigned
+                // semantics required by C `>>` on unsigned operands.
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Shift(ShiftOp::Lshift {
+                            rn: *dst as u8,
+                            rx: *lhs as u8,
+                            ry: *rhs as u8,
+                        }),
+                    },
+                    reloc: None,
+                });
+            }
+
             IrOp::Neg(dst, src) => {
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
@@ -299,11 +321,14 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 // I12 = DM(M7, I6) -- reload the saved return PC into
                 // the DAG2 index register that the indirect jump uses.
                 // ureg 0x1C = I12 (group 1 = I registers, reg 12).
+                // Tag with UREG_FIXED_TAG so regalloc passes the
+                // encoding through without remapping (vregs in the
+                // same numeric range would otherwise collide).
                 instrs.push(MachInstr {
                     instr: Instruction::UregDagMove {
                         pm: false,
                         write: false,
-                        ureg: 0x1C,
+                        ureg: target::UREG_FIXED_TAG | 0x1C,
                         i_reg: 6,
                         m_reg: 7,
                         cond: target::COND_TRUE,
@@ -339,35 +364,73 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
             }
 
             IrOp::Call(dst, name, args) => {
-                // Stack arguments (args 4+): push in reverse order.
-                for (i, arg) in args.iter().enumerate().rev() {
-                    if i >= target::ARG_REGS.len() {
-                        let stack_offset = (i - target::ARG_REGS.len()) as i8;
+                let is_variadic = variadic_callees.contains(name);
+                if is_variadic {
+                    // Variadic callees expect *all* arguments — including
+                    // the named ones — on the caller's stack so that
+                    // `va_arg` can walk the argument list with simple
+                    // pointer arithmetic. The SHARC+ C runtime (printf etc.)
+                    // is built that way; passing variadic args in
+                    // ARG_REGS leaves the named args in unread registers
+                    // and feeds `va_arg` whatever happened to be on the
+                    // stack — printf reads garbage and emits nothing.
+                    //
+                    // Use the standard post-modify push idiom for
+                    // variadic calls: `DM(I7, M7) = Rn` stores Rn at
+                    // DM(I7) and then decrements I7 by M7 = -1. Pushes
+                    // happen in reverse argument order (last arg first)
+                    // so that arg 0 ends up at the lowest address; the
+                    // CJUMP delay-slot pushes that follow then land
+                    // BELOW the pushed args, leaving the args at
+                    // DM(I6+0..n-1) from the callee's view (where
+                    // CJUMP captured I6 = caller's I7 *after* the arg
+                    // pushes but *before* the delay slots ran).
+                    for arg in args.iter().rev() {
                         instrs.push(MachInstr {
-                            instr: Instruction::ComputeLoadStore {
-                                compute: None,
-                                access: MemAccess {
-                                    pm: false,
-                                    write: true,
-                                    i_reg: target::STACK_PTR,
-                                },
-                                dreg: *arg as u8,
-                                offset: stack_offset,
+                            instr: Instruction::UregDagMove {
+                                pm: false,
+                                write: true,
+                                ureg: *arg as u8,
+                                i_reg: target::STACK_PTR,
+                                m_reg: 7, // M7 = -1
                                 cond: target::COND_TRUE,
+                                compute: None,
+                                post_modify: true,
                             },
                             reloc: None,
                         });
                     }
-                }
-                // Register arguments: use forced-physical markers
-                // (0x80 | phys) so regalloc knows not to remap the
-                // destination. The source vreg IS remapped normally.
-                for (i, arg) in args.iter().enumerate() {
-                    if i >= target::ARG_REGS.len() {
-                        break;
+                } else {
+                    // Stack arguments (args 4+): push in reverse order.
+                    for (i, arg) in args.iter().enumerate().rev() {
+                        if i >= target::ARG_REGS.len() {
+                            let stack_offset = (i - target::ARG_REGS.len()) as i8;
+                            instrs.push(MachInstr {
+                                instr: Instruction::ComputeLoadStore {
+                                    compute: None,
+                                    access: MemAccess {
+                                        pm: false,
+                                        write: true,
+                                        i_reg: target::STACK_PTR,
+                                    },
+                                    dreg: *arg as u8,
+                                    offset: stack_offset,
+                                    cond: target::COND_TRUE,
+                                },
+                                reloc: None,
+                            });
+                        }
                     }
-                    let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
+                    // Register arguments: use forced-physical markers
+                    // (0x80 | phys) so regalloc knows not to remap the
+                    // destination. The source vreg IS remapped normally.
+                    for (i, arg) in args.iter().enumerate() {
+                        if i >= target::ARG_REGS.len() {
+                            break;
+                        }
+                        let phys = target::ARG_REGS[i];
+                        instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
+                    }
                 }
                 // CJUMP (DB) target: the SHARC+ C-ABI call. The two
                 // delay slots execute before the branch takes effect:
@@ -388,11 +451,15 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                     }),
                 });
                 // Delay slot 1: DM(I7, M7) = R2 (push R2).
+                // R2 is a fixed physical register (the frame link slot
+                // for the SHARC+ CJUMP convention); tag with
+                // UREG_FIXED_TAG so regalloc passes it through as the
+                // bare R2 encoding instead of treating `2` as a vreg id.
                 instrs.push(MachInstr {
                     instr: Instruction::UregDagMove {
                         pm: false,
                         write: true,
-                        ureg: target::ureg_r(2),
+                        ureg: target::UREG_FIXED_TAG | target::ureg_r(2),
                         i_reg: target::STACK_PTR,
                         m_reg: 7, // M7
                         cond: target::COND_TRUE,
@@ -468,18 +535,22 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                         instrs.push(MachInstr::compute_pass(phys, *arg as u8));
                     }
                 }
-                // Load address into I12 for the indirect call.
+                // Load address into I12 for the indirect call. Tagged
+                // with UREG_FIXED_TAG so the regalloc passes the encoding
+                // through unchanged (instead of treating 0x1C as a vreg
+                // and remapping it to a data register).
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_i(12),
+                        ureg: target::UREG_FIXED_TAG | target::ureg_i(12),
                         value: *addr,
                     },
                     reloc: None,
                 });
                 // M12 = 0 (no post-modify). M-register ureg: 0x20 + (12 - 8) = 0x24.
+                // Same tagging as for I12 above.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: 0x24,
+                        ureg: target::UREG_FIXED_TAG | 0x24,
                         value: 0,
                     },
                     reloc: None,
@@ -570,9 +641,12 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
             IrOp::LoadGlobal(dst, name) => {
                 // Load the address of a global symbol into a register.
                 // This emits a LoadImm with a relocation against the symbol.
+                // Pass the raw vreg as `ureg`; the regalloc rewrites it
+                // through `ureg_r(phys)`. Masking with `ureg_r` here would
+                // collapse vregs above 15 onto their low-nibble twins.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(*dst as u8),
+                        ureg: *dst as u8,
                         value: 0,
                     },
                     reloc: Some(Reloc {
@@ -622,7 +696,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 let dst_hi = (*dst + 1) as u8;
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_i(target::SCRATCH_I),
+                        ureg: target::ureg_i_pre(target::SCRATCH_I),
                         value: 0,
                     },
                     reloc: Some(Reloc {
@@ -636,7 +710,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                         i_reg: target::SCRATCH_I,
                         write: false,
                         lw: false,
-                        ureg: target::ureg_r(dst_lo),
+                        ureg: dst_lo,
                         offset: 0,
                     },
                     reloc: None,
@@ -647,7 +721,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                         i_reg: target::SCRATCH_I,
                         write: false,
                         lw: false,
-                        ureg: target::ureg_r(dst_hi),
+                        ureg: dst_hi,
                         offset: 1,
                     },
                     reloc: None,
@@ -661,7 +735,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 let src_hi = (*src + 1) as u8;
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_i(target::SCRATCH_I),
+                        ureg: target::ureg_i_pre(target::SCRATCH_I),
                         value: 0,
                     },
                     reloc: Some(Reloc {
@@ -675,7 +749,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                         i_reg: target::SCRATCH_I,
                         write: true,
                         lw: false,
-                        ureg: target::ureg_r(src_lo),
+                        ureg: src_lo,
                         offset: 0,
                     },
                     reloc: None,
@@ -686,24 +760,44 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                         i_reg: target::SCRATCH_I,
                         write: true,
                         lw: false,
-                        ureg: target::ureg_r(src_hi),
+                        ureg: src_hi,
                         offset: 1,
                     },
                     reloc: None,
                 });
             }
 
-            IrOp::LoadString(dst, _idx) | IrOp::LoadWideString(dst, _idx) => {
-                // Load address of a string literal. The linker will resolve
-                // the symbol ".rodata" + offset. For now, emit a placeholder
-                // LoadImm with value 0 (no relocation yet -- string addresses
-                // are resolved during object emission).
+            IrOp::LoadString(dst, idx) => {
+                // Load the address of string-literal slot `.strN`. The
+                // string payload is emitted in the data section during
+                // module emission; the link-time relocation patches this
+                // LoadImm with the resolved address. Without the reloc
+                // selcc used to leave the register holding 0 and the
+                // downstream call would hand printf a bogus format
+                // pointer — the DSP silently faulted and no UART output
+                // ever appeared on hardware.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(*dst as u8),
+                        ureg: *dst as u8,
                         value: 0,
                     },
-                    reloc: None,
+                    reloc: Some(Reloc {
+                        symbol: format!(".str{idx}"),
+                        kind: RelocKind::Addr24,
+                    }),
+                });
+            }
+
+            IrOp::LoadWideString(dst, idx) => {
+                instrs.push(MachInstr {
+                    instr: Instruction::LoadImm {
+                        ureg: *dst as u8,
+                        value: 0,
+                    },
+                    reloc: Some(Reloc {
+                        symbol: format!(".wstr{idx}"),
+                        kind: RelocKind::Addr24,
+                    }),
                 });
             }
 
@@ -920,11 +1014,14 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
             }
 
             IrOp::StackSave(dst) => {
-                // Rn = I7 (Type 5a universal register transfer)
+                // Rn = I7 (Type 5a universal register transfer).
+                // `dest` carries the raw vreg; regalloc encodes through
+                // `ureg_r(phys)` after mapping. Masking here would
+                // alias vregs > 15 onto their low-nibble twins.
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
-                        dest: target::ureg_r(*dst as u8),
-                        src: target::ureg_i(target::STACK_PTR),
+                        dest: *dst as u8,
+                        src: target::ureg_i_pre(target::STACK_PTR),
                     },
                     reloc: None,
                 });
@@ -934,8 +1031,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 // I7 = Rn
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
-                        dest: target::ureg_i(target::STACK_PTR),
-                        src: target::ureg_r(*src as u8),
+                        dest: target::ureg_i_pre(target::STACK_PTR),
+                        src: *src as u8,
                     },
                     reloc: None,
                 });
@@ -952,8 +1049,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 // Rn = I7
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
-                        dest: target::ureg_r(tmp),
-                        src: target::ureg_i(target::STACK_PTR),
+                        dest: tmp,
+                        src: target::ureg_i_pre(target::STACK_PTR),
                     },
                     reloc: None,
                 });
@@ -972,8 +1069,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 // I7 = Rn
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
-                        dest: target::ureg_i(target::STACK_PTR),
-                        src: target::ureg_r(tmp),
+                        dest: target::ureg_i_pre(target::STACK_PTR),
+                        src: tmp,
                     },
                     reloc: None,
                 });
@@ -998,8 +1095,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 if frame_offset == 0 {
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
-                            src_ureg: target::ureg_i(target::FRAME_PTR),
-                            dst_ureg: target::ureg_r(*dst as u8),
+                            src_ureg: target::ureg_i_pre(target::FRAME_PTR),
+                            dst_ureg: *dst as u8,
                             compute: None,
                         },
                         reloc: None,
@@ -1013,8 +1110,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                     });
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
-                            src_ureg: target::ureg_i(target::FRAME_PTR),
-                            dst_ureg: target::ureg_r(*dst as u8),
+                            src_ureg: target::ureg_i_pre(target::FRAME_PTR),
+                            dst_ureg: *dst as u8,
                             compute: None,
                         },
                         reloc: None,
@@ -1036,14 +1133,14 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 let hi = (*dst + 1) as u8;
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(lo),
+                        ureg: lo,
                         value: *val as u32,
                     },
                     reloc: None,
                 });
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(hi),
+                        ureg: hi,
                         value: (*val >> 32) as u32,
                     },
                     reloc: None,
@@ -1380,8 +1477,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                     // Transfer address from data register to I4.
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
-                            src_ureg: target::ureg_r(*base as u8),
-                            dst_ureg: target::ureg_i(target::SCRATCH_I),
+                            src_ureg: *base as u8,
+                            dst_ureg: target::ureg_i_pre(target::SCRATCH_I),
                             compute: None,
                         },
                         reloc: None,
@@ -1433,8 +1530,8 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                     // Transfer address from data register to I4.
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
-                            src_ureg: target::ureg_r(*base as u8),
-                            dst_ureg: target::ureg_i(target::SCRATCH_I),
+                            src_ureg: *base as u8,
+                            dst_ureg: target::ureg_i_pre(target::SCRATCH_I),
                             compute: None,
                         },
                         reloc: None,
@@ -1477,7 +1574,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 instrs.push(MachInstr::compute_pass(dst_lo, *src as u8));
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(dst_hi),
+                        ureg: dst_hi,
                         value: 0,
                     },
                     reloc: None,
@@ -1494,7 +1591,7 @@ pub fn select_with_name(ir: &[IrOp], func_name: &str) -> IselResult {
                 // SHARC ASHIFT uses negative values for right shift.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(dst_hi),
+                        ureg: dst_hi,
                         value: (-31_i32) as u32,
                     },
                     reloc: None,
@@ -1588,29 +1685,72 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
 /// load/store lands at the wrong memory location (typically an instant
 /// hard fault on a read-only or out-of-range address).
 fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u8, dreg: u8, offset: i8, write: bool) {
+    // Use the bare URegMove form for the R-vreg → I4 transfer
+    // instead of UregTransfer-with-compute=None. UregTransfer
+    // packs a compute slot into bits[22:0] of the encoded word; when
+    // we leave it empty the encoder writes 0, which the SHARC+
+    // hardware decodes as `R0 = R0 + R0` — a *real* ALU op that
+    // clobbers R0 (the return-value/4th-arg register) right between
+    // the address setup and the memory access. URegMove (Type 5a
+    // proper, encode_type5a) carries no compute slot and is the
+    // form required for all bare ureg transfers.
     instrs.push(MachInstr {
-        instr: Instruction::UregTransfer {
-            src_ureg: target::ureg_r(base),
-            dst_ureg: target::ureg_i(target::SCRATCH_I),
-            compute: None,
+        instr: Instruction::URegMove {
+            dest: target::ureg_i_pre(target::SCRATCH_I),
+            src: base,
         },
         reloc: None,
     });
-    instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
-    instrs.push(MachInstr {
-        instr: Instruction::ComputeLoadStore {
-            compute: None,
-            access: MemAccess {
-                pm: false,
-                write,
+    // Apply the constant offset by modifying I4 inline before the
+    // access: `dm(I4, M5) = dreg` doesn't carry a literal offset, and
+    // doing the offset via I4 += offset / I4 -= offset keeps the
+    // emitted instruction in the byte-addressable Type-3 form that
+    // required for `tab[i] = ...` patterns. The Type-4 form (the
+    // previous `ComputeLoadStore` with embedded offset) silently
+    // routed through the SHARC DAG's word-aligned alias of L1 SRAM,
+    // so writes to a byte address went to a different physical bank
+    // entirely and the chip read garbage (or faulted) on read-back.
+    if offset != 0 {
+        instrs.push(MachInstr {
+            instr: Instruction::Modify {
                 i_reg: target::SCRATCH_I,
+                value: offset as i32,
+                width: MemWidth::Normal,
+                bitrev: false,
             },
-            dreg,
-            offset,
+            reloc: None,
+        });
+    }
+    // Use M5 (= 0 per startup) for the post-modify slot. Type 3
+    // encodes the M-register in bits[39:38] as `m_reg - 4`, so the
+    // valid range is M4..M7. M5 corresponds to encoded value 1.
+    // Without an explicit zero modify register, the post-mod would
+    // step I4 by an undefined amount and successive accesses would
+    // walk into unrelated memory.
+    instrs.push(MachInstr {
+        instr: Instruction::UregDagMove {
+            pm: false,
+            write,
+            ureg: dreg,
+            i_reg: target::SCRATCH_I,
+            m_reg: 5,
             cond: target::COND_TRUE,
+            compute: None,
+            post_modify: true,
         },
         reloc: None,
     });
+    if offset != 0 {
+        instrs.push(MachInstr {
+            instr: Instruction::Modify {
+                i_reg: target::SCRATCH_I,
+                value: -(offset as i32),
+                width: MemWidth::Normal,
+                bitrev: false,
+            },
+            reloc: None,
+        });
+    }
 }
 
 /// Emit an inline 64-bit multiply (low 64 bits of the product).

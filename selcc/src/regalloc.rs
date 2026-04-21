@@ -12,7 +12,7 @@
 //! callee-saved (R8-R15) to minimise the prologue/epilogue overhead and
 //! keep the stack frame small enough for 6-bit signed offsets.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::mach::MachInstr;
 use crate::target;
@@ -49,35 +49,41 @@ pub fn allocate(instrs: &[MachInstr], num_params: u8) -> (Vec<MachInstr>, u32, V
 
 struct Allocator {
     /// Mapping from virtual register to physical register.
-    vreg_to_phys: HashMap<u8, u8>,
+    vreg_to_phys: BTreeMap<u8, u8>,
     /// Reverse: physical register to virtual register.
-    phys_to_vreg: HashMap<u8, u8>,
+    phys_to_vreg: BTreeMap<u8, u8>,
     /// Physical registers that must not be evicted. Vreg 0 is always in
     /// this set and pinned to physical R0, so that both the call-return
     /// reload (`dst = PASS R0`) and the function-return move
     /// (`R0 = PASS retval`) emitted by isel resolve to the ABI return
     /// register instead of whatever register vreg 0 happens to land on
     /// after the allocator evicts it.
-    pinned: HashSet<u8>,
+    pinned: BTreeSet<u8>,
     /// Physical registers pinned for the duration of the current mach
     /// instruction's rewrite. Cleared at the start of every `rewrite`
     /// call. This prevents a later operand lookup inside the same op
     /// from evicting an earlier operand's physical register, which
     /// would silently miscompile the op at high register pressure.
     transient_pins: Vec<u8>,
+    /// Physical registers reserved by an in-flight forced-physical
+    /// arg-setup write. Once the Pass `rn = arg_value` has been
+    /// emitted for an upcoming call, `rn` (an ARG_REG) holds the
+    /// ABI-mandated argument value and must not be re-allocated
+    /// before the CJUMP consumes it. Cleared at every CJUMP.
+    arg_setup_pins: Vec<u8>,
     /// Round-robin index within the caller-saved range for eviction.
     next_evict: u8,
     /// Number of spill stack slots allocated.
     spill_slots: u32,
     /// Spill map: virtual register -> spill slot offset.
-    spill_map: HashMap<u8, u32>,
+    spill_map: BTreeMap<u8, u32>,
 }
 
 impl Allocator {
     fn new(num_params: u8) -> Self {
-        let mut vreg_to_phys = HashMap::new();
-        let mut phys_to_vreg = HashMap::new();
-        let mut pinned = HashSet::new();
+        let mut vreg_to_phys = BTreeMap::new();
+        let mut phys_to_vreg = BTreeMap::new();
+        let mut pinned = BTreeSet::new();
         // Pin parameter vregs to the physical registers the SHARC+
         // C-ABI uses for incoming arguments: `target::ARG_REGS`
         // (R4, R8, R12, R0 -- *not* a contiguous R0..R(n-1) range).
@@ -106,9 +112,10 @@ impl Allocator {
             phys_to_vreg,
             pinned,
             transient_pins: Vec::new(),
+            arg_setup_pins: Vec::new(),
             next_evict: 0,
             spill_slots: 0,
-            spill_map: HashMap::new(),
+            spill_map: BTreeMap::new(),
         }
     }
 
@@ -144,9 +151,14 @@ impl Allocator {
                 self.spill_slots += 1;
                 s
             });
-            // Store to the spill slot. Use negative offsets from I6
-            // so adjust_frame_offsets places them in the local frame
-            // region below the callee-saved saves.
+            // Store to the spill slot. Use *positive* offsets from I6:
+            // `adjust_frame_offsets` treats negative offsets as
+            // compiler-managed local slots and positive offsets as
+            // regalloc spill slots, repositioning each into a distinct
+            // memory region. Mixing the two conventions on a spill
+            // (positive evict + negative reload, or vice versa) lands
+            // the spill on top of an unrelated local and the program
+            // reads back the local instead of the spilled value.
             spill.push(MachInstr {
                 instr: Instruction::ComputeLoadStore {
                     compute: None,
@@ -156,7 +168,7 @@ impl Allocator {
                         i_reg: target::FRAME_PTR,
                     },
                     dreg: phys,
-                    offset: -(slot as i8) - 1,
+                    offset: slot as i8,
                     cond: target::COND_TRUE,
                 },
                 reloc: None,
@@ -176,7 +188,8 @@ impl Allocator {
     }
 
     /// Emit a spill reload instruction for `vreg` into `phys`, if it was
-    /// previously spilled.
+    /// previously spilled. Uses positive offsets to match the spill
+    /// store convention (see `spill_caller_saved` for the rationale).
     fn emit_reload(&self, vreg: u8, phys: u8, spill_instrs: &mut Vec<MachInstr>) {
         if let Some(&slot) = self.spill_map.get(&vreg) {
             spill_instrs.push(MachInstr {
@@ -188,7 +201,7 @@ impl Allocator {
                         i_reg: target::FRAME_PTR,
                     },
                     dreg: phys,
-                    offset: -(slot as i8) - 1,
+                    offset: slot as i8,
                     cond: target::COND_TRUE,
                 },
                 reloc: None,
@@ -257,7 +270,12 @@ impl Allocator {
             s
         });
 
-        // Emit store of evicted register.
+        // Emit store of evicted register. Uses a *positive* offset
+        // so `adjust_frame_offsets` reroutes the slot into the spill
+        // region (positive offsets) rather than the local-variable
+        // region (negative offsets). The matching reload in
+        // `emit_reload` uses the same positive convention, so the
+        // store and load address the same memory cell.
         spill_instrs.push(MachInstr {
             instr: Instruction::ComputeLoadStore {
                 compute: None,
@@ -321,13 +339,29 @@ impl Allocator {
 
         let new_instr = match mi.instr {
             Instruction::LoadImm { ureg, value } => {
-                // I-register LoadImm instructions (for global access)
-                // carry a relocation and target a DAG I-register, not
-                // a data register vreg. Pass them through unchanged.
-                // All other LoadImm instructions carry raw vreg numbers
-                // that must be mapped to physical R-group registers.
-                if mi.reloc.is_some() && ureg >= 0x10 {
-                    mi.instr
+                // Two coexisting ureg conventions reach this rewrite:
+                //
+                //  - Pre-allocated I/M-register encodings (e.g. I12 =
+                //    0x1C for the indirect-call sequence, M12 = 0x24,
+                //    the SCRATCH_I reload in `ReadGlobal64`). isel sets
+                //    the `UREG_FIXED_TAG` bit on these; the underlying
+                //    encoding always lives in groups 1..2 (I/M).
+                //
+                //  - Raw R-vreg ids that must be mapped through
+                //    `get_phys` to a physical R-register encoding
+                //    0x00..0x0F. Vregs are u8 (0..255), so a vreg
+                //    `>= 128` already has bit 7 set — we cannot use
+                //    bit 7 alone to detect the tag. Combine the tag
+                //    bit with a check that the underlying encoding
+                //    lies in the I/M group nibble ranges (0x10..0x2F).
+                //    Anything else is treated as a raw vreg.
+                let tag_set = ureg & target::UREG_FIXED_TAG != 0;
+                let group = ureg & 0x70;
+                if tag_set && (group == 0x10 || group == 0x20) {
+                    Instruction::LoadImm {
+                        ureg: ureg & !target::UREG_FIXED_TAG,
+                        value,
+                    }
                 } else {
                     let vreg = ureg;
                     let phys = self.get_phys(vreg, &mut spill_pre);
@@ -388,16 +422,23 @@ impl Allocator {
             }
 
             Instruction::URegMove { dest, src } => {
-                // Map R-group vregs to physical registers.
-                let new_dest = if (dest >> 4) == 0 {
-                    target::ureg_r(self.get_phys(dest & 0xF, &mut spill_pre))
-                } else {
-                    dest
+                // Tag-bit + I/M-group-nibble combo identifies a fixed
+                // I/M-register encoding (see LoadImm comment for full
+                // discussion). Anything else is a raw R-vreg id that
+                // must be mapped to a physical register.
+                let is_fixed = |u: u8| {
+                    u & target::UREG_FIXED_TAG != 0
+                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
-                let new_src = if (src >> 4) == 0 {
-                    target::ureg_r(self.get_phys(src & 0xF, &mut spill_pre))
+                let new_dest = if is_fixed(dest) {
+                    dest & !target::UREG_FIXED_TAG
                 } else {
-                    src
+                    target::ureg_r(self.get_phys(dest, &mut spill_pre))
+                };
+                let new_src = if is_fixed(src) {
+                    src & !target::UREG_FIXED_TAG
+                } else {
+                    target::ureg_r(self.get_phys(src, &mut spill_pre))
                 };
                 Instruction::URegMove { dest: new_dest, src: new_src }
             }
@@ -407,6 +448,11 @@ impl Allocator {
                 // Spill any live vregs in those registers to the stack
                 // so they can be reloaded after the call returns.
                 self.spill_caller_saved(&mut spill_pre);
+                // Release the temporary pins placed on ARG_REGS by
+                // arg-setup Passes; the call has consumed them.
+                for p in self.arg_setup_pins.drain(..) {
+                    self.pinned.remove(&p);
+                }
                 mi.instr
             }
 
@@ -421,55 +467,98 @@ impl Allocator {
             | Instruction::IndirectBranch { .. }
             | Instruction::BitOp { .. }
             | Instruction::StackOp { .. }
-            | Instruction::UregDagMove { .. }
             | Instruction::DagModify { .. }
             | Instruction::RegisterSwap { .. }
             | Instruction::ImmShift { .. }
             | Instruction::ImmStore { .. }
             | Instruction::DoUntil { .. } => mi.instr,
 
+            Instruction::UregDagMove {
+                pm, write, ureg, i_reg, m_reg, cond, compute, post_modify,
+            } => {
+                // Tag-bit + I/M-group nibble identifies a fixed
+                // I/M/R-register encoding (R2 push for CJUMP delay
+                // slot, I12 reload for indirect return). Other ureg
+                // values are raw R-vreg ids.
+                let new_compute = compute
+                    .map(|c| self.rewrite_compute(&c, &mut spill_pre));
+                let tag = ureg & target::UREG_FIXED_TAG != 0;
+                let group = ureg & 0x70;
+                // R-group fixed encoding is 0x00..0x0F (group 0), used
+                // for the CJUMP delay-slot R2 push.
+                let is_r_fixed = tag && group == 0x00;
+                let is_i_fixed = tag && group == 0x10;
+                let is_m_fixed = tag && group == 0x20;
+                let new_ureg = if is_r_fixed || is_i_fixed || is_m_fixed {
+                    ureg & !target::UREG_FIXED_TAG
+                } else {
+                    let phys = self.get_phys(ureg, &mut spill_pre);
+                    target::ureg_r(phys)
+                };
+                Instruction::UregDagMove {
+                    pm, write, ureg: new_ureg, i_reg, m_reg, cond,
+                    compute: new_compute, post_modify,
+                }
+            }
+
             Instruction::UregAbsAccess { pm, write, ureg, addr } => {
-                if ureg < 0x10 {
+                let is_fixed = |u: u8| {
+                    u & target::UREG_FIXED_TAG != 0
+                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
+                };
+                if is_fixed(ureg) {
+                    Instruction::UregAbsAccess {
+                        pm, write,
+                        ureg: ureg & !target::UREG_FIXED_TAG,
+                        addr,
+                    }
+                } else {
                     let phys = self.get_phys(ureg, &mut spill_pre);
                     Instruction::UregAbsAccess {
                         pm, write,
                         ureg: target::ureg_r(phys),
                         addr,
                     }
-                } else {
-                    mi.instr
                 }
             }
 
             Instruction::UregMemAccess { pm, i_reg, write, lw, ureg, offset } => {
-                // The ureg field carries a raw vreg from isel. Map it
-                // to a physical register the same way ComputeLoadStore
-                // handles dreg.
-                if ureg < 0x10 {
+                let is_fixed = |u: u8| {
+                    u & target::UREG_FIXED_TAG != 0
+                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
+                };
+                if is_fixed(ureg) {
+                    Instruction::UregMemAccess {
+                        pm, i_reg, write, lw,
+                        ureg: ureg & !target::UREG_FIXED_TAG,
+                        offset,
+                    }
+                } else {
                     let phys = self.get_phys(ureg, &mut spill_pre);
                     Instruction::UregMemAccess {
                         pm, i_reg, write, lw,
                         ureg: target::ureg_r(phys),
                         offset,
                     }
-                } else {
-                    mi.instr
                 }
             }
 
             Instruction::UregTransfer { src_ureg, dst_ureg, compute } => {
                 let new_compute = compute
                     .map(|c| self.rewrite_compute(&c, &mut spill_pre));
-                // Rewrite src/dst if they are in the R-register group (0x0n).
-                let new_src = if (src_ureg >> 4) == 0 {
-                    target::ureg_r(self.get_phys(src_ureg & 0xF, &mut spill_pre))
-                } else {
-                    src_ureg
+                let is_fixed = |u: u8| {
+                    u & target::UREG_FIXED_TAG != 0
+                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
-                let new_dst = if (dst_ureg >> 4) == 0 {
-                    target::ureg_r(self.get_phys(dst_ureg & 0xF, &mut spill_pre))
+                let new_src = if is_fixed(src_ureg) {
+                    src_ureg & !target::UREG_FIXED_TAG
                 } else {
-                    dst_ureg
+                    target::ureg_r(self.get_phys(src_ureg, &mut spill_pre))
+                };
+                let new_dst = if is_fixed(dst_ureg) {
+                    dst_ureg & !target::UREG_FIXED_TAG
+                } else {
+                    target::ureg_r(self.get_phys(dst_ureg, &mut spill_pre))
                 };
                 Instruction::UregTransfer {
                     src_ureg: new_src,
@@ -530,9 +619,53 @@ impl Allocator {
                 // The 0xC0 prefix uniquely identifies arg-setup copies
                 // without colliding with RETURN_REG_VREG (0xFF).
                 if (0xC0..0xD0).contains(&rn) {
+                    let dest_phys = rn & 0x0F;
+                    let src_phys = self.get_phys(rx, spill);
+                    // If the destination physical already holds a
+                    // different live vreg, spill it before the forced
+                    // write destroys its value. Arises when a later
+                    // arg source vreg was allocated to an earlier
+                    // arg's ARG_REG: without this, the sequential
+                    // Pass r4=rX; Pass r8=r4 reads the just-clobbered
+                    // r4 instead of the arg value.
+                    let resident = self.phys_to_vreg.get(&dest_phys).copied();
+                    if let Some(v) = resident {
+                        if v != rx && v != target::RETURN_REG_VREG
+                            && self.vreg_to_phys.get(&v).copied() == Some(dest_phys)
+                        {
+                            let slot = *self.spill_map.entry(v).or_insert_with(|| {
+                                let s = self.spill_slots;
+                                self.spill_slots += 1;
+                                s
+                            });
+                            spill.push(MachInstr {
+                                instr: Instruction::ComputeLoadStore {
+                                    compute: None,
+                                    access: MemAccess {
+                                        pm: false,
+                                        write: true,
+                                        i_reg: target::FRAME_PTR,
+                                    },
+                                    dreg: dest_phys,
+                                    offset: slot as i8,
+                                    cond: target::COND_TRUE,
+                                },
+                                reloc: None,
+                            });
+                            self.vreg_to_phys.remove(&v);
+                            self.phys_to_vreg.remove(&dest_phys);
+                        }
+                    }
+                    // Reserve dest_phys until the upcoming CJUMP so a
+                    // later get_phys cannot re-allocate it and clobber
+                    // the just-placed argument value.
+                    if !self.pinned.contains(&dest_phys) {
+                        self.pinned.insert(dest_phys);
+                        self.arg_setup_pins.push(dest_phys);
+                    }
                     Pass {
-                        rn: rn & 0x0F,
-                        rx: self.get_phys(rx, spill),
+                        rn: dest_phys,
+                        rx: src_phys,
                     }
                 } else {
                     Pass {

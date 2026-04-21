@@ -53,6 +53,11 @@ pub enum IrOp {
     Shl(VReg, VReg, VReg),
     /// dst = lhs >> rhs (arithmetic)
     Shr(VReg, VReg, VReg),
+    /// dst = lhs >> rhs (logical, zero-fill). Used for unsigned `>>`.
+    /// Lowering matches `Shr` (rhs negated by the front-end) but the
+    /// instruction selector emits LSHIFT instead of ASHIFT so that
+    /// the high-order bits are zero-filled rather than sign-extended.
+    Lshr(VReg, VReg, VReg),
     /// dst = -src
     Neg(VReg, VReg),
     /// dst = ~src

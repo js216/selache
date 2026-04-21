@@ -1112,6 +1112,7 @@ fn parse_conditional_mem(text: &str, cond: u8, line: u32) -> Result<Instruction>
             i_reg,
             m_reg,
             compute,
+            post_modify,
             ..
         } => Ok(Instruction::UregDagMove {
             pm,
@@ -1121,7 +1122,7 @@ fn parse_conditional_mem(text: &str, cond: u8, line: u32) -> Result<Instruction>
             m_reg,
             cond,
             compute,
-            post_modify: false,
+            post_modify,
         }),
         other => Ok(other),
     }
@@ -1708,10 +1709,17 @@ fn try_build_dag_move(
     compute: Option<ComputeOp>,
     line: u32,
 ) -> Result<Option<Instruction>> {
-    let (i_str, m_str) = if op1.starts_with('I') && op2.starts_with('M') {
-        (op1, op2)
+    // SHARC operand order encodes pre/post-modify directly:
+    //   DM(Ii, Mm) = post-modify (use Ii, then Ii += Mm)
+    //   DM(Mm, Ii) = pre-modify  (use Ii + Mm, leave Ii unchanged)
+    // Losing this distinction at parse time silently turned every
+    // post-modify access into a pre-modify one, which still happens
+    // to read the right slot only when Mm == 0 -- any non-zero
+    // M-register value walked the access into unrelated memory.
+    let (i_str, m_str, post_modify) = if op1.starts_with('I') && op2.starts_with('M') {
+        (op1, op2, true)
     } else if op1.starts_with('M') && op2.starts_with('I') {
-        (op2, op1)
+        (op2, op1, false)
     } else {
         return Ok(None);
     };
@@ -1729,7 +1737,7 @@ fn try_build_dag_move(
         m_reg,
         cond: 31,
         compute,
-        post_modify: false,
+        post_modify,
     }))
 }
 

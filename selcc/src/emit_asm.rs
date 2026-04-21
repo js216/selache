@@ -33,7 +33,13 @@ pub struct AsmModule {
 }
 
 /// Emit a complete translation unit as SHARC+ assembly text.
-pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
+///
+/// `char_size` (in bits) controls the in-memory layout of `char[]` data
+/// (string literals, char/uint8_t initializers, etc.). With `8`, four
+/// chars pack into each 32-bit word (matching the `-char-size-8`
+/// mode and what every C-side runtime built that way expects). With
+/// `32`, each char occupies its own 32-bit word.
+pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
     let mut out = String::new();
 
     // Build map of global variable names -> types for lowering.
@@ -65,7 +71,13 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
     struct CompiledFunction {
         name: String,
         instrs: Vec<MachInstr>,
-        label_insertions: HashMap<usize, String>,
+        // One position may carry multiple labels — e.g. when the
+        // end-of-if label and the start-of-next-loop label land on
+        // the same instruction. Using a single `String` here silently
+        // dropped all but one, leaving branches to the dropped label
+        // referencing an undefined symbol.
+        label_insertions: HashMap<usize, Vec<String>>,
+        is_static: bool,
     }
     let mut compiled: Vec<CompiledFunction> = Vec::new();
     let mut skipped_functions: Vec<String> = Vec::new();
@@ -82,6 +94,7 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
             &unit.enum_constants,
             &unit.typedefs,
             &known_functions,
+            &unit.variadic_functions,
         ) {
             Ok(fr) => fr,
             Err(e) => {
@@ -107,8 +120,49 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
             name: func.name.clone(),
             instrs: fr.instrs,
             label_insertions: fr.label_insertions,
+            is_static: func.is_static,
         });
     }
+
+    // Dead-code elimination for unused static functions.
+    //
+    // C11 6.2.2p3: a `static` function has internal linkage and is
+    // invisible outside its translation unit, so if nothing in this TU
+    // references it the function is unreachable and need not be
+    // emitted. selcc previously did
+    // not, which caused headers like csmith's safe_math.h — full of
+    // unused `static` wrappers around `fabs`/`fabsf` — to drag
+    // unresolved libm symbols into every object that `#include`s
+    // them.
+    //
+    // Reachability starts from every non-static (externally linked)
+    // function and closes over call / address-taken relocs. Any
+    // `static` function not reached is dropped from the emitted
+    // module; its referenced externs are not emitted either.
+    let fn_names: HashSet<String> =
+        compiled.iter().map(|c| c.name.clone()).collect();
+    let mut reachable: HashSet<String> = compiled
+        .iter()
+        .filter(|c| !c.is_static)
+        .map(|c| c.name.clone())
+        .collect();
+    let by_name: HashMap<&str, &CompiledFunction> =
+        compiled.iter().map(|c| (c.name.as_str(), c)).collect();
+    let mut worklist: Vec<String> = reachable.iter().cloned().collect();
+    while let Some(name) = worklist.pop() {
+        let Some(cf) = by_name.get(name.as_str()) else { continue };
+        for mi in &cf.instrs {
+            if let Some(r) = &mi.reloc {
+                if r.symbol.starts_with(".L") {
+                    continue;
+                }
+                if fn_names.contains(&r.symbol) && reachable.insert(r.symbol.clone()) {
+                    worklist.push(r.symbol.clone());
+                }
+            }
+        }
+    }
+    compiled.retain(|c| !c.is_static || reachable.contains(&c.name));
 
     // Collect all external symbols referenced by any function: CALL
     // targets, LoadImm of a global, StoreGlobal-generated loads. Anything
@@ -130,6 +184,12 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
                 // are never real external symbols and must not appear
                 // in a `.EXTERN` declaration.
                 if r.symbol.starts_with(".L") {
+                    continue;
+                }
+                // String-literal slots (".strN", ".wstrN") are emitted
+                // later in this same translation unit; do not declare
+                // them `.EXTERN`.
+                if r.symbol.starts_with(".str") || r.symbol.starts_with(".wstr") {
                     continue;
                 }
                 let sym = with_abi_suffix(&r.symbol);
@@ -156,11 +216,27 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
             let _ = writeln!(out, ".GLOBAL {sym};");
             let _ = writeln!(out, "{sym}:");
             for (body_idx, mi) in cf.instrs.iter().enumerate() {
-                if let Some(lbl) = cf.label_insertions.get(&body_idx) {
-                    let _ = writeln!(out, "{lbl}:");
+                if let Some(lbls) = cf.label_insertions.get(&body_idx) {
+                    for lbl in lbls {
+                        let _ = writeln!(out, "{lbl}:");
+                    }
                 }
                 let line = emit_instr_line(mi).map_err(|e| Error::NotImplemented(format!("encode: {e}")))?;
                 let _ = writeln!(out, "    {line};");
+            }
+            // Emit any trailing labels whose position sits at
+            // `instrs.len()`. Arises when a basic-block label is
+            // the last IR op in a function — e.g. `break_label`
+            // from `lower_for` on `for(;;){}`. Follow with a NOP
+            // so the label resolves to a real address; the branch
+            // that targets it is dead in these cases, but leaving
+            // the symbol unresolved sent the core to address 0.
+            let tail_idx = cf.instrs.len();
+            if let Some(lbls) = cf.label_insertions.get(&tail_idx) {
+                for lbl in lbls {
+                    let _ = writeln!(out, "{lbl}:");
+                }
+                let _ = writeln!(out, "    NOP;");
             }
         }
         // Emit stubs for functions that failed to compile (e.g. internal
@@ -270,16 +346,32 @@ pub fn emit_module(unit: &TranslationUnit) -> Result<AsmModule> {
     }
 
     // Rodata: string literals.
+    //
+    // With `-char-size-8`, four chars pack into each 32-bit word
+    // (little-endian byte order, terminator included). The C runtime
+    // (printf, strlen, etc.) reads the format string one byte at a
+    // time via `*p++`; if we wrote one char per word the second byte
+    // would always be 0 and the string would terminate after the
+    // first character, silently producing no output. Wide strings
+    // (`L"..."`) are 32-bit per character irrespective of char_size.
+    //
     if !all_strings.is_empty() || !all_wide_strings.is_empty() {
         out.push_str(".SECTION/DM seg_dmda;\n");
         for (i, s) in all_strings.iter().enumerate() {
-            let name = format!(".str{i}");
-            let mut words: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
-            words.push(0);
-            emit_var_bytes(&mut out, &name, &words);
+            let name = with_abi_suffix(&format!(".str{i}"));
+            if char_size == 8 {
+                let mut bytes: Vec<u8> = s.as_bytes().to_vec();
+                bytes.push(0);
+                let words = pack_bytes_le(&bytes);
+                emit_var_bytes(&mut out, &name, &words);
+            } else {
+                let mut words: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
+                words.push(0);
+                emit_var_bytes(&mut out, &name, &words);
+            }
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
-            let name = format!(".wstr{i}");
+            let name = with_abi_suffix(&format!(".wstr{i}"));
             let mut words: Vec<u32> = ws.clone();
             words.push(0);
             emit_var_bytes(&mut out, &name, &words);
@@ -300,6 +392,23 @@ fn with_abi_suffix(name: &str) -> String {
     } else {
         format!("{name}.")
     }
+}
+
+/// Pack a byte stream into little-endian 32-bit words, zero-padding
+/// the final word if the byte count is not a multiple of 4.
+fn pack_bytes_le(bytes: &[u8]) -> Vec<u32> {
+    let n_words = bytes.len().div_ceil(4);
+    let mut out = Vec::with_capacity(n_words);
+    for chunk_start in (0..bytes.len()).step_by(4) {
+        let mut word = 0u32;
+        for j in 0..4 {
+            if let Some(&b) = bytes.get(chunk_start + j) {
+                word |= (b as u32) << (8 * j);
+            }
+        }
+        out.push(word);
+    }
+    out
 }
 
 /// Emit a `.VAR name = v0, v1, ...;` initializer line. Using `.VAR`
@@ -541,8 +650,9 @@ struct FnEmitResult {
     /// preceded by a local label in the asm output. Currently used by
     /// hardware DO loops: the end-of-loop label is inserted before the
     /// last body instruction so that selas resolves the DO target
-    /// symbolically at assembly time.
-    label_insertions: HashMap<usize, String>,
+    /// symbolically at assembly time. Multiple labels may share a
+    /// position (adjacent basic-block boundaries).
+    label_insertions: HashMap<usize, Vec<String>>,
 }
 
 /// Run the per-function pipeline and return the final machine-instruction
@@ -555,6 +665,7 @@ fn emit_function_instrs(
     enum_constants: &[(String, i64)],
     typedefs: &[(String, crate::types::Type)],
     known_functions: &HashSet<String>,
+    variadic_callees: &HashSet<String>,
 ) -> Result<FnEmitResult> {
     let lower_result = lower::lower_function_with_known(
         func, global_types, struct_defs, enum_constants, typedefs, known_functions,
@@ -567,11 +678,24 @@ fn emit_function_instrs(
     let ir = ir_opt::dead_code_eliminate(&ir);
     let ir = ir_opt::detect_hardware_loops(&ir);
 
-    let isel_result = isel::select_with_name(&ir, &func.name);
+    let isel_result = isel::select_with_name(&ir, &func.name, variadic_callees);
 
     let num_params = func.params.len().min(target::ARG_REGS.len()) as u8;
+    if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
+        eprintln!("=== {} num_params={} ===", func.name, num_params);
+        eprintln!("=== {} IR/isel ===", func.name);
+        for (i, mi) in isel_result.instrs.iter().enumerate() {
+            eprintln!("  [{i}] {:?}", mi.instr);
+        }
+    }
     let (allocated, _spill_count, alloc_map) =
         regalloc::allocate(&isel_result.instrs, num_params);
+    if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
+        eprintln!("=== {} after regalloc ===", func.name);
+        for (i, mi) in allocated.iter().enumerate() {
+            eprintln!("  [{i}] {:?}", mi.instr);
+        }
+    }
 
     let used_callee_saved = callee_saved_used(&allocated);
     let num_saved = used_callee_saved.len() as i8;
@@ -597,11 +721,22 @@ fn emit_function_instrs(
     }
 
     let optimized = eliminate_copies(&adjusted, &mut label_map);
+    if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
+        eprintln!("=== {} after adjust ===", func.name);
+        for (i, mi) in adjusted.iter().enumerate() {
+            eprintln!("  [{i}] {:?}", mi.instr);
+        }
+        eprintln!("=== {} after eliminate_copies ===", func.name);
+        for (i, mi) in optimized.iter().enumerate() {
+            eprintln!("  [{i}] {:?}", mi.instr);
+        }
+    }
 
     let body_depth = count_local_slots(&optimized);
     let frame_size = body_depth.max(used_callee_saved.len() as u32);
-    let prologue = build_prologue(frame_size, &used_callee_saved);
-    let epilogue = build_epilogue(frame_size, &used_callee_saved);
+    let has_calls = optimized.iter().any(|mi| matches!(mi.instr, Instruction::CJump { .. }));
+    let prologue = build_prologue(frame_size, &used_callee_saved, has_calls);
+    let epilogue = build_epilogue(frame_size, &used_callee_saved, has_calls);
 
     // Non-leaf functions do NOT need to save I12 in the prologue.
     // The SHARC+ C-ABI reads I12 = DM(M7, I6) right before each
@@ -633,26 +768,20 @@ fn emit_function_instrs(
     instrs.extend(epilogue);
     instrs.extend(body_tail);
 
-    // After each call returns, RFRAME sets I7 = I6 (the restored frame
-    // pointer). Subsequent CJUMPs would push their delay-slot words at
-    // DM(I6) and DM(I6-1), overwriting the caller's frame link and
-    // return address. Restore I7 to its allocated frame position after
-    // every call so the next CJUMP pushes below the frame.
-    //
-    // Target: I7 = I6 - 2 - frame_size (the 2 accounts for the frame
-    // link and return address pushed by the caller's CJUMP delay slots).
-    let i7_restore_offset = -(frame_size as i32) - FRAME_SKIP;
-    let has_calls = instrs.iter().any(|mi| matches!(mi.instr, Instruction::CJump { .. }));
-    let needs_i7_restore = has_calls && frame_size > 0;
+    // RFRAME's ISA pseudocode is `I7 = I6; I6 = DM(0, I6)`. At the
+    // moment RFRAME executes, `I6` is the callee's frame pointer, which
+    // equals the caller's pre-CJUMP I7 (CJUMP set the callee's I6 from
+    // the caller's I7). So `I7 = I6` after RFRAME puts I7 back at the
+    // same position the prologue established — already below the spill
+    // region, thanks to `CJUMP_PUSH_RESERVE` in the prologue's MODIFY
+    // magnitude — so the next CJUMP's delay-slot pushes land in the
+    // reserved area without any extra fix-up on the caller side. Scan
+    // for the second delay-slot instruction (an `ImmStore` with a
+    // `.L_ret_*` relocation) and emit the matching return label right
+    // after it.
+    let mut final_instrs = Vec::with_capacity(instrs.len());
+    let mut new_label_insertions: HashMap<usize, Vec<String>> = HashMap::new();
 
-    // Scan for CJUMP delay-slot-2 (ImmStore with .L_ret_* relocation)
-    // and place both the return label and the I7 restore instruction
-    // right after. Build a new vector with the insertions.
-    let mut final_instrs = Vec::with_capacity(instrs.len() + 16);
-    let mut new_label_insertions: HashMap<usize, String> = HashMap::new();
-
-    // Copy existing label insertions, adjusting indices as we go.
-    // First pass: find all call-return ImmStore positions.
     let mut insert_after: Vec<usize> = Vec::new();
     for (i, mi) in instrs.iter().enumerate() {
         if let Some(ref reloc) = mi.reloc {
@@ -664,48 +793,28 @@ fn emit_function_instrs(
         }
     }
 
-    // Second pass: build final_instrs with I7 restores inserted.
-    let mut offset = 0usize; // tracks how many extra instructions inserted so far
     for (i, mi) in instrs.into_iter().enumerate() {
         final_instrs.push(mi);
-        // Check if any existing label_insertions point at the original index
-        let new_idx = i + offset;
-        if let Some(label) = label_insertions.remove(&i) {
-            new_label_insertions.insert(new_idx, label);
+        if let Some(labels) = label_insertions.remove(&i) {
+            new_label_insertions.entry(i).or_default().extend(labels);
         }
 
         if insert_after.contains(&i) {
-            // The instruction after this ImmStore is the call return point.
-            let ret_idx = new_idx + 1;
-            // Insert return label at ret_idx (the next instruction).
+            let ret_idx = i + 1;
             if let Some(reloc) = final_instrs.last().and_then(|mi| mi.reloc.as_ref()) {
                 if reloc.symbol.starts_with(".L_ret_") {
-                    new_label_insertions
-                        .entry(ret_idx)
-                        .or_insert_with(|| reloc.symbol.clone());
+                    let sym = reloc.symbol.clone();
+                    let slot = new_label_insertions.entry(ret_idx).or_default();
+                    if !slot.contains(&sym) {
+                        slot.push(sym);
+                    }
                 }
-            }
-            // Insert I7 restore if needed.
-            if needs_i7_restore {
-                final_instrs.push(MachInstr {
-                    instr: Instruction::Modify {
-                        i_reg: target::STACK_PTR,
-                        value: i7_restore_offset,
-                        width: selinstr::encode::MemWidth::Normal,
-                        bitrev: false,
-                    },
-                    reloc: None,
-                });
-                offset += 1;
             }
         }
     }
 
-    // Transfer any remaining label insertions with adjusted indices.
-    for (old_idx, label) in label_insertions {
-        let shift = insert_after.iter().filter(|&&pos| pos < old_idx).count();
-        let extra = if needs_i7_restore { shift } else { 0 };
-        new_label_insertions.entry(old_idx + extra).or_insert(label);
+    for (old_idx, labels) in label_insertions {
+        new_label_insertions.entry(old_idx).or_default().extend(labels);
     }
 
     Ok(FnEmitResult {
@@ -870,7 +979,20 @@ fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u8) -> bool {
 /// the adjust pass rewrite them.
 const FRAME_SKIP: i32 = 2;
 
-fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
+/// Extra slots reserved BELOW the spill region for the callee's own
+/// CJUMP delay-slot pushes. `CJUMP (DB)` writes two words via
+/// `DM(I7,M7)=...` (post-decrement by `M7=-1`), starting at the I7 the
+/// callee set up in its prologue. Without this reserve those two writes
+/// would land at `DM(-frame_size, I6)` and `DM(-(frame_size-1), I6)`,
+/// i.e. on top of the deepest spill slots that the regalloc has already
+/// populated. Bumping the prologue/epilogue `MODIFY` magnitude by
+/// `CJUMP_PUSH_RESERVE` pushes I7 two words further below the spill
+/// region so the delay-slot writes land in previously unused memory.
+/// Only non-leaf functions need this reserve; a leaf function never
+/// executes `CJUMP` so the two extra words would be dead stack.
+const CJUMP_PUSH_RESERVE: i32 = 2;
+
+fn build_prologue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<MachInstr> {
     debug_assert!(
         callee_saved.iter().all(|r| target::CALLER_SAVED.iter().all(|c| c != r)),
         "callee-saved register overlaps with caller-saved set"
@@ -880,10 +1002,11 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
     }
     let mut instrs = Vec::new();
     if frame_size > 0 {
+        let extra = if has_calls { CJUMP_PUSH_RESERVE } else { 0 };
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::STACK_PTR,
-                value: -(frame_size as i32),
+                value: -(frame_size as i32) - extra,
                 width: MemWidth::Normal,
                 bitrev: false,
             },
@@ -910,7 +1033,7 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
     instrs
 }
 
-fn build_epilogue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
+fn build_epilogue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<MachInstr> {
     if frame_size == 0 && callee_saved.is_empty() {
         return Vec::new();
     }
@@ -933,10 +1056,11 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u8]) -> Vec<MachInstr> {
         });
     }
     if frame_size > 0 {
+        let extra = if has_calls { CJUMP_PUSH_RESERVE } else { 0 };
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::STACK_PTR,
-                value: frame_size as i32,
+                value: frame_size as i32 + extra,
                 width: MemWidth::Normal,
                 bitrev: false,
             },
@@ -1288,6 +1412,30 @@ fn source_regs(instr: &Instruction) -> Vec<u8> {
         Instruction::Return { compute: Some(c), .. } => {
             compute_source_regs(&c, &mut regs);
         }
+        Instruction::CJump { .. } => {
+            // A CJUMP transfers control to a callee that, by the SHARC+
+            // C-ABI, reads its arguments from the ARG_REGS (R4, R8,
+            // R12) and may also re-read R0 (the 4th-argument /
+            // return-value slot). The eliminate_copies pass uses
+            // `source_regs` to count register uses so it can decide
+            // whether to forward-substitute a Pass through to the next
+            // instruction; without listing the ARG_REGS here, an
+            // `R4 = R1` Pass that immediately precedes a CJUMP would
+            // be substituted into the very next spill (whose dst is
+            // R4) and dropped entirely, leaving R4 uninitialized at
+            // the call site. The callee then dereferences whatever
+            // garbage was in R4 and faults.
+            for &r in target::ARG_REGS {
+                regs.push(r);
+            }
+            regs.push(target::RETURN_REG);
+        }
+        Instruction::IndirectBranch { call: true, .. } => {
+            for &r in target::ARG_REGS {
+                regs.push(r);
+            }
+            regs.push(target::RETURN_REG);
+        }
         _ => {}
     }
     regs
@@ -1424,7 +1572,7 @@ fn resolve_branches(
     label_map: &HashMap<Label, usize>,
     prologue_len: usize,
     func_name: &str,
-) -> (Vec<MachInstr>, HashMap<usize, String>) {
+) -> (Vec<MachInstr>, HashMap<usize, Vec<String>>) {
     let mut out = Vec::with_capacity(instrs.len());
     // Map from function-absolute instruction index (prologue + body + epilogue)
     // to a locally-generated label name. The caller inserts each label in the
@@ -1433,7 +1581,7 @@ fn resolve_branches(
     // a numeric offset. selas then resolves the label at assembly time, in
     // whatever unit (words or parcels) the output mode needs, and suppresses
     // VISA compression inside the loop body.
-    let mut label_insertions: HashMap<usize, String> = HashMap::new();
+    let mut label_insertions: HashMap<usize, Vec<String>> = HashMap::new();
     for mi in instrs.iter() {
         let (new_instr, new_reloc) = match mi.instr {
             Instruction::Branch {
@@ -1455,9 +1603,10 @@ fn resolve_branches(
                 let target_body_idx = label_map.get(&label).copied().unwrap_or(0);
                 let target_pc = target_body_idx + prologue_len;
                 let name = format!(".L_branch_{func_name}_{label}");
-                label_insertions
-                    .entry(target_pc)
-                    .or_insert_with(|| name.clone());
+                let slot = label_insertions.entry(target_pc).or_default();
+                if !slot.contains(&name) {
+                    slot.push(name.clone());
+                }
                 (
                     Instruction::Branch {
                         call,
@@ -1479,9 +1628,10 @@ fn resolve_branches(
                 let target_pc = target_body_idx + prologue_len;
                 let last_body_pc = if target_pc > 0 { target_pc - 1 } else { 0 };
                 let name = format!(".L_doloop_end_{func_name}_{label}");
-                label_insertions
-                    .entry(last_body_pc)
-                    .or_insert_with(|| name.clone());
+                let slot = label_insertions.entry(last_body_pc).or_default();
+                if !slot.contains(&name) {
+                    slot.push(name.clone());
+                }
                 (
                     Instruction::DoLoop { counter, end_pc: 0 },
                     Some(Reloc { symbol: name, kind: RelocKind::Addr24 }),
@@ -1499,10 +1649,12 @@ mod tests {
     use super::*;
     use crate::parse;
 
-    /// Compile C source to an asm module.
+    /// Compile C source to an asm module. Tests assume the standard
+    /// 8-bit char layout (`-char-size-8`), matching how the runtime
+    /// objects in this codebase are built.
     fn compile(src: &str) -> AsmModule {
         let unit = parse::parse(src).unwrap();
-        emit_module(&unit).unwrap()
+        emit_module(&unit, 8).unwrap()
     }
 
     /// Compile C source, then assemble the resulting asm text through
@@ -1674,8 +1826,13 @@ mod tests {
 
     #[test]
     fn rt_hardware_loop() {
+        // The body must contain at least one real instruction for
+        // hardware-loop conversion to fire (a SHARC+ DO with an
+        // empty body has end-PC = DO-PC, which the chip executes as
+        // an infinite loop). `s += 1` provides exactly one body op
+        // and does not reference the induction variable.
         let text = round_trip_disasm(
-            "void f() { int i; for (i = 0; i < 10; i++) { } }",
+            "int g; void f() { int i; for (i = 0; i < 10; i++) g += 1; }",
         );
         let has_hw = text.iter().any(|t| t.contains("LCNTR") || t.contains("DO"));
         assert!(has_hw, "got: {text:?}");
@@ -1694,15 +1851,21 @@ mod tests {
     /// the two-function image and asserting the relative form.
     #[test]
     fn rt_hardware_loop_pc_relative_multi_function() {
+        // Hardware DO loops only fire when the body does *not* reference
+        // the induction variable: LCNTR replaces `i` with an internal
+        // counter and the IR step that updates the C-level `i` is dropped.
+        // Bodies that read `i` would silently see 0 every iteration. So
+        // these loops use a body unrelated to `i` (a constant accumulator
+        // step), which still drives the PC-relative-offset path under test.
         let src = r#"
             int sum_const(void) {
                 int s = 0;
-                for (int i = 0; i < 10; i++) s += i;
+                for (int i = 0; i < 10; i++) s += 1;
                 return s;
             }
             int sum2_const(void) {
                 int s = 0;
-                for (int i = 0; i < 20; i++) s += i * 2;
+                for (int i = 0; i < 20; i++) s += 2;
                 return s;
             }
         "#;

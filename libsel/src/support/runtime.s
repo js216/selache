@@ -2,20 +2,20 @@
 // runtime.s --- Compiler runtime intrinsics for the SHARC+
 // Copyright (c) 2026 Jakob Kastelic
 
-// the SHARC+ C compiler emits calls to a small set of runtime helpers for integer
-// division and remainder, because the SHARC+ has no hardware divider
-// for wide integers. Linking with -no-std-lib skips the stock runtime
-// library, so these helpers are provided here in a from-scratch
-// implementation.
+// Integer divide and remainder helpers for the SHARC+. The SHARC+ has
+// no hardware divider for wide integers, so the standard C operators
+// `/` and `%` lower (via isel) to calls into the small set of helpers
+// below:
 //
 //    __divrem_u32 -- unsigned 32-bit divmod
 //    __divrem_s32 -- signed 32-bit divmod
 //    __divrem_u64 -- unsigned 64-bit divmod
 //    __divrem_s64 -- signed 64-bit divmod
 //
-// ABIs (deduced from the ABI: the helpers inherit
-// the normal the SHARC+ C compiler function-call register convention since the SHARC+ C compiler
-// emits plain `cjump __divrem_X.` with no pre-call register moves):
+// Register conventions match the standard SHARC+ C calling convention
+// (per the SHARC+ Core Programming Reference, chapter 6), so every
+// compiler in the ecosystem can issue `cjump __divrem_X.` with no
+// pre-call shuffling:
 //
 //   __divrem_u32. / __divrem_s32.
 //     In:  R4 = dividend,  R8 = divisor

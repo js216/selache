@@ -32,6 +32,7 @@ pub struct Options {
     pub swc: bool,
     pub ldf_file: Option<String>,
     pub lib_paths: Vec<String>,
+    pub no_std_inc: bool,
 }
 
 impl Default for Options {
@@ -55,6 +56,7 @@ impl Default for Options {
             swc: false,
             ldf_file: None,
             lib_paths: Vec::new(),
+            no_std_inc: false,
         }
     }
 }
@@ -80,6 +82,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "-version" => opts.show_version = true,
             "-help" => opts.show_version = true,
             "-swc" => opts.swc = true,
+            "-no-std-inc" => opts.no_std_inc = true,
             "-o" => {
                 i += 1;
                 if i >= args.len() {

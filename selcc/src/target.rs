@@ -70,13 +70,35 @@ pub const COND_GT: u8 = 18;
 pub const COND_TRUE: u8 = 31;
 
 /// Universal register encoding: R-group is 0x0n, I-group is 0x1n.
+/// These produce the *machine* encoding (post-regalloc) used by selinstr.
 pub const fn ureg_r(index: u8) -> u8 {
     index & 0xF
 }
 
-/// Universal register encoding for I-registers.
+/// Universal register encoding for I-registers (post-regalloc, machine
+/// encoding 0x10..0x1F).
+///
+/// In selcc-internal pre-regalloc instruction streams the same I-register
+/// is carried as `ureg_i_pre(N)` (see below), which sets a high tag bit
+/// so the register allocator can tell a fixed I-register apart from a
+/// raw R-vreg id. Without the tag, vreg numbers above 15 would alias
+/// I0..I15 (both fall in 0x10..0x1F), and the allocator would silently
+/// treat the I-register encoding as a vreg id (or vice versa), producing
+/// stale-register reads in indirect loads/stores.
 pub const fn ureg_i(index: u8) -> u8 {
     0x10 | (index & 0xF)
+}
+
+/// Tag bit set on universal-register fields whose value has already been
+/// resolved to a fixed machine encoding (an I-register). The regalloc
+/// strips this bit before emitting the final instruction; absence of the
+/// bit means the field is a raw R-vreg id awaiting allocation.
+pub const UREG_FIXED_TAG: u8 = 0x80;
+
+/// Pre-regalloc form of an I-register reference: the machine encoding
+/// 0x10..0x1F OR'd with `UREG_FIXED_TAG`.
+pub const fn ureg_i_pre(index: u8) -> u8 {
+    UREG_FIXED_TAG | ureg_i(index)
 }
 
 #[cfg(test)]

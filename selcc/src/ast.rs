@@ -156,6 +156,7 @@ pub struct Function {
     pub params: Vec<(String, Type)>,
     pub is_variadic: bool,
     pub body: Vec<Stmt>,
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,4 +175,8 @@ pub struct TranslationUnit {
     pub typedefs: Vec<(String, Type)>,
     pub struct_defs: Vec<(String, Vec<(String, Type)>)>,
     pub enum_constants: Vec<(String, i64)>,
+    /// Names of functions known to be variadic (declared with `...`),
+    /// including forward declarations of externs. Looked up by call
+    /// lowering to choose stack-passing for variadic callees.
+    pub variadic_functions: std::collections::HashSet<String>,
 }

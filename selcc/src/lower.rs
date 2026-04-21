@@ -681,12 +681,29 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 let num_words = ty.size_words().max(1);
                 let slot_offset = ctx.frame_size;
                 ctx.frame_size += num_words;
-                ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
+                // For arrays the recorded storage slot is the *last* word
+                // of the contiguous block, because the SHARC stack grows
+                // downward (toward more-negative offsets from I6) but C
+                // array indexing walks upward (`&a[0] + i`). Element 0
+                // therefore lives at the deepest slot so that increasing
+                // memory addresses correspond to increasing array indices.
+                let storage_slot = if matches!(ty, Type::Array(..)) {
+                    slot_offset + num_words - 1
+                } else {
+                    slot_offset
+                };
+                ctx.locals.insert(name.clone(), LocalStorage::Stack(storage_slot));
                 ctx.local_types.insert(name.clone(), ty.clone());
                 if let Some(Expr::InitList(items)) = init {
+                    let is_array = matches!(ty, Type::Array(..));
                     for (i, item) in items.iter().enumerate() {
                         let val = lower_expr(ctx, item)?;
-                        ctx.emit(IrOp::Store(val, 0, (slot_offset + i as u32) as i32));
+                        let elem_slot = if is_array {
+                            slot_offset + num_words - 1 - i as u32
+                        } else {
+                            slot_offset + i as u32
+                        };
+                        ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
                     }
                 } else if let Some(init_expr) = init {
                     if is_struct_type(ty, ctx) && num_words > 1 {
@@ -1287,15 +1304,29 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let num_words = resolved_ty.size_words().max(1) as u32;
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
+            // See note in Stmt::Decl: array compound literals must place
+            // element 0 at the deepest slot so that `+i` walks upward
+            // through valid array storage on a downward-growing stack.
+            let is_array = matches!(resolved_ty, Type::Array(..));
             if let Expr::InitList(items) = inner.as_ref() {
                 for (i, item) in items.iter().enumerate() {
                     if i as u32 >= num_words { break; }
                     let val = lower_expr(ctx, item)?;
-                    ctx.emit(IrOp::Store(val, 0, (slot + i as u32) as i32));
+                    let elem_slot = if is_array {
+                        slot + num_words - 1 - i as u32
+                    } else {
+                        slot + i as u32
+                    };
+                    ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
                 }
             }
+            let base_slot = if is_array {
+                slot + num_words - 1
+            } else {
+                slot
+            };
             let dst = ctx.alloc_vreg();
-            ctx.emit(IrOp::FrameAddr(dst, slot as i32));
+            ctx.emit(IrOp::FrameAddr(dst, base_slot as i32));
             Ok(dst)
         }
         // Comma operator: &(a, b) — evaluate a for side effects, return &b
@@ -1731,8 +1762,6 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Index(base, idx) => {
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
-            // For SHARC, word-addressed memory means element size is 1 word
-            // for int/float/pointer. Multiply index by element size in words.
             let addr = ctx.alloc_vreg();
             ctx.emit(IrOp::Add(addr, base_addr, index));
             let dst = ctx.alloc_vreg();
@@ -2295,7 +2324,25 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         BinaryOp::BitOr => ctx.emit(IrOp::BitOr(dst, l, r)),
         BinaryOp::BitXor => ctx.emit(IrOp::BitXor(dst, l, r)),
         BinaryOp::Shl => ctx.emit(IrOp::Shl(dst, l, r)),
-        BinaryOp::Shr => ctx.emit(IrOp::Shr(dst, l, r)),
+        BinaryOp::Shr => {
+            // IrOp::Shr / Lshr both map to SHARC shift instructions
+            // that use a signed count: positive counts shift left,
+            // negative counts shift right. C `>>` is always a right
+            // shift, so the count is negated before being handed to
+            // the IR. The choice between Shr (ASHIFT, sign-extends)
+            // and Lshr (LSHIFT, zero-fills) follows the C signedness
+            // of the operands. Using ASHIFT for `uint32_t crc >>= 1`
+            // would smear the sign bit into the high half, producing
+            // wrong CRC table entries (and ultimately the csmith
+            // checksum mismatch that masked an early hang).
+            let neg = ctx.alloc_vreg();
+            ctx.emit(IrOp::Neg(neg, r));
+            if is_unsigned {
+                ctx.emit(IrOp::Lshr(dst, l, neg));
+            } else {
+                ctx.emit(IrOp::Shr(dst, l, neg));
+            }
+        }
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt
         | BinaryOp::Le | BinaryOp::Ge => {
             return lower_comparison(ctx, op, l, r, is_unsigned);
@@ -2352,7 +2399,11 @@ fn widen_to_64(ctx: &mut LowerCtx, val: VReg, expr: &Expr) -> VReg {
 
 /// Check if an expression has unsigned type.
 fn is_unsigned_expr(expr: &Expr, ctx: &LowerCtx) -> bool {
-    expr_type(expr, ctx).is_some_and(|t| t.is_unsigned())
+    // Resolve typedef chains before testing signedness: stdint types
+    // such as `uint32_t` arrive here as `Type::Typedef("uint32_t")`,
+    // and `is_unsigned` only sees through Const/Volatile, so without
+    // this step every uint32_t value would be treated as signed.
+    expr_type(expr, ctx).is_some_and(|t| resolve_type(&t, ctx).is_unsigned())
 }
 
 /// Lower a 64-bit comparison to IR.
@@ -2778,7 +2829,8 @@ fn lower_inc_dec(
 
 /// Emit the binary operation for a compound assignment, given loaded lhs and
 /// rhs vregs. Returns the result vreg.
-fn emit_compound_op(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg) -> Result<VReg> {
+fn emit_compound_op(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg,
+                    is_unsigned: bool) -> Result<VReg> {
     let result = ctx.alloc_vreg();
     match op {
         BinaryOp::Add => ctx.emit(IrOp::Add(result, lhs, rhs)),
@@ -2790,7 +2842,20 @@ fn emit_compound_op(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg) -> R
         BinaryOp::BitOr => ctx.emit(IrOp::BitOr(result, lhs, rhs)),
         BinaryOp::BitXor => ctx.emit(IrOp::BitXor(result, lhs, rhs)),
         BinaryOp::Shl => ctx.emit(IrOp::Shl(result, lhs, rhs)),
-        BinaryOp::Shr => ctx.emit(IrOp::Shr(result, lhs, rhs)),
+        BinaryOp::Shr => {
+            // Compound `>>=` mirrors the binary `>>` lowering: the
+            // SHARC ASHIFT/LSHIFT this maps to uses negative counts
+            // for right shifts, so we have to negate here too. The
+            // signedness flag picks the arithmetic vs logical form
+            // so that `crc >>= 1` on a uint32_t zero-fills.
+            let neg = ctx.alloc_vreg();
+            ctx.emit(IrOp::Neg(neg, rhs));
+            if is_unsigned {
+                ctx.emit(IrOp::Lshr(result, lhs, neg));
+            } else {
+                ctx.emit(IrOp::Shr(result, lhs, neg));
+            }
+        }
         _ => {
             return Err(Error::NotImplemented(format!(
                 "compound assignment op: {op:?}"
@@ -2806,6 +2871,9 @@ fn lower_compound_assign(
     target: &Expr,
     value: &Expr,
 ) -> Result<VReg> {
+    // Compound `>>=` etc. follow the C usual-arithmetic-conversions
+    // rule: if either operand is unsigned, the operation is unsigned.
+    let is_unsigned = is_unsigned_expr(target, ctx) || is_unsigned_expr(value, ctx);
     match target {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
@@ -2827,7 +2895,7 @@ fn lower_compound_assign(
                     }
                 };
                 let rhs = lower_expr(ctx, value)?;
-                let result = emit_compound_op(ctx, op, lhs, rhs)?;
+                let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
                 match storage {
                     LocalStorage::Stack(offset) => {
                         ctx.emit(IrOp::Store(result, 0, offset as i32));
@@ -2845,7 +2913,7 @@ fn lower_compound_assign(
                 let lhs = ctx.alloc_vreg();
                 ctx.emit(IrOp::ReadGlobal(lhs, name.clone()));
                 let rhs = lower_expr(ctx, value)?;
-                let result = emit_compound_op(ctx, op, lhs, rhs)?;
+                let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
                 ctx.emit(IrOp::StoreGlobal(result, name.clone()));
                 Ok(result)
             } else {
@@ -2857,7 +2925,7 @@ fn lower_compound_assign(
             let lhs = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs = lower_expr(ctx, value)?;
-            let result = emit_compound_op(ctx, op, lhs, rhs)?;
+            let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
         }
@@ -2866,7 +2934,7 @@ fn lower_compound_assign(
             let lhs = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs_val = lower_expr(ctx, value)?;
-            let result = emit_compound_op(ctx, op, lhs, rhs_val)?;
+            let result = emit_compound_op(ctx, op, lhs, rhs_val, is_unsigned)?;
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
         }

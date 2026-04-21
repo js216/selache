@@ -271,6 +271,8 @@ impl<'a> Parser<'a> {
         let mut typedefs: Vec<(String, Type)> = Vec::new();
         let mut struct_defs: Vec<(String, Vec<(String, Type)>)> = Vec::new();
         let enum_constants: Vec<(String, i64)> = Vec::new();
+        let mut variadic_decls: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         while self.current != Token::Eof {
             // Handle typedef declarations.
             if self.current == Token::Typedef {
@@ -462,6 +464,17 @@ impl<'a> Parser<'a> {
                         }
                         let pty = self.parse_type()?;
                         let pty = self.parse_pointer_type(pty);
+                        // C89/C99 6.7.5.3/10: `(void)` as the sole
+                        // parameter list means "no arguments", not
+                        // "one parameter of type void". It must be
+                        // unnamed and immediately followed by `)`.
+                        if matches!(pty, crate::types::Type::Void)
+                            && params.is_empty()
+                            && !is_variadic
+                            && self.current == Token::RParen
+                        {
+                            break;
+                        }
                         // Check for function pointer or pointer-to-array parameter
                         if self.current == Token::LParen && self.is_fnptr_declarator() {
                             self.advance()?; // (
@@ -529,6 +542,17 @@ impl<'a> Parser<'a> {
 
                 if self.current == Token::Semicolon {
                     // Forward declaration -- treat as extern.
+                    // Track variadic-ness so the call lowering can
+                    // see whether the callee is variadic; without this,
+                    // an `extern int printf(const char*, ...)` parsed only
+                    // as a `GlobalDecl` would lose the `...` and the
+                    // caller would emit register-passing for a variadic
+                    // callee, leaving its named args in unread registers
+                    // and feeding `va_arg` whatever happened to be on the
+                    // stack.
+                    if is_variadic {
+                        variadic_decls.insert(name.clone());
+                    }
                     self.advance()?;
                     globals.push(GlobalDecl {
                         name,
@@ -547,6 +571,7 @@ impl<'a> Parser<'a> {
                         params,
                         is_variadic,
                         body,
+                        is_static,
                     });
                 }
             } else {
@@ -607,12 +632,22 @@ impl<'a> Parser<'a> {
                 self.expect(&Token::Semicolon)?;
             }
         }
+        // Function definitions also contribute their variadic-ness to
+        // the lookup table (so `static int helper(int, ...)` followed by
+        // a call site below it is handled correctly even without a
+        // forward declaration).
+        for f in &functions {
+            if f.is_variadic {
+                variadic_decls.insert(f.name.clone());
+            }
+        }
         Ok(TranslationUnit {
             functions,
             globals,
             typedefs,
             struct_defs,
             enum_constants: self.enum_constants.drain(..).chain(enum_constants).collect(),
+            variadic_functions: variadic_decls,
         })
     }
 

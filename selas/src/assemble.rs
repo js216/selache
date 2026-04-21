@@ -733,8 +733,44 @@ fn emit_elf_bytes(
     // in this file. These have to appear in the symbol table as STB_LOCAL
     // so the linker can resolve the relocation against the in-file
     // definition instead of treating the label as an unresolved external.
+    //
+    // Labels that originated from a `.VAR` directive in a data section
+    // (i.e. they appear in `sections[*].symbols`) are emitted as
+    // `STT_OBJECT`. the SHARC+ linker treats `STT_NOTYPE` locals as plain
+    // labels and resolves them with *word*-granular addresses, while
+    // it walks `STT_OBJECT` symbols for byte-granular layout in BW
+    // data sections. Without the OBJECT type the relocation against
+    // a string literal points 4 byte-addresses higher than the actual
+    // first byte (for SwCode-aligned symbols this is hidden by the
+    // /4 multiplier; in BW memory it leaves printf reading the
+    // padding byte 0x00 instead of the real first character of the
+    // format string).
     for (name, sec_idx, word_offset) in local_refs {
-        writer.add_local(name, elf_indices[*sec_idx], *word_offset);
+        // Skip names that are already declared `.GLOBAL` — those will
+        // be emitted as STT_FUNC/STT_OBJECT globals later in this
+        // function. Adding a duplicate STB_LOCAL entry for the same
+        // name produces two symtab entries that point at the same
+        // address; the SHARC+ linker resolves later in-file references
+        // (CJUMPs, address-of) to the first match it sees, which is
+        // the local NOTYPE — and a NOTYPE symbol is treated as a
+        // word-granular label, so byte-addressed data references
+        // (and even some PM cjumps) resolve to the wrong runtime
+        // value.
+        if globals.iter().any(|g| g == name) {
+            continue;
+        }
+        let elf_idx = elf_indices[*sec_idx];
+        let from_var = sections.get(*sec_idx)
+            .map(|(_, sd)| sd.symbols.iter().any(|(n, _)| n == name))
+            .unwrap_or(false);
+        let is_data_sec = sections.get(*sec_idx)
+            .map(|(_, sd)| !sd.is_pm)
+            .unwrap_or(false);
+        if from_var && is_data_sec {
+            writer.add_local_object(name, elf_idx, *word_offset, 0);
+        } else {
+            writer.add_local(name, elf_idx, *word_offset);
+        }
     }
 
     // Register extern (undefined) symbols.

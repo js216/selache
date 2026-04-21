@@ -88,6 +88,50 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                 }
             }
 
+            IrOp::Div(dst, lhs, rhs) => {
+                let lv = known.get(lhs).copied();
+                let rv = known.get(rhs).copied();
+                if let (Some(a), Some(b)) = (lv, rv) {
+                    if b != 0 {
+                        // Match `IrOp::Div`'s runtime semantics: truncated
+                        // signed 32-bit division. Folding lets the compiler
+                        // emit a literal load instead of the inline float
+                        // reciprocal sequence (which loses precision for
+                        // values above 2^24 — `BOARD_BAUD_DIV` lands in
+                        // that range and the float result rounds to a
+                        // baud-divider value the UART silently
+                        // mistransmits as nulls).
+                        let folded = ((a as i32).wrapping_div(b as i32)) as i64;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    } else {
+                        result.push(op.clone());
+                    }
+                } else {
+                    result.push(op.clone());
+                }
+            }
+
+            IrOp::Mod(dst, lhs, rhs) => {
+                let lv = known.get(lhs).copied();
+                let rv = known.get(rhs).copied();
+                if let (Some(a), Some(b)) = (lv, rv) {
+                    if b != 0 {
+                        let folded = ((a as i32).wrapping_rem(b as i32)) as i64;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    } else {
+                        result.push(op.clone());
+                    }
+                } else {
+                    result.push(op.clone());
+                }
+            }
+
             IrOp::Mul(dst, lhs, rhs) => {
                 let lv = known.get(lhs).copied();
                 let rv = known.get(rhs).copied();
@@ -196,6 +240,29 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                         (a32 >> ((-b) as u32)) as i64
                     } else {
                         ((a32 as u32).wrapping_shr(b as u32)) as i32 as i64
+                    };
+                    result.push(IrOp::LoadImm(*dst, folded));
+                    known.insert(*dst, folded);
+                    mark_consumed(&use_counts, &mut consumed, *lhs);
+                    mark_consumed(&use_counts, &mut consumed, *rhs);
+                } else {
+                    result.push(op.clone());
+                }
+            }
+
+            IrOp::Lshr(dst, lhs, rhs) => {
+                let lv = known.get(lhs).copied();
+                let rv = known.get(rhs).copied();
+                if let (Some(a), Some(b)) = (lv, rv) {
+                    // IrOp::Lshr maps to SHARC+ LSHIFT: positive b =
+                    // left shift, negative b = logical right shift
+                    // (zero-fills high bits). Fold in 32-bit unsigned
+                    // arithmetic to match the hardware.
+                    let a32 = a as u32;
+                    let folded = if b < 0 {
+                        a32.wrapping_shr((-b) as u32) as i64
+                    } else {
+                        a32.wrapping_shl(b as u32) as i32 as i64
                     };
                     result.push(IrOp::LoadImm(*dst, folded));
                     known.insert(*dst, folded);
@@ -398,6 +465,37 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
                 continue;
             }
 
+            // Reject loops whose body references the loop counter slot.
+            // Converting to a hardware DO loop drops the i++ step
+            // instructions; LCNTR replaces them. If the body still reads
+            // or takes the address of `i` from its stack slot, the value
+            // there stays at 0 forever, which silently corrupts results
+            // (e.g. `a[i] = ...` writes a[0] every iteration).
+            let body_uses_counter = body.iter().any(|op| match op {
+                IrOp::Load(_, _, slot) | IrOp::Store(_, _, slot)
+                | IrOp::Load64(_, _, slot) | IrOp::Store64(_, _, slot)
+                | IrOp::FrameAddr(_, slot) => *slot == info.counter_slot,
+                _ => false,
+            });
+            if body_uses_counter {
+                continue;
+            }
+
+            // Reject loops with an empty body. SHARC+ hardware DO
+            // requires the body to span at least one instruction so
+            // the end-of-loop comparator triggers; with zero body
+            // instructions the DO instruction's end-PC equals its own
+            // PC, which the hardware interprets as an infinite loop
+            // (or worse, a fault). Empty loops fall back to the
+            // software loop form, which the optimizer can dead-code-
+            // eliminate later if the trip count is also unused.
+            let body_has_real_op = body.iter().any(|op| {
+                !matches!(op, IrOp::Label(_) | IrOp::Nop)
+            });
+            if !body_has_real_op {
+                continue;
+            }
+
             // Build the replacement: remove the init, header, step, and
             // back-edge, replacing with HardwareLoop + body + Label(end).
             let mut new_ops = Vec::with_capacity(ops.len());
@@ -434,6 +532,11 @@ struct LoopInfo {
     step_start: usize,
     /// Number of iterations.
     count: i64,
+    /// Stack slot of the loop counter `i`. The body must not read or write
+    /// this slot, because hardware loops increment LCNTR (an internal
+    /// register), not the C-level induction variable on the stack. If the
+    /// body references `i` we cannot legally drop the i++ step instructions.
+    counter_slot: i32,
 }
 
 /// Analyze the loop header to determine if it is a simple counted for-loop.
@@ -587,6 +690,7 @@ fn analyze_loop_header(
         body_start,
         step_start,
         count: limit_val,
+        counter_slot,
     })
 }
 
@@ -629,6 +733,7 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::BitXor(d, _, _)
         | IrOp::Shl(d, _, _)
         | IrOp::Shr(d, _, _)
+        | IrOp::Lshr(d, _, _)
         | IrOp::Neg(d, _)
         | IrOp::BitNot(d, _)
         | IrOp::Load(d, _, _)
@@ -717,6 +822,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::BitXor(_, a, b)
         | IrOp::Shl(_, a, b)
         | IrOp::Shr(_, a, b)
+        | IrOp::Lshr(_, a, b)
         | IrOp::FAdd(_, a, b)
         | IrOp::FSub(_, a, b)
         | IrOp::FMul(_, a, b)
@@ -952,7 +1058,14 @@ mod tests {
             IrOp::Cmp(5, 6),
             IrOp::BranchCond(Cond::Eq, 1), // lbl_end_for = 1
 
-            // body (empty, but we need something)
+            // body: a single Add to a sink slot. Hardware-loop
+            // conversion now requires the body to contain at least
+            // one real (non-Label, non-Nop) op so the SHARC+ DO
+            // instruction has a non-trivial end-of-loop comparator.
+            IrOp::LoadImm(10, 0),
+            IrOp::Add(11, 10, 10),
+            IrOp::Store(11, 0, 1),  // sink slot != counter
+
             // step: i++
             IrOp::Load(7, 0, 0),    // load i
             IrOp::LoadImm(8, 1),    // 1

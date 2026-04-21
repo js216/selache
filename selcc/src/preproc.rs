@@ -37,6 +37,7 @@ pub struct Preprocessor {
     include_dirs: Vec<String>,
     date: String,
     time: String,
+    no_std_inc: bool,
 }
 
 impl Default for Preprocessor {
@@ -59,6 +60,7 @@ impl Preprocessor {
             include_dirs: Vec::new(),
             date,
             time,
+            no_std_inc: false,
         };
         // Predefined macros for SHARC processor family compatibility.
         pp.defines.insert(
@@ -119,6 +121,17 @@ impl Preprocessor {
     /// Add an include search path (-I flag).
     pub fn add_include_dir(&mut self, dir: &str) {
         self.include_dirs.push(dir.to_string());
+    }
+
+    /// Disable selcc's built-in standard headers (-no-std-inc flag).
+    /// User `-I` paths become the only source
+    /// of `<string.h>`, `<math.h>`, etc. Required when the project
+    /// ships its own freestanding replacements (e.g. static inline
+    /// implementations of `strcmp`), since otherwise selcc's prototype-
+    /// only builtins shadow them and leave unresolved externals at
+    /// link time.
+    pub fn set_no_std_inc(&mut self, v: bool) {
+        self.no_std_inc = v;
     }
 
     /// Set target processor (defines __ADSP21569__, __ADSP21569_FAMILY__, etc).
@@ -603,7 +616,7 @@ impl Preprocessor {
         // pull in unresolvable symbols whenever any transitive
         // `#include <math.h>`, `#include <stdint.h>`, etc. appears in
         // the source.
-        if !search_local {
+        if !search_local && !self.no_std_inc {
             if let Some(content) = Self::builtin_header(&inc_file) {
                 return self.process_inner(content, &inc_file, depth + 1);
             }
@@ -636,8 +649,10 @@ impl Preprocessor {
         }
 
         // Quoted ("...") include fallback: try builtin headers last.
-        if let Some(content) = Self::builtin_header(&inc_file) {
-            return self.process_inner(content, &inc_file, depth + 1);
+        if !self.no_std_inc {
+            if let Some(content) = Self::builtin_header(&inc_file) {
+                return self.process_inner(content, &inc_file, depth + 1);
+            }
         }
 
         Err(Error::Preprocess {
