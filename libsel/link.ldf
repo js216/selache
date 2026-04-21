@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: MIT
+// link.ldf --- Minimal linker description for the ADSP-21569
+// Copyright (c) 2026 Jakob Kastelic
+
+ARCHITECTURE(ADSP-21569)
+
+$OBJECTS = $COMMAND_LINE_OBJECTS;
+$LIBRARIES = ;
+$OBJS_LIBS = $OBJECTS, $LIBRARIES;
+
+MEMORY
+{
+   // The IVT is a 48-bit-wide instruction region; every other
+   // section uses byte-addressed L1 or L2 SRAM. L2 is also
+   // visible on the system fabric so peripheral DMAs can reach
+   // it without the L1 multi-port alias translation.
+   mem_iv_code   { TYPE(PM RAM) START(0x00090000) END(0x000900a7) WIDTH(48) }
+   mem_l1_block0 { TYPE(BW RAM) START(0x002403f0) END(0x0026ffff) WIDTH(8)  }
+   mem_l1_block1 { TYPE(BW RAM) START(0x002c0000) END(0x002ebfff) WIDTH(8)  }
+   mem_l1_block2 { TYPE(BW RAM) START(0x00300000) END(0x0031bfff) WIDTH(8)  }
+   mem_l2        { TYPE(BW RAM) START(0x20000000) END(0x200f9fff) WIDTH(8)  }
+}
+
+PROCESSOR p0
+{
+   OUTPUT($COMMAND_LINE_OUTPUT_FILE)
+   ENTRY(start)
+
+   SECTIONS
+   {
+      // Interrupt vector table at PM 0x90000 (48-bit instructions).
+      ivt PM
+      {
+         INPUT_SECTIONS( $OBJECTS(iv_code) )
+      } > mem_iv_code
+
+      // 8 KB stack reservation. startup.s reads ldf_stack_space
+      // and ldf_stack_length out of this RESERVE to seed B7/I7/L7.
+      stack_reserve NO_INIT BW
+      {
+         RESERVE(ldf_stack_space, ldf_stack_length = 65536, 8)
+      } > mem_l1_block0
+
+      // Read-only string literals and other initialised data.
+      block1_data BW
+      {
+         INPUT_SECTION_ALIGN(4)
+         INPUT_SECTIONS( $OBJECTS(seg_dmda) )
+      } > mem_l1_block1
+
+      // Large DMA buffers land in L2 SRAM, which is always
+      // visible on the system fabric and needs no L1 MP alias
+      // translation. Split into two sections:
+      //   seg_l2     -- initialised L2 data (loaded at boot)
+      //   seg_l2_bss -- uninitialised L2 data (NO_INIT)
+      // Demos that need DMA-reachable buffers use the
+      // seg_l2_bss pragma so the boot loader does not have to
+      // zero-fill tens of KB on startup (the stock 21569 boot
+      // ROM misbehaves past about 32 KB of init data).
+      l2_data BW
+      {
+         INPUT_SECTION_ALIGN(4)
+         INPUT_SECTIONS( $OBJECTS(seg_l2) )
+      } > mem_l2
+
+      l2_bss NO_INIT BW
+      {
+         INPUT_SECTION_ALIGN(4)
+         INPUT_SECTIONS( $OBJECTS(seg_l2_bss) )
+      } > mem_l2
+
+      // Code. seg_swco holds 16/32-bit SW-compressed instructions;
+      // seg_pmco is the fallback section for any full-width 48-bit
+      // NW instructions a driver might still want to emit.
+      block2_sw_code SW
+      {
+         INPUT_SECTION_ALIGN(2)
+         FILL(0x1)
+         INPUT_SECTIONS( $OBJECTS(seg_swco seg_pmco) )
+      } > mem_l1_block2
+   }
+}

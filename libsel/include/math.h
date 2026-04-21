@@ -5,16 +5,37 @@
 #ifndef LIBSEL_MATH_H
 #define LIBSEL_MATH_H
 
+#if defined(__GNUC__) || defined(__clang__)
 #define HUGE_VALF (__builtin_huge_valf())
 #define HUGE_VAL  ((double)HUGE_VALF)
 #define INFINITY  (__builtin_inff())
 #define NAN       (__builtin_nanf(""))
-
 #define isnan(x)      __builtin_isnan(x)
 #define isinf(x)      __builtin_isinf(x)
 #define isfinite(x)   __builtin_isfinite(x)
 #define signbit(x)    __builtin_signbit(x)
 #define fpclassify(x) __builtin_fpclassify(FP_NAN, FP_INFINITE, FP_NORMAL, FP_SUBNORMAL, FP_ZERO, (x))
+#else
+/* Portable fallbacks for compilers without gcc builtins (e.g. the SHARC+ C compiler).
+   IEEE-754 single-precision bit patterns; assumes 32-bit float. */
+#define HUGE_VALF (1.0e38f * 1.0e38f)
+#define HUGE_VAL  ((double)HUGE_VALF)
+#define INFINITY  HUGE_VALF
+#define NAN       (0.0f / 0.0f)
+static int _libsel_isnanf(float x) { return x != x; }
+static int _libsel_isinff(float x) { return !_libsel_isnanf(x) && x * 0.5f == x && x != 0.0f; }
+static int _libsel_signbitf(float x) {
+    union { float f; unsigned u; } _v; _v.f = x;
+    return (int)(_v.u >> 31);
+}
+#define isnan(x)      _libsel_isnanf((float)(x))
+#define isinf(x)      _libsel_isinff((float)(x))
+#define isfinite(x)   (!isnan(x) && !isinf(x))
+#define signbit(x)    _libsel_signbitf((float)(x))
+#define fpclassify(x) (isnan(x) ? FP_NAN : \
+                       isinf(x) ? FP_INFINITE : \
+                       (x) == 0.0f ? FP_ZERO : FP_NORMAL)
+#endif
 
 #define FP_NAN       0
 #define FP_INFINITE  1

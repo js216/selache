@@ -5,8 +5,14 @@
 #ifndef _STDBOOL_H
 #define _STDBOOL_H
 
+#ifndef bool
 #define bool _Bool
-#define true ((_Bool)+1)
-#define false ((_Bool)+0)
+#endif
+#ifndef true
+#define true 1
+#endif
+#ifndef false
+#define false 0
+#endif
 
 #endif
