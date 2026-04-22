@@ -468,24 +468,30 @@ pub fn lower_function_with_known(
 
         // Struct/union parameters passed by value: allocate a local stack
         // slot large enough for all words and store the incoming words.
+        // The SHARC stack grows downward, so field w (byte offset
+        // `w * 4`) must live at the slot `w` words above the deepest
+        // reserved slot; the recorded base is therefore the deepest
+        // word (`slot + num_words - 1`) and writes walk upward.
         if !is_scalar && is_struct_type(ty, &ctx) {
             let num_words = type_size_words(ty, &ctx);
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
+            let base_slot = slot + num_words - 1;
             for w in 0..num_words {
                 let param_idx = i + w as usize;
+                let dst_slot = slot + num_words - 1 - w;
                 if param_idx < target::ARG_REGS.len() {
                     let tmp = ctx.alloc_vreg();
                     ctx.emit(IrOp::Copy(tmp, param_idx as VReg));
-                    ctx.emit(IrOp::Store(tmp, 0, (slot + w) as i32));
+                    ctx.emit(IrOp::Store(tmp, 0, dst_slot as i32));
                 } else {
                     let stack_off = (param_idx - target::ARG_REGS.len()) as u32;
                     let tmp = ctx.alloc_vreg();
                     ctx.emit(IrOp::LoadStackArg(tmp, stack_off));
-                    ctx.emit(IrOp::Store(tmp, 0, (slot + w) as i32));
+                    ctx.emit(IrOp::Store(tmp, 0, dst_slot as i32));
                 }
             }
-            ctx.locals.insert(name.clone(), LocalStorage::Stack(slot));
+            ctx.locals.insert(name.clone(), LocalStorage::Stack(base_slot));
             continue;
         }
 
@@ -678,16 +684,28 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 // Track VLA depth for goto checking.
                 ctx.vla_depth += 1;
             } else {
-                let num_words = ty.size_words().max(1);
+                // Use `type_size_words` (not `ty.size_words`) so that a
+                // struct declared by tag name — whose fields are resolved
+                // from `ctx.struct_defs` rather than carried inline on the
+                // AST type — reserves the correct number of stack slots.
+                let num_words = type_size_words(ty, ctx).max(1);
                 let slot_offset = ctx.frame_size;
                 ctx.frame_size += num_words;
-                // For arrays the recorded storage slot is the *last* word
-                // of the contiguous block, because the SHARC stack grows
-                // downward (toward more-negative offsets from I6) but C
-                // array indexing walks upward (`&a[0] + i`). Element 0
-                // therefore lives at the deepest slot so that increasing
-                // memory addresses correspond to increasing array indices.
-                let storage_slot = if matches!(ty, Type::Array(..)) {
+                // For any multi-word aggregate (array, struct, union) the
+                // recorded storage slot is the *last* word of the
+                // contiguous block, because the SHARC stack grows downward
+                // (toward more-negative offsets from I6) but C field /
+                // element offsets walk upward (`&a[0] + i`, `&p + offsetof`).
+                // Field 0 / element 0 therefore lives at the deepest slot
+                // so that increasing member byte offsets correspond to
+                // increasing memory addresses. Scalars (including
+                // `long long`, which is handled via Store64/Load64 and
+                // does not use member-offset arithmetic) keep their
+                // historical `slot_offset` base so their two-word layout
+                // is unaffected.
+                let is_aggregate = matches!(ty,
+                    Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
+                let storage_slot = if is_aggregate {
                     slot_offset + num_words - 1
                 } else {
                     slot_offset
@@ -695,10 +713,16 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 ctx.locals.insert(name.clone(), LocalStorage::Stack(storage_slot));
                 ctx.local_types.insert(name.clone(), ty.clone());
                 if let Some(Expr::InitList(items)) = init {
-                    let is_array = matches!(ty, Type::Array(..));
+                    // Aggregates store element `i` at
+                    // `slot_offset + num_words - 1 - i` so that walking
+                    // upward from the lowest slot (the storage base) hits
+                    // fields / elements in increasing-offset order.
+                    // Non-aggregate scalar initializers (including the
+                    // degenerate `int x = {5};` form) keep the single
+                    // slot at `slot_offset`.
                     for (i, item) in items.iter().enumerate() {
                         let val = lower_expr(ctx, item)?;
-                        let elem_slot = if is_array {
+                        let elem_slot = if is_aggregate {
                             slot_offset + num_words - 1 - i as u32
                         } else {
                             slot_offset + i as u32
@@ -709,7 +733,9 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     if is_struct_type(ty, ctx) && num_words > 1 {
                         let src_addr = lower_struct_expr_addr(ctx, init_expr)?;
                         let dst_addr = ctx.alloc_vreg();
-                        ctx.emit(IrOp::FrameAddr(dst_addr, slot_offset as i32));
+                        // Use `storage_slot` so the copy starts at the
+                        // deepest word (field 0) and walks upward.
+                        ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
                         emit_struct_copy(ctx, dst_addr, src_addr, num_words);
                     } else if ty.is_long_long() {
                         let val = lower_expr(ctx, init_expr)?;
@@ -719,11 +745,11 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         } else {
                             val
                         };
-                        ctx.emit(IrOp::Store64(val, 0, slot_offset as i32));
+                        ctx.emit(IrOp::Store64(val, 0, storage_slot as i32));
                     } else {
                         let val = lower_expr(ctx, init_expr)?;
                         let val = coerce_vreg(ctx, val, ty);
-                        ctx.emit(IrOp::Store(val, 0, slot_offset as i32));
+                        ctx.emit(IrOp::Store(val, 0, storage_slot as i32));
                     }
                 }
             }
@@ -857,31 +883,36 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
     Ok(())
 }
 
-/// Compute the word offset and type of a named field within a struct.
+/// Compute the byte offset and type of a named field within a struct.
+///
+/// Returned as a byte offset so that callers can add it directly to a
+/// byte-addressed struct pointer (same convention as C99 `offsetof`
+/// and as `scale_index_by_elem` for array indexing). Using a
+/// word-scaled offset here would collide with the byte-scaled offsets
+/// produced by `Expr::Index` / `Expr::Binary` pointer arithmetic and
+/// cause adjacent fields to overlap on every struct access.
 fn struct_field_offset(fields: &[(String, Type)], field_name: &str) -> Option<(u32, Type)> {
     // Direct lookup in top-level fields.
     if fields.iter().any(|(n, _)| n == field_name) {
         let (byte_off, _, _) = crate::types::struct_field_layout(fields, field_name)?;
-        let word_off = byte_off / 4;
         let ty = fields.iter()
             .find(|(n, _)| n == field_name)
             .map(|(_, t)| t.clone())?;
-        return Some((word_off, ty));
+        return Some((byte_off, ty));
     }
     // Search inside anonymous struct/union members.
     for (name, ty) in fields {
         if !name.starts_with("__anon") { continue; }
         let (anon_byte_off, _, _) = crate::types::struct_field_layout(fields, name)?;
-        let anon_word_off = anon_byte_off / 4;
         match ty {
             Type::Union { fields: inner, .. } => {
                 if let Some(ft) = union_field_type(inner, field_name) {
-                    return Some((anon_word_off, ft));
+                    return Some((anon_byte_off, ft));
                 }
             }
             Type::Struct { fields: inner, .. } => {
                 if let Some((nested_off, ft)) = struct_field_offset(inner, field_name) {
-                    return Some((anon_word_off + nested_off, ft));
+                    return Some((anon_byte_off + nested_off, ft));
                 }
             }
             _ => {}
@@ -1342,15 +1373,17 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let num_words = resolved_ty.size_words().max(1) as u32;
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
-            // See note in Stmt::Decl: array compound literals must place
-            // element 0 at the deepest slot so that `+i` walks upward
-            // through valid array storage on a downward-growing stack.
-            let is_array = matches!(resolved_ty, Type::Array(..));
+            // See note in Stmt::Decl: aggregate compound literals
+            // (array, struct, union) must place element / field 0 at
+            // the deepest slot so that `+i` or `+offsetof(...)` walks
+            // upward through valid storage on a downward-growing stack.
+            let is_aggregate = matches!(resolved_ty,
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
             if let Expr::InitList(items) = inner.as_ref() {
                 for (i, item) in items.iter().enumerate() {
                     if i as u32 >= num_words { break; }
                     let val = lower_expr(ctx, item)?;
-                    let elem_slot = if is_array {
+                    let elem_slot = if is_aggregate {
                         slot + num_words - 1 - i as u32
                     } else {
                         slot + i as u32
@@ -1358,7 +1391,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
                 }
             }
-            let base_slot = if is_array {
+            let base_slot = if is_aggregate {
                 slot + num_words - 1
             } else {
                 slot
@@ -3060,9 +3093,13 @@ fn lower_compound_literal(
         let item_expr = match item {
             Expr::DesignatedInit { field, value } => {
                 if let Some(fields) = resolve_struct_fields(&resolved_ty, ctx) {
-                    if let Some((off, _)) = struct_field_offset(fields, field) {
+                    if let Some((byte_off, _)) = struct_field_offset(fields, field) {
+                        // `struct_field_offset` returns a byte offset;
+                        // stack slots are word-sized, so convert before
+                        // adding to the compound-literal base slot.
+                        let word_off = byte_off / 4;
                         let val = lower_expr(ctx, value)?;
-                        ctx.emit(IrOp::Store(val, 0, (slot + off) as i32));
+                        ctx.emit(IrOp::Store(val, 0, (slot + word_off) as i32));
                         continue;
                     }
                 }
@@ -3513,8 +3550,9 @@ mod tests {
         let src = "struct s { int a; int b; };\nvoid f(struct s *p) { p->b = 5; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
-        // p->b has offset 1, so there should be a LoadImm(_, 1) for the offset.
-        assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 1))));
+        // p->b has byte offset 4 (second `int` field), so the lowered
+        // IR should contain a LoadImm(_, 4) feeding the address Add.
+        assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 4))));
         assert!(ops.iter().any(|op| matches!(op, IrOp::Store(..))));
     }
 
