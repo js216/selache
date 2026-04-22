@@ -131,12 +131,21 @@ impl Allocator {
 
     /// Move live vregs from caller-saved registers (R0-R7) to callee-
     /// saved registers (R8-R15) before a CJUMP so they survive the call.
-    /// Before a CJump, spill all live vregs in caller-saved registers
-    /// to the stack frame. After the call returns, any subsequent use
-    /// of those vregs will trigger a reload from the spill slot via
-    /// the normal get_phys → emit_reload path.
+    /// For each live caller-saved vreg, first try to migrate it to a
+    /// free callee-saved register via `Rn = PASS Rm`; if no callee-saved
+    /// is available, fall back to spilling to the stack frame. The
+    /// migration path matches the SHARC+ C-ABI idiom the reference
+    /// toolchain emits for live-across-CJUMP values and sidesteps a
+    /// stack-spill path that
+    /// does not round-trip reliably when multiple CJUMPs are chained
+    /// back to back (values reloaded after a second CJUMP read zero
+    /// instead of the stored value, so a sequence of three nested
+    /// calls returns the innermost call's result). After the migration
+    /// or spill, the caller-saved physical is freed and any subsequent
+    /// use of the vreg resolves to the new location via `get_phys` →
+    /// either the new physical mapping or the `emit_reload` path.
     fn spill_caller_saved(&mut self, spill: &mut Vec<MachInstr>) {
-        let to_spill: Vec<(u8, u8)> = self.vreg_to_phys.iter()
+        let to_handle: Vec<(u8, u8)> = self.vreg_to_phys.iter()
             .filter(|(&vreg, &phys)| {
                 target::CALLER_SAVED.contains(&phys)
                     && vreg != target::RETURN_REG_VREG
@@ -144,8 +153,28 @@ impl Allocator {
             .map(|(&vreg, &phys)| (vreg, phys))
             .collect();
 
-        for (vreg, phys) in to_spill {
-            // Allocate a spill slot if not already spilled.
+        for (vreg, phys) in to_handle {
+            if let Some(callee_phys) = self.free_callee_saved() {
+                // Migrate: callee_phys = PASS phys.
+                spill.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Alu(AluOp::Pass {
+                            rn: callee_phys,
+                            rx: phys,
+                        }),
+                    },
+                    reloc: None,
+                });
+                self.phys_to_vreg.remove(&phys);
+                self.pinned.remove(&phys);
+                self.vreg_to_phys.insert(vreg, callee_phys);
+                self.phys_to_vreg.insert(callee_phys, vreg);
+                continue;
+            }
+
+            // Fallback: no callee-saved register is free, so spill to the
+            // stack. Allocate a spill slot if not already spilled.
             let slot = *self.spill_map.entry(vreg).or_insert_with(|| {
                 let s = self.spill_slots;
                 self.spill_slots += 1;
@@ -178,6 +207,18 @@ impl Allocator {
             self.vreg_to_phys.remove(&vreg);
             self.pinned.remove(&phys);
         }
+    }
+
+    /// Return a free callee-saved physical register, if any. A register
+    /// is free when it is neither mapped to a vreg nor pinned.
+    fn free_callee_saved(&self) -> Option<u8> {
+        target::CALLEE_SAVED
+            .iter()
+            .find(|&&phys| {
+                !self.phys_to_vreg.contains_key(&phys)
+                    && !self.pinned.contains(&phys)
+            })
+            .copied()
     }
 
     /// Release all transient pins taken during the current rewrite.
