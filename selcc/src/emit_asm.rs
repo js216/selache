@@ -1277,6 +1277,16 @@ fn eliminate_copies(
         }
     }
 
+    // Set of instruction indices that are branch targets. Fusing a Pass
+    // into a neighbouring instruction is only correct when control flow
+    // reaches both neighbours strictly via fall-through: if a label
+    // points at the Pass (or at the instruction whose semantics we are
+    // about to rewrite), a jump from elsewhere lands on an instruction
+    // whose operands depend on a value that was never produced on that
+    // path. Build the target set once from the label map.
+    let branch_targets: std::collections::HashSet<usize> =
+        label_map.values().copied().collect();
+
     let mut removed = Vec::new();
     let mut result = Vec::with_capacity(instrs.len());
     let mut skip_next_remap: Option<(u8, u8)> = None;
@@ -1297,11 +1307,24 @@ fn eliminate_copies(
                 continue;
             }
 
+            // Refuse to fuse across a branch target. A label at `i`
+            // means some jump lands on the Pass; removing it redirects
+            // the jump to the following instruction, which after the
+            // optimisation reads `src` instead of `dst` — but `src`
+            // need not hold the desired value on that alternate path.
+            // A label at `i+1` is likewise unsafe for forward-
+            // substitution because the rewritten successor would then
+            // be entered from a path that did not execute the Pass.
+            let pass_is_target = branch_targets.contains(&i);
+            let next_is_target = branch_targets.contains(&(i + 1));
+
             let dst_count = use_count.get(&dst).copied().unwrap_or(0);
             if dst != src
                 && dst_count == 1
                 && i + 1 < instrs.len()
                 && source_regs(&instrs[i + 1].instr).contains(&dst)
+                && !pass_is_target
+                && !next_is_target
             {
                 removed.push(i);
                 skip_next_remap = Some((dst, src));
@@ -1310,7 +1333,7 @@ fn eliminate_copies(
             }
 
             let src_count = use_count.get(&src).copied().unwrap_or(0);
-            if dst != src && src_count == 1 && !result.is_empty() {
+            if dst != src && src_count == 1 && !result.is_empty() && !pass_is_target {
                 if let Some(rewritten) = rewrite_dest(&result[result.len() - 1], src, dst) {
                     let last = result.len() - 1;
                     result[last] = rewritten;
@@ -2038,6 +2061,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rt_lognot_preserves_pass_at_label() {
+        // Regression: eliminate_copies used to fuse a `Rn = PASS Rm`
+        // into the following instruction even when a label pointed at
+        // the Pass. In `!a + !b` the second LNot emits a Pass that is
+        // the target of the IF-EQ branch; removing it made the trailing
+        // ADD read the constant-one register unconditionally and return
+        // 2 instead of 1 for `a=0, b=5`. The fix must keep both Pass
+        // copies of the second LNot, and the ADD must source them
+        // (not the immediate-1 register directly).
+        let text = round_trip_disasm(
+            "int f(void) { int a = 0; int b = 5; return !a + !b; }",
+        );
+        // Exactly four `= PASS` copies survive (two per LNot, one for
+        // each arm). A successful fusion would have dropped one.
+        let pass_count = text.iter().filter(|t| t.contains("= PASS ")).count();
+        assert_eq!(
+            pass_count, 4,
+            "expected 4 PASS copies (2 per LNot), got {pass_count} in: {text:?}"
+        );
     }
 
     #[test]
