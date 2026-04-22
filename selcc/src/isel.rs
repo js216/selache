@@ -423,21 +423,30 @@ pub fn select_with_name(
                         });
                     }
                 } else {
-                    // Stack arguments (args 4+): push in reverse order.
+                    // Stack arguments (args ARG_REGS.len()+): push in
+                    // reverse order via post-modify `DM(I7, M7) = Rn`
+                    // (store at DM(I7), then I7 -= 1 through M7 = -1).
+                    // After the last push, I7 sits just below arg 0 of
+                    // the stack-passed region; CJUMP(DB) then captures
+                    // I6 = I7 at that point, so in the callee's view
+                    // arg `k` (k = i - ARG_REGS.len()) lives at
+                    // DM(I6 + k + 1). A fixed-offset write through
+                    // `DM(I7 + k)` without decrementing I7 leaves the
+                    // stored args in the range CJUMP's own delay-slot
+                    // pushes (R2 link and return address) overwrite,
+                    // silently trampling the first stack-passed arg.
                     for (i, arg) in args.iter().enumerate().rev() {
                         if i >= target::ARG_REGS.len() {
-                            let stack_offset = (i - target::ARG_REGS.len()) as i8;
                             instrs.push(MachInstr {
-                                instr: Instruction::ComputeLoadStore {
-                                    compute: None,
-                                    access: MemAccess {
-                                        pm: false,
-                                        write: true,
-                                        i_reg: target::STACK_PTR,
-                                    },
-                                    dreg: *arg as u8,
-                                    offset: stack_offset,
+                                instr: Instruction::UregDagMove {
+                                    pm: false,
+                                    write: true,
+                                    ureg: *arg as u8,
+                                    i_reg: target::STACK_PTR,
+                                    m_reg: 7, // M7 = -1
                                     cond: target::COND_TRUE,
+                                    compute: None,
+                                    post_modify: true,
                                 },
                                 reloc: None,
                             });
@@ -1148,6 +1157,57 @@ pub fn select_with_name(
                         reloc: None,
                     });
                 }
+            }
+
+            IrOp::LoadStackArg(dst, k) => {
+                // Caller-pushed stack argument `k` lives at DM(I6 + k + 1):
+                // the caller pushes args via post-modify `DM(I7, M7) = Rn`
+                // in reverse order; CJUMP(DB) then captures I6 = I7 at
+                // call time (before delay slots), so arg 0 of the
+                // stack-passed region ends up one word above I6 and
+                // higher-indexed args step further up.
+                //
+                // `adjust_frame_offsets` rewrites every FRAME_PTR access,
+                // mangling positive offsets into spill-slot negatives, so
+                // route through SCRATCH_I to keep the positive-offset
+                // access intact through the emit pipeline.
+                let offset = (*k as i32) + 1;
+                instrs.push(MachInstr {
+                    instr: Instruction::URegMove {
+                        dest: target::ureg_i_pre(target::SCRATCH_I),
+                        src: target::ureg_i_pre(target::FRAME_PTR),
+                    },
+                    reloc: None,
+                });
+                // Word-scaled (NW) modify: stack-arg addresses are in
+                // the same word-stepped frame world as `DM(±N, I6)`.
+                instrs.push(MachInstr {
+                    instr: Instruction::Modify {
+                        i_reg: target::SCRATCH_I,
+                        value: offset,
+                        width: MemWidth::Nw,
+                        bitrev: false,
+                    },
+                    reloc: None,
+                });
+                // Read at DM(I4, 0). Use a zero-offset post-modify via
+                // M5 (= 0 at startup, same convention as
+                // `emit_indirect_access`) so the instruction encodes
+                // as a Type-3 post-modify form that tolerates
+                // byte-addressable data memory.
+                instrs.push(MachInstr {
+                    instr: Instruction::UregDagMove {
+                        pm: false,
+                        write: false,
+                        ureg: *dst as u8,
+                        i_reg: target::SCRATCH_I,
+                        m_reg: 5,
+                        cond: target::COND_TRUE,
+                        compute: None,
+                        post_modify: true,
+                    },
+                    reloc: None,
+                });
             }
 
             // ---- 64-bit instruction selection ----
@@ -2189,7 +2249,8 @@ fn max_vreg(ir: &[IrOp]) -> u32 {
             | IrOp::LoadWideString(a, _)
             | IrOp::StackSave(a)
             | IrOp::StackRestore(a)
-            | IrOp::FrameAddr(a, _) => bump(*a),
+            | IrOp::FrameAddr(a, _)
+            | IrOp::LoadStackArg(a, _) => bump(*a),
             IrOp::Branch(_)
             | IrOp::BranchCond(_, _)
             | IrOp::Label(_)

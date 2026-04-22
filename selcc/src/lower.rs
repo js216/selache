@@ -447,7 +447,7 @@ pub fn lower_function_with_known(
                 if is_float_param {
                     ctx.vreg_is_float.insert(param_vreg, true);
                 }
-                ctx.emit(IrOp::Load(param_vreg, 0, stack_offset as i32));
+                ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
                 ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
                 ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
             }
@@ -481,7 +481,7 @@ pub fn lower_function_with_known(
                 } else {
                     let stack_off = (param_idx - target::ARG_REGS.len()) as u32;
                     let tmp = ctx.alloc_vreg();
-                    ctx.emit(IrOp::Load(tmp, 0, stack_off as i32));
+                    ctx.emit(IrOp::LoadStackArg(tmp, stack_off));
                     ctx.emit(IrOp::Store(tmp, 0, (slot + w) as i32));
                 }
             }
@@ -498,7 +498,7 @@ pub fn lower_function_with_known(
                 if is_float_param {
                     ctx.vreg_is_float.insert(param_vreg, true);
                 }
-                ctx.emit(IrOp::Load(param_vreg, 0, stack_offset as i32));
+                ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
                 ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
                 ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
             } else {
@@ -506,7 +506,7 @@ pub fn lower_function_with_known(
                 if is_float_param {
                     ctx.vreg_is_float.insert(param_vreg, true);
                 }
-                ctx.emit(IrOp::Load(param_vreg, 0, stack_offset as i32));
+                ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
                 ctx.locals.insert(name.clone(), LocalStorage::Reg(param_vreg));
             }
             continue;

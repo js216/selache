@@ -774,7 +774,8 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::LongLongToInt(d, _)
         | IrOp::StackSave(d)
         | IrOp::StackAlloc(d, _)
-        | IrOp::FrameAddr(d, _) => Some(*d),
+        | IrOp::FrameAddr(d, _)
+        | IrOp::LoadStackArg(d, _) => Some(*d),
 
         IrOp::Cmp(..)
         | IrOp::UCmp(..)
@@ -801,6 +802,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         IrOp::LoadImm(..) | IrOp::Label(_) | IrOp::Branch(_) | IrOp::HardwareLoop { .. }
         | IrOp::StackSave(_)
         | IrOp::FrameAddr(..)
+        | IrOp::LoadStackArg(..)
         | IrOp::Nop => {
             Vec::new()
         }

@@ -128,6 +128,14 @@ pub enum IrOp {
     /// Used by address-of for local variables so that the resulting pointer
     /// is an absolute memory address usable for indirect load/store.
     FrameAddr(VReg, i32),
+    /// dst = caller-pushed stack argument at index `k` (0 = first
+    /// argument beyond `target::ARG_REGS`). The SHARC+ C-ABI places
+    /// these above the callee's frame pointer: arg `k` lives at
+    /// `DM(I6 + k + 1)`, where `I6 = caller_I7` at CJUMP time (see
+    /// the `FRAME_SKIP` note in emit_asm.rs). A separate opcode is
+    /// required because the ordinary `Load(dst, 0, slot)` path maps
+    /// `slot` into the NEGATIVE-offset local-slot region below `I6`.
+    LoadStackArg(VReg, u32),
 
     // ---- 64-bit integer operations (hi/lo register pairs) ----
     // Each 64-bit value occupies two consecutive vregs: (lo, hi).
