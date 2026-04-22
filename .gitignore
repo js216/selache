@@ -4,7 +4,9 @@
 .gstack
 build
 target
+__pycache__
 
 xtest/AGENTS.md
 xtest/REVIEW.md
 xtest/run.py
+xtest/ledger.txt
