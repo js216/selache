@@ -1004,10 +1004,22 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<
     if frame_size > 0 {
         let extra = if has_calls { CJUMP_PUSH_RESERVE } else { 0 };
         instrs.push(MachInstr {
+            // (NW) suffix: the immediate is in 32-bit-word units, matching
+            // the word-scaled frame offsets used in the callee-saved
+            // spills and every `DM(offset, I6)` access emitted below.
+            // Without NW, the SHARC+ DAG treats the immediate as the
+            // implicit width of the I7 register's last memory access
+            // (bytes in -char-size-8 BW mode), so `MODIFY(I7, -N)` only
+            // reserves N BYTES of stack -- far short of the N WORDS
+            // the callee-saved save/reload sequence assumes. The
+            // mismatch leaves the stack pointer inside the reserved
+            // spill region, and subsequent CJUMP delay-slot pushes
+            // (written through I7 post-decrement) land on top of local
+            // variables, corrupting them across a nested call pair.
             instr: Instruction::Modify {
                 i_reg: target::STACK_PTR,
                 value: -(frame_size as i32) - extra,
-                width: MemWidth::Normal,
+                width: MemWidth::Nw,
                 bitrev: false,
             },
             reloc: None,
@@ -1058,10 +1070,13 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<
     if frame_size > 0 {
         let extra = if has_calls { CJUMP_PUSH_RESERVE } else { 0 };
         instrs.push(MachInstr {
+            // (NW) suffix: mirror the prologue's word-scaled modify so
+            // the epilogue unwinds by the same amount the prologue
+            // reserved. See build_prologue for full rationale.
             instr: Instruction::Modify {
                 i_reg: target::STACK_PTR,
                 value: frame_size as i32 + extra,
-                width: MemWidth::Normal,
+                width: MemWidth::Nw,
                 bitrev: false,
             },
             reloc: None,
