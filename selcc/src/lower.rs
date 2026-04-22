@@ -1024,6 +1024,37 @@ fn strip_to_pointer(ty: &Type) -> Option<&Type> {
     }
 }
 
+/// Return the pointee type of a pointer or array type, or `None` for any
+/// other type. Used by C99 6.5.6/6.5.2.1 scaling: in `ptr + int` and
+/// `arr[int]`, the integer operand is multiplied by `sizeof(*ptr)` bytes
+/// before being added to the address. Without this scaling every access
+/// past element zero lands on a byte-offset inside the first element, so
+/// `arr[1]` writes into `arr[0]` (corrupting it) and `arr[3]` reads from
+/// the tail of `arr[0]` (returning whatever was last stored there).
+fn pointee_type(ty: &Type) -> Option<&Type> {
+    match ty.unqualified() {
+        Type::Pointer(inner) | Type::Array(inner, _) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Multiply `index` by `sizeof(elem_ty)` in bytes and return a new vreg
+/// holding the scaled offset. When `sizeof` is 1 (character types), the
+/// input vreg is returned unchanged to avoid emitting a `× 1` multiply.
+/// A `sizeof` of 0 is treated as 1 so that a forward-declared struct
+/// pointer does not silently collapse every index to zero.
+fn scale_index_by_elem(ctx: &mut LowerCtx, index: VReg, elem_ty: &Type) -> VReg {
+    let size = elem_ty.size_bytes().max(1);
+    if size == 1 {
+        return index;
+    }
+    let sz = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(sz, size as i64));
+    let dst = ctx.alloc_vreg();
+    ctx.emit(IrOp::Mul(dst, index, sz));
+    dst
+}
+
 /// Determine the C type of an integer literal based on its suffix and value
 /// per C99 6.4.4.1.  For unsuffixed decimals the sequence is int -> long ->
 /// long long.  For suffixed literals the suffix determines the minimum type.
@@ -1205,10 +1236,17 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             lower_expr(ctx, inner)
         }
         Expr::Index(base, idx) => {
+            // C99 6.5.2.1: `base[idx]` is `*(base + idx)`, where the
+            // addition scales the integer index by `sizeof(*base)`.
+            let base_ty = expr_type(base, ctx);
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
+            let scaled = match base_ty.as_ref().and_then(pointee_type) {
+                Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
+                None => index,
+            };
             let addr = ctx.alloc_vreg();
-            ctx.emit(IrOp::Add(addr, base_addr, index));
+            ctx.emit(IrOp::Add(addr, base_addr, scaled));
             Ok(addr)
         }
         Expr::Member(base, field) => {
@@ -1727,10 +1765,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::Store(val, ptr, 0));
                 }
                 Expr::Index(base, idx) => {
+                    // C99 6.5.2.1: scale the index by `sizeof(*base)`.
+                    let base_ty = expr_type(base, ctx);
                     let base_addr = lower_expr(ctx, base)?;
                     let index = lower_expr(ctx, idx)?;
+                    let scaled = match base_ty.as_ref().and_then(pointee_type) {
+                        Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
+                        None => index,
+                    };
                     let addr = ctx.alloc_vreg();
-                    ctx.emit(IrOp::Add(addr, base_addr, index));
+                    ctx.emit(IrOp::Add(addr, base_addr, scaled));
                     ctx.emit(IrOp::Store(val, addr, 0));
                 }
                 Expr::Member(..) | Expr::Arrow(..) => {
@@ -1760,10 +1804,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             lower_lvalue_addr(ctx, inner)
         }
         Expr::Index(base, idx) => {
+            // C99 6.5.2.1: `base[idx]` scales the index by `sizeof(*base)`.
+            let base_ty = expr_type(base, ctx);
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
+            let scaled = match base_ty.as_ref().and_then(pointee_type) {
+                Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
+                None => index,
+            };
             let addr = ctx.alloc_vreg();
-            ctx.emit(IrOp::Add(addr, base_addr, index));
+            ctx.emit(IrOp::Add(addr, base_addr, scaled));
             let dst = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(dst, addr, 0));
             Ok(dst)
@@ -2313,10 +2363,54 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
     }
 
     let is_unsigned = is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
+
+    // C99 6.5.6: pointer + integer (and integer + pointer) scales the
+    // integer operand by `sizeof(*pointer)`. Same scaling for pointer -
+    // integer. (The pointer - pointer case yields an integer in units
+    // of the pointee; handled below when both operands are pointers.)
+    let (l, r) = match op {
+        BinaryOp::Add | BinaryOp::Sub => {
+            let l_pt = lhs_ty.as_ref().and_then(pointee_type).cloned();
+            let r_pt = rhs_ty.as_ref().and_then(pointee_type).cloned();
+            match (l_pt, r_pt, op) {
+                // ptr + int  /  ptr - int: scale the right operand.
+                (Some(elem), None, _) => (l, scale_index_by_elem(ctx, r, &elem)),
+                // int + ptr: scale the left operand. (int - ptr is
+                // not legal C, so only Add here.)
+                (None, Some(elem), BinaryOp::Add) => {
+                    (scale_index_by_elem(ctx, l, &elem), r)
+                }
+                _ => (l, r),
+            }
+        }
+        _ => (l, r),
+    };
+
     let dst = ctx.alloc_vreg();
     match op {
         BinaryOp::Add => ctx.emit(IrOp::Add(dst, l, r)),
-        BinaryOp::Sub => ctx.emit(IrOp::Sub(dst, l, r)),
+        BinaryOp::Sub => {
+            // ptr - ptr (C99 6.5.6/9): difference in bytes must be
+            // divided by `sizeof(*ptr)` to produce the number of
+            // elements. The pre-scaled add path above leaves both
+            // operands as byte addresses for this case.
+            let l_pt = lhs_ty.as_ref().and_then(pointee_type).cloned();
+            let r_pt = rhs_ty.as_ref().and_then(pointee_type).cloned();
+            if let (Some(elem), Some(_)) = (l_pt, r_pt) {
+                let raw = ctx.alloc_vreg();
+                ctx.emit(IrOp::Sub(raw, l, r));
+                let size = elem.size_bytes().max(1);
+                if size == 1 {
+                    ctx.emit(IrOp::Copy(dst, raw));
+                } else {
+                    let sz = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(sz, size as i64));
+                    ctx.emit(IrOp::Div(dst, raw, sz));
+                }
+            } else {
+                ctx.emit(IrOp::Sub(dst, l, r));
+            }
+        }
         BinaryOp::Mul => ctx.emit(IrOp::Mul(dst, l, r)),
         BinaryOp::Div => ctx.emit(IrOp::Div(dst, l, r)),
         BinaryOp::Mod => ctx.emit(IrOp::Mod(dst, l, r)),
