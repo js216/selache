@@ -1124,10 +1124,13 @@ pub fn select_with_name(
                         reloc: None,
                     });
                 } else {
+                    // Word-scaled (NW) modify: `frame_offset` is in
+                    // word units (same unit `DM(offset, I6)` uses),
+                    // so the FRAME_PTR modify must also use word units.
                     instrs.push(MachInstr {
                         instr: Instruction::Modify {
                             i_reg: target::FRAME_PTR,
-                            value: frame_offset, width: MemWidth::Normal, bitrev: false, },
+                            value: frame_offset, width: MemWidth::Nw, bitrev: false, },
                         reloc: None,
                     });
                     instrs.push(MachInstr {
@@ -1141,7 +1144,7 @@ pub fn select_with_name(
                     instrs.push(MachInstr {
                         instr: Instruction::Modify {
                             i_reg: target::FRAME_PTR,
-                            value: -frame_offset, width: MemWidth::Normal, bitrev: false, },
+                            value: -frame_offset, width: MemWidth::Nw, bitrev: false, },
                         reloc: None,
                     });
                 }
@@ -1667,11 +1670,13 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
             reloc: None,
         });
     } else {
-        // Large offset: modify + access at 0 + un-modify
+        // Large offset: modify + access at 0 + un-modify. Both
+        // FRAME_PTR modifies use (NW) word units to match the
+        // word-scaled frame offsets in the rest of the backend.
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: offset, width: MemWidth::Normal, bitrev: false, },
+                value: offset, width: MemWidth::Nw, bitrev: false, },
             reloc: None,
         });
         instrs.push(MachInstr {
@@ -1691,7 +1696,7 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: -offset, width: MemWidth::Normal, bitrev: false, },
+                value: -offset, width: MemWidth::Nw, bitrev: false, },
             reloc: None,
         });
     }

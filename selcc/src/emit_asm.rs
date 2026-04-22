@@ -1170,7 +1170,11 @@ fn adjust_frame_offsets(
                     instr: Instruction::Modify {
                         i_reg,
                         value: new_value,
-                        width: MemWidth::Normal,
+                        // FRAME_PTR modifies are frame-relative and
+                        // must use the same word-scaled unit as the
+                        // prologue/epilogue STACK_PTR modify and as
+                        // every `DM(offset, I6)` access in the body.
+                        width: MemWidth::Nw,
                         bitrev: false,
                     },
                     reloc: mi.reloc.clone(),
@@ -1205,11 +1209,14 @@ fn emit_adjusted_access(
             reloc,
         });
     } else {
+        // Large-offset frame access: temporarily modify I6, emit the
+        // memory access at offset 0, then un-modify. Both modifies
+        // use (NW) word units to match the FRAME_PTR convention.
         out.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
                 value: new_offset,
-                width: MemWidth::Normal,
+                width: MemWidth::Nw,
                 bitrev: false,
             },
             reloc: None,
@@ -1228,7 +1235,7 @@ fn emit_adjusted_access(
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
                 value: -new_offset,
-                width: MemWidth::Normal,
+                width: MemWidth::Nw,
                 bitrev: false,
             },
             reloc: None,
