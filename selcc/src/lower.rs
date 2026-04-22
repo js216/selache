@@ -891,27 +891,45 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
 /// word-scaled offset here would collide with the byte-scaled offsets
 /// produced by `Expr::Index` / `Expr::Binary` pointer arithmetic and
 /// cause adjacent fields to overlap on every struct access.
-fn struct_field_offset(fields: &[(String, Type)], field_name: &str) -> Option<(u32, Type)> {
+fn struct_field_offset(
+    fields: &[(String, Type)],
+    field_name: &str,
+    ctx: &LowerCtx,
+) -> Option<(u32, Type)> {
+    // Fields may carry tag-only references to other struct/union types
+    // (`struct outer { struct inner a; int b; }`) whose `fields` vec is
+    // empty because the definition lives in `ctx.struct_defs`. The byte
+    // layout computed by `struct_field_layout` relies on each field's
+    // `size_bytes()`, which returns 0 for an empty-fields struct — that
+    // would collapse every following field to the same offset and cause
+    // adjacent-field aliasing (e.g. `o.a.val` and `o.b` both landing at
+    // byte 0 of the outer struct). Expand each field's type through the
+    // context before handing the list to the layout routine so the
+    // layout sees the real nested size.
+    let resolved: Vec<(String, Type)> = fields
+        .iter()
+        .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
+        .collect();
     // Direct lookup in top-level fields.
-    if fields.iter().any(|(n, _)| n == field_name) {
-        let (byte_off, _, _) = crate::types::struct_field_layout(fields, field_name)?;
-        let ty = fields.iter()
+    if resolved.iter().any(|(n, _)| n == field_name) {
+        let (byte_off, _, _) = crate::types::struct_field_layout(&resolved, field_name)?;
+        let ty = resolved.iter()
             .find(|(n, _)| n == field_name)
             .map(|(_, t)| t.clone())?;
         return Some((byte_off, ty));
     }
     // Search inside anonymous struct/union members.
-    for (name, ty) in fields {
+    for (name, ty) in &resolved {
         if !name.starts_with("__anon") { continue; }
-        let (anon_byte_off, _, _) = crate::types::struct_field_layout(fields, name)?;
+        let (anon_byte_off, _, _) = crate::types::struct_field_layout(&resolved, name)?;
         match ty {
             Type::Union { fields: inner, .. } => {
-                if let Some(ft) = union_field_type(inner, field_name) {
+                if let Some(ft) = union_field_type(inner, field_name, ctx) {
                     return Some((anon_byte_off, ft));
                 }
             }
             Type::Struct { fields: inner, .. } => {
-                if let Some((nested_off, ft)) = struct_field_offset(inner, field_name) {
+                if let Some((nested_off, ft)) = struct_field_offset(inner, field_name, ctx) {
                     return Some((anon_byte_off + nested_off, ft));
                 }
             }
@@ -921,7 +939,82 @@ fn struct_field_offset(fields: &[(String, Type)], field_name: &str) -> Option<(u
     None
 }
 
-fn union_field_type(fields: &[(String, Type)], field_name: &str) -> Option<Type> {
+/// Deep-resolve a type so nested struct/union tags are replaced by their
+/// full field definitions from `ctx.struct_defs`. This lets layout code
+/// (which only reads `Type::size_bytes`) see the real size of aggregate
+/// fields instead of the zero size that an empty-fields tag reports.
+fn resolve_type_deep(ty: &Type, ctx: &LowerCtx) -> Type {
+    match ty {
+        Type::Struct { name, fields } if fields.is_empty() => {
+            if let Some(sname) = name {
+                for (def_name, def_fields) in &ctx.struct_defs {
+                    if def_name == sname && !def_fields.is_empty() {
+                        let expanded: Vec<(String, Type)> = def_fields
+                            .iter()
+                            .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
+                            .collect();
+                        return Type::Struct { name: name.clone(), fields: expanded };
+                    }
+                }
+            }
+            ty.clone()
+        }
+        Type::Union { name, fields } if fields.is_empty() => {
+            if let Some(uname) = name {
+                for (def_name, def_fields) in &ctx.struct_defs {
+                    if def_name == uname && !def_fields.is_empty() {
+                        let expanded: Vec<(String, Type)> = def_fields
+                            .iter()
+                            .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
+                            .collect();
+                        return Type::Union { name: name.clone(), fields: expanded };
+                    }
+                }
+            }
+            ty.clone()
+        }
+        Type::Struct { name, fields } => {
+            let expanded: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
+                .collect();
+            Type::Struct { name: name.clone(), fields: expanded }
+        }
+        Type::Union { name, fields } => {
+            let expanded: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
+                .collect();
+            Type::Union { name: name.clone(), fields: expanded }
+        }
+        Type::Array(elem, n) => {
+            Type::Array(Box::new(resolve_type_deep(elem, ctx)), *n)
+        }
+        Type::Volatile(inner) => Type::Volatile(Box::new(resolve_type_deep(inner, ctx))),
+        Type::Const(inner) => Type::Const(Box::new(resolve_type_deep(inner, ctx))),
+        Type::Typedef(name) => {
+            for (td_name, td_ty) in &ctx.typedefs {
+                if td_name == name {
+                    return resolve_type_deep(td_ty, ctx);
+                }
+            }
+            // Typedef name may alias a struct tag directly.
+            for (def_name, def_fields) in &ctx.struct_defs {
+                if def_name == name && !def_fields.is_empty() {
+                    let expanded: Vec<(String, Type)> = def_fields
+                        .iter()
+                        .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
+                        .collect();
+                    return Type::Struct { name: Some(name.clone()), fields: expanded };
+                }
+            }
+            ty.clone()
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn union_field_type(fields: &[(String, Type)], field_name: &str, ctx: &LowerCtx) -> Option<Type> {
     // Direct lookup first.
     if let Some(t) = fields.iter()
         .find(|(n, _)| n == field_name)
@@ -934,12 +1027,12 @@ fn union_field_type(fields: &[(String, Type)], field_name: &str) -> Option<Type>
         if !name.starts_with("__anon") { continue; }
         match ty {
             Type::Union { fields: inner, .. } => {
-                if let Some(t) = union_field_type(inner, field_name) {
+                if let Some(t) = union_field_type(inner, field_name, ctx) {
                     return Some(t);
                 }
             }
             Type::Struct { fields: inner, .. } => {
-                if let Some((_, t)) = struct_field_offset(inner, field_name) {
+                if let Some((_, t)) = struct_field_offset(inner, field_name, ctx) {
                     return Some(t);
                 }
             }
@@ -1183,9 +1276,9 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
             let base_ty = expr_type(base, ctx)?;
             let fields = resolve_struct_fields(&base_ty, ctx)?;
             if is_union_type(&base_ty) {
-                union_field_type(fields, field)
+                union_field_type(fields, field, ctx)
             } else {
-                let (_, fty) = struct_field_offset(fields, field)?;
+                let (_, fty) = struct_field_offset(fields, field, ctx)?;
                 Some(fty)
             }
         }
@@ -1194,9 +1287,9 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
             if let Some(pointee) = strip_to_pointer(&base_ty) {
                 let fields = resolve_struct_fields(pointee, ctx)?;
                 if is_union_type(pointee) {
-                    union_field_type(fields, field)
+                    union_field_type(fields, field, ctx)
                 } else {
-                    let (_, fty) = struct_field_offset(fields, field)?;
+                    let (_, fty) = struct_field_offset(fields, field, ctx)?;
                     Some(fty)
                 }
             } else {
@@ -1290,7 +1383,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         "member access on non-struct type: {base_ty:?}"
                     ))
                 })?;
-                let _ = union_field_type(fields, field).ok_or_else(|| {
+                let _ = union_field_type(fields, field, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!("no field '{field}' in union"))
                 })?;
                 0u32
@@ -1300,7 +1393,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         "member access on non-struct type: {base_ty:?}"
                     ))
                 })?;
-                let (off, _) = struct_field_offset(fields, field).ok_or_else(|| {
+                let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!("no field '{field}' in struct"))
                 })?;
                 off
@@ -1334,7 +1427,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         "arrow access on non-struct pointee: {pointee:?}"
                     ))
                 })?;
-                let _ = union_field_type(fields, field).ok_or_else(|| {
+                let _ = union_field_type(fields, field, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!("no field '{field}' in union"))
                 })?;
                 0u32
@@ -1344,7 +1437,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         "arrow access on non-struct pointee: {pointee:?}"
                     ))
                 })?;
-                let (off, _) = struct_field_offset(fields, field).ok_or_else(|| {
+                let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!("no field '{field}' in struct"))
                 })?;
                 off
@@ -3093,7 +3186,7 @@ fn lower_compound_literal(
         let item_expr = match item {
             Expr::DesignatedInit { field, value } => {
                 if let Some(fields) = resolve_struct_fields(&resolved_ty, ctx) {
-                    if let Some((byte_off, _)) = struct_field_offset(fields, field) {
+                    if let Some((byte_off, _)) = struct_field_offset(fields, field, ctx) {
                         // `struct_field_offset` returns a byte offset;
                         // stack slots are word-sized, so convert before
                         // adding to the compound-literal base slot.
