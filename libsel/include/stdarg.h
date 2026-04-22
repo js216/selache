@@ -13,17 +13,17 @@ typedef int *__va_list;
 #define va_end(ap) ((void)0)
 #define va_copy(dest, src) ((dest) = (src))
 #elif defined(__ADSPSHARC__)
-/* The SHARC+ C compiler stores variadics in 32-bit-word-tagged DM
-   slots, one slot per argument. va_list is a word pointer;
-   __builtin_va_start wants the last-named-arg size measured in
-   32-bit slots (so 1 for any up-to-4-byte arg). va_arg steps the
-   pointer by one slot per argument. Anything larger than 4 bytes
-   per argument is not supported. */
-typedef unsigned int *va_list;
-#define _SEL_VA_SLOTS(X) (((sizeof(X) + 3U) >> 2) ? ((sizeof(X) + 3U) >> 2) : 1)
+/* SHARC+ with -char-size-8 uses byte addressing. __builtin_va_start
+   takes the last-named-arg size in BYTES, rounded up to a 4-byte
+   boundary. va_list is a byte pointer; va_arg advances it by the
+   argument's 4-byte-aligned size. Arguments larger than 4 bytes
+   per slot are not used by libsel. */
+typedef unsigned char *va_list;
+#define _SEL_VA_BND(X) ((sizeof(X) + 3U) & ~3U)
 #define va_start(ap, v) \
-    ((ap) = (va_list)__builtin_va_start((void *)&(v), _SEL_VA_SLOTS(v)))
-#define va_arg(ap, t) (*(t *)(ap++))
+    ((ap) = (va_list)__builtin_va_start((void *)&(v), _SEL_VA_BND(v)))
+#define va_arg(ap, t) \
+    (*(t *)(((ap) += _SEL_VA_BND(t)) - _SEL_VA_BND(t)))
 #define va_copy(dst, src) ((dst) = (src))
 #define va_end(ap) ((void)((ap) = 0))
 #else
