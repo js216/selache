@@ -382,6 +382,16 @@ pub struct LowerResult {
     pub wide_strings: Vec<Vec<u32>>,
     /// Static local variables to be emitted as globals.
     pub static_locals: Vec<StaticLocal>,
+    /// Total number of ABI argument slots consumed by this function's
+    /// parameters. Scalars consume one slot; struct/union parameters
+    /// consume `type_size_words(ty)` slots (one word per slot). The
+    /// first `min(arg_slots, ARG_REGS.len())` slots arrive in the ABI
+    /// argument registers; the remainder arrive on the stack. The
+    /// emit_asm layer uses this to pin the correct number of incoming-
+    /// argument vregs to ARG_REGS — passing `params.len()` understates
+    /// the count whenever a multi-word struct precedes another
+    /// parameter, leaving trailing struct words unpinned.
+    pub arg_slots: u32,
 }
 
 /// Lower a single function to IR, with knowledge of global variable names,
@@ -473,10 +483,43 @@ pub fn lower_function_with_known(
         }
     }
 
-    // Bind parameters to virtual registers that will be pre-loaded from
-    // the ABI argument registers (R0-R3).
+    // Bind parameters to virtual registers pre-loaded from the ABI
+    // argument registers. Scalars consume one ABI slot; struct/union
+    // parameters consume `type_size_words(ty)` consecutive slots (one
+    // word per slot). A `slot_idx` counter walks across the full
+    // argument-slot sequence — using the parameter index `i` instead
+    // aliases slot numbers whenever a multi-word struct precedes
+    // another parameter: `dot(struct vec2 a, struct vec2 b)` would
+    // map both `a`'s second word and `b`'s first word to slot 1,
+    // reading the same R8 for two different fields.
+    //
+    // First, count total slots so emit_asm knows how many incoming-
+    // argument vregs to pin to ARG_REGS (via `arg_slots` on LowerResult).
+    let mut total_slots: u32 = 0;
+    for (_, ty) in &func.params {
+        let is_scalar = ty.is_scalar()
+            || matches!(ty, Type::Void | Type::Typedef(_)
+                | Type::Enum { .. });
+        if !is_scalar && is_struct_type(ty, &ctx) {
+            total_slots += type_size_words(ty, &ctx);
+        } else {
+            total_slots += 1;
+        }
+    }
     if !func.is_variadic {
-    for (i, (name, ty)) in func.params.iter().enumerate() {
+    // Pre-allocate one vreg per register-passed argument slot so that
+    // vreg IDs 0..min(total_slots, ARG_REGS.len()) coincide with slot
+    // indices. emit_asm pins vregs 0..num_params to ARG_REGS[0..num_params],
+    // so the correspondence must be slot-based (not param-based) to keep
+    // struct-by-value consistent with the caller's flat-slot layout.
+    let reg_slots = (total_slots as usize).min(target::ARG_REGS.len());
+    for slot in 0..reg_slots {
+        let v = ctx.alloc_vreg();
+        debug_assert_eq!(v as usize, slot);
+    }
+
+    let mut slot_idx: usize = 0;
+    for (name, ty) in func.params.iter() {
         // Classify param: integer/pointer types use R-registers, float uses
         // F-registers, structs/unions are passed as consecutive words.
         let is_float_param = ty.is_float();
@@ -496,27 +539,48 @@ pub fn lower_function_with_known(
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
             let base_slot = slot + num_words - 1;
+            // Unpack the ABI-passed words through the same
+            // byte-addressable indirect path (`FrameAddr` +
+            // `Store(val, base_addr, w)` with non-zero base) that
+            // `Expr::Member` reads use. Frame-direct stores
+            // (`Store(val, 0, slot)`) emit the Type-2
+            // `DM(-slot, I6)` form, which hits a different physical
+            // bank than the Type-3 post-modify form used by reads in
+            // `-char-size-8` byte-addressable mode — field y landed
+            // at the word slot while reads looked at the adjacent
+            // byte and returned truncated junk (`got 403` for
+            // `a.x = 3, a.y = 4` -> 0x0403).
+            let base_addr_vreg = ctx.alloc_vreg();
+            ctx.emit(IrOp::FrameAddr(base_addr_vreg, base_slot as i32));
             for w in 0..num_words {
-                let param_idx = i + w as usize;
-                let dst_slot = slot + num_words - 1 - w;
-                if param_idx < target::ARG_REGS.len() {
+                let src_slot_idx = slot_idx + w as usize;
+                let src_vreg = if src_slot_idx < target::ARG_REGS.len() {
                     let tmp = ctx.alloc_vreg();
-                    ctx.emit(IrOp::Copy(tmp, param_idx as VReg));
-                    ctx.emit(IrOp::Store(tmp, 0, dst_slot as i32));
+                    ctx.emit(IrOp::Copy(tmp, src_slot_idx as VReg));
+                    tmp
                 } else {
-                    let stack_off = (param_idx - target::ARG_REGS.len()) as u32;
+                    let stack_off = (src_slot_idx - target::ARG_REGS.len()) as u32;
                     let tmp = ctx.alloc_vreg();
                     ctx.emit(IrOp::LoadStackArg(tmp, stack_off));
-                    ctx.emit(IrOp::Store(tmp, 0, dst_slot as i32));
-                }
+                    tmp
+                };
+                // Offset is in bytes — `Store(val, base, off)` with a
+                // non-zero base is emitted via the byte-addressable
+                // indirect-access path, so the stride between fields
+                // must be `4 * w` (the byte-offset increment between
+                // 32-bit words) to match the layout `Expr::Member`
+                // reads back.
+                ctx.emit(IrOp::Store(src_vreg, base_addr_vreg, (w * 4) as i32));
             }
             ctx.locals.insert(name.clone(), LocalStorage::Stack(base_slot));
+            slot_idx += num_words as usize;
             continue;
         }
 
-        if i >= target::ARG_REGS.len() {
-            // Parameters 4+: loaded from the stack.
-            let stack_offset = (i - target::ARG_REGS.len()) as u32;
+        if slot_idx >= target::ARG_REGS.len() {
+            // Parameters beyond the register-passed slots: loaded from
+            // the caller's stack-arg area.
+            let stack_offset = (slot_idx - target::ARG_REGS.len()) as u32;
             if reassigned.contains(name) {
                 let slot_offset = ctx.alloc_stack_slot();
                 let param_vreg = ctx.alloc_vreg();
@@ -534,7 +598,14 @@ pub fn lower_function_with_known(
                 ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
                 ctx.locals.insert(name.clone(), LocalStorage::Reg(param_vreg));
             }
+            slot_idx += 1;
             continue;
+        }
+        // Scalar param in a register slot: vreg `slot_idx` is the
+        // pre-allocated, ABI-pinned incoming-argument vreg.
+        let arg_vreg = slot_idx as VReg;
+        if is_float_param {
+            ctx.vreg_is_float.insert(arg_vreg, true);
         }
         if reassigned.contains(name) {
             let slot_offset = ctx.alloc_stack_slot();
@@ -542,36 +613,28 @@ pub fn lower_function_with_known(
             if is_float_param {
                 ctx.vreg_is_float.insert(param_vreg, true);
             }
-            ctx.emit(IrOp::Copy(param_vreg, i as VReg));
+            ctx.emit(IrOp::Copy(param_vreg, arg_vreg));
             ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
             ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
-        } else if i < target::ARG_REGS.len()
-            && target::ARG_REGS[i] == target::RETURN_REG
-        {
-            // The ABI argument register for this parameter is R0, which
-            // is also the return-value register. The regalloc pins both
+        } else if target::ARG_REGS[slot_idx] == target::RETURN_REG {
+            // The ABI argument register for this slot is R0, which is
+            // also the return-value register. The regalloc pins both
             // this param vreg and RETURN_REG_VREG to physical R0, so
             // any intermediate computation that writes through
             // RETURN_REG_VREG (or that the allocator spills into R0)
             // will silently clobber the parameter. Snapshot it into a
             // fresh vreg immediately so the allocator can place it in a
             // non-conflicting register.
-            let _identity_vreg = ctx.alloc_vreg();
-            debug_assert_eq!(_identity_vreg, i as VReg);
             let fresh = ctx.alloc_vreg();
             if is_float_param {
                 ctx.vreg_is_float.insert(fresh, true);
             }
-            ctx.emit(IrOp::Copy(fresh, i as VReg));
+            ctx.emit(IrOp::Copy(fresh, arg_vreg));
             ctx.locals.insert(name.clone(), LocalStorage::Reg(fresh));
         } else {
-            let param_vreg = ctx.alloc_vreg();
-            debug_assert_eq!(param_vreg, i as VReg);
-            if is_float_param {
-                ctx.vreg_is_float.insert(param_vreg, true);
-            }
-            ctx.locals.insert(name.clone(), LocalStorage::Reg(param_vreg));
+            ctx.locals.insert(name.clone(), LocalStorage::Reg(arg_vreg));
         }
+        slot_idx += 1;
     }
     }
 
@@ -631,6 +694,7 @@ pub fn lower_function_with_known(
         strings: ctx.strings,
         wide_strings: ctx.wide_strings,
         static_locals: ctx.static_locals,
+        arg_slots: total_slots,
     })
 }
 
@@ -1670,8 +1734,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         .map_or(1, |t| type_size_words(t, ctx));
                     let addr = lower_struct_expr_addr(ctx, arg)?;
                     for w in 0..nw {
+                        // Struct word `w` lives at byte offset
+                        // `w * 4` from the struct base. `Load(val,
+                        // base, off)` with a non-zero base emits the
+                        // byte-addressable indirect form, so the
+                        // stride here must be a byte offset (not the
+                        // bare word index) or the load reads from an
+                        // unaligned address and returns a fraction
+                        // of the next field's bytes.
                         let tmp = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(tmp, addr, w as i32));
+                        ctx.emit(IrOp::Load(tmp, addr, (w * 4) as i32));
                         arg_vregs.push(tmp);
                     }
                 } else {
@@ -1702,8 +1774,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         .map_or(1, |t| type_size_words(t, ctx));
                     let addr = lower_struct_expr_addr(ctx, arg)?;
                     for w in 0..nw {
+                        // Struct word `w` lives at byte offset
+                        // `w * 4` from the struct base. `Load(val,
+                        // base, off)` with a non-zero base emits the
+                        // byte-addressable indirect form, so the
+                        // stride here must be a byte offset (not the
+                        // bare word index) or the load reads from an
+                        // unaligned address and returns a fraction
+                        // of the next field's bytes.
                         let tmp = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(tmp, addr, w as i32));
+                        ctx.emit(IrOp::Load(tmp, addr, (w * 4) as i32));
                         arg_vregs.push(tmp);
                     }
                 } else {
@@ -3285,9 +3365,15 @@ fn is_function_ptr_type(ty: &Type, ctx: &LowerCtx) -> bool {
 /// Emit a word-by-word copy from src_addr to dst_addr for `num_words` words.
 fn emit_struct_copy(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, num_words: u32) {
     for i in 0..num_words {
+        // Offsets passed to `Load`/`Store` with a non-zero base are
+        // byte offsets (the emitter routes through the byte-
+        // addressable indirect-access path). Step by `4 * i` to keep
+        // each word aligned on its 32-bit boundary instead of reading
+        // a byte from the next field's storage.
+        let byte_off = (i * 4) as i32;
         let tmp = ctx.alloc_vreg();
-        ctx.emit(IrOp::Load(tmp, src_addr, i as i32));
-        ctx.emit(IrOp::Store(tmp, dst_addr, i as i32));
+        ctx.emit(IrOp::Load(tmp, src_addr, byte_off));
+        ctx.emit(IrOp::Store(tmp, dst_addr, byte_off));
     }
 }
 

@@ -710,7 +710,14 @@ fn emit_function_instrs(
 
     let isel_result = isel::select_with_name(&ir, &func.name, variadic_callees);
 
-    let num_params = func.params.len().min(target::ARG_REGS.len()) as u8;
+    // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
+    // by-value parameters consume multiple ABI slots (one 32-bit word
+    // each), so `params.len()` understates the count and leaves
+    // trailing struct words unpinned — regalloc then assigns those
+    // vregs to arbitrary registers and reads uninitialised data for
+    // every field past the first ABI slot of a multi-word struct.
+    let num_params = (lower_result.arg_slots as usize)
+        .min(target::ARG_REGS.len()) as u8;
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} num_params={} ===", func.name, num_params);
         eprintln!("=== {} IR/isel ===", func.name);
