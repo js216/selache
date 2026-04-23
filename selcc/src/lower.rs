@@ -813,6 +813,31 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
                     }
                 } else if let Some(init_expr) = init {
+                    // `char s[] = "hello"` and friends: expand the
+                    // string literal into per-element stores.  Without
+                    // this special case the generic scalar path below
+                    // would store the *address* of the rodata copy into
+                    // s[0], leaving s[1..] uninitialised garbage --- so
+                    // s[4] reads whatever happened to be on the stack.
+                    // The array's element count came from the literal's
+                    // length (including the trailing NUL), so we always
+                    // have room to walk one slot per byte.
+                    if let (Expr::StringLit(s), Type::Array(elem_ty, _)) =
+                        (init_expr, ty)
+                    {
+                        if crate::types::size_bytes_ctx(elem_ty, ctx) == 1 {
+                            let bytes = s.as_bytes();
+                            for i in 0..num_words {
+                                let byte = bytes.get(i as usize).copied().unwrap_or(0);
+                                let val = ctx.alloc_vreg();
+                                ctx.emit(IrOp::LoadImm(val, byte as i64));
+                                let elem_slot = slot_offset + num_words - 1 - i;
+                                ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+                            }
+                            // Fall through nothing: init is done.
+                            return Ok(());
+                        }
+                    }
                     if is_struct_type(ty, ctx) && num_words > 1 {
                         let src_addr = lower_struct_expr_addr(ctx, init_expr)?;
                         let dst_addr = ctx.alloc_vreg();
@@ -1164,7 +1189,18 @@ fn pointee_type(ty: &Type) -> Option<&Type> {
 /// A `sizeof` of 0 is treated as 1 so that a forward-declared struct
 /// pointer does not silently collapse every index to zero.
 fn scale_index_by_elem(ctx: &mut LowerCtx, index: VReg, elem_ty: &Type) -> VReg {
+    // Memory on the SHARC is accessed in 32-bit words: every local
+    // array reserves one word per element (see `size_words_ctx`), and
+    // loads through `DM(I4, M5)` fetch a whole word.  Pointer
+    // arithmetic on narrow element types (`char`, `short`) therefore
+    // advances one word per logical step, not one byte --- otherwise
+    // `s[4]` on a `char s[]` stack array walks into the second byte of
+    // `s[0]`'s word rather than `s[4]`'s word.  Wider element types
+    // (int, long long, structs) already have `size_bytes` a multiple
+    // of 4, so their stride stays the same.
     let size = crate::types::size_bytes_ctx(elem_ty, ctx).max(1);
+    let word_size = crate::types::size_words_ctx(elem_ty, ctx).max(1) * 4;
+    let size = size.max(word_size);
     if size == 1 {
         return index;
     }

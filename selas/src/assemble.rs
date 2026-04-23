@@ -50,28 +50,28 @@ impl SectionData {
 /// Parse a `.SECTION` name string produced by the parser.
 ///
 /// The parser yields strings like `"PM seg_pmco;"` (after stripping the
-/// leading `/`).  We extract the qualifier (PM or DM) and the bare section
-/// name (without trailing semicolons or whitespace).
+/// leading `/`).  We extract the qualifier (PM, SW, DM, DOUBLE32) and the
+/// bare section name (without trailing semicolons or whitespace).
+/// `DOUBLE32` is a byte-addressed DM variant with 32-bit-aligned words
+/// that a cross-section `R1 = symbol.;` reference from a code section
+/// can resolve against; the word-addressed `DM` qualifier rejects such
+/// relocations at link time.
 fn parse_section_name(raw: &str) -> (String, bool) {
     let s = raw.trim().trim_end_matches(';').trim();
     let upper = s.to_uppercase();
 
-    if upper.starts_with("PM") {
-        let name = s[2..].trim();
-        if !name.is_empty() {
-            return (name.to_string(), true);
-        }
-    }
-    if upper.starts_with("SW") {
-        let name = s[2..].trim();
-        if !name.is_empty() {
-            return (name.to_string(), true);
-        }
-    }
-    if upper.starts_with("DM") {
-        let name = s[2..].trim();
-        if !name.is_empty() {
-            return (name.to_string(), false);
+    // Order matters: longer keywords first so "DOUBLE32" is not misread as "DM".
+    for (kw, is_pm) in [
+        ("DOUBLE32", false),
+        ("PM", true),
+        ("SW", true),
+        ("DM", false),
+    ] {
+        if upper.starts_with(kw) {
+            let name = s[kw.len()..].trim();
+            if !name.is_empty() {
+                return (name.to_string(), is_pm);
+            }
         }
     }
 

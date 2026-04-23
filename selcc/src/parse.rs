@@ -588,10 +588,14 @@ impl<'a> Parser<'a> {
                 } else {
                     None
                 };
-                let decl_ty = if let (Type::Array(elem, None), Some(Expr::InitList(items))) = (&decl_ty, &init) {
-                    Type::Array(elem.clone(), Some(items.len()))
-                } else {
-                    decl_ty
+                let decl_ty = match (&decl_ty, &init) {
+                    (Type::Array(elem, None), Some(Expr::InitList(items))) => {
+                        Type::Array(elem.clone(), Some(items.len()))
+                    }
+                    (Type::Array(elem, None), Some(Expr::StringLit(s))) => {
+                        Type::Array(elem.clone(), Some(s.len() + 1))
+                    }
+                    _ => decl_ty,
                 };
                 globals.push(GlobalDecl {
                     name,
@@ -616,10 +620,14 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    let extra_ty = if let (Type::Array(elem, None), Some(Expr::InitList(items))) = (&extra_ty, &extra_init) {
-                        Type::Array(elem.clone(), Some(items.len()))
-                    } else {
-                        extra_ty
+                    let extra_ty = match (&extra_ty, &extra_init) {
+                        (Type::Array(elem, None), Some(Expr::InitList(items))) => {
+                            Type::Array(elem.clone(), Some(items.len()))
+                        }
+                        (Type::Array(elem, None), Some(Expr::StringLit(s))) => {
+                            Type::Array(elem.clone(), Some(s.len() + 1))
+                        }
+                        _ => extra_ty,
                     };
                     globals.push(GlobalDecl {
                         name: extra_name,
@@ -1230,10 +1238,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let (ty, vla_dim) = if let (Type::Array(elem, None), Some(Expr::InitList(items))) = (&ty, &init) {
-            (Type::Array(elem.clone(), Some(items.len())), None)
-        } else {
-            (ty, vla_dim)
+        let (ty, vla_dim) = match (&ty, &init) {
+            (Type::Array(elem, None), Some(Expr::InitList(items))) => {
+                (Type::Array(elem.clone(), Some(items.len())), None)
+            }
+            // `char s[] = "hello"`: array length = byte length + 1 (NUL).
+            (Type::Array(elem, None), Some(Expr::StringLit(s))) => {
+                (Type::Array(elem.clone(), Some(s.len() + 1)), None)
+            }
+            _ => (ty, vla_dim),
         };
         stmts.push(Stmt::VarDecl { name, ty, init, is_static, vla_dim });
 
@@ -1261,10 +1274,14 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            let (decl_ty, decl_vla_dim) = if let (Type::Array(elem, None), Some(Expr::InitList(items))) = (&decl_ty, &decl_init) {
-                (Type::Array(elem.clone(), Some(items.len())), None)
-            } else {
-                (decl_ty, decl_vla_dim)
+            let (decl_ty, decl_vla_dim) = match (&decl_ty, &decl_init) {
+                (Type::Array(elem, None), Some(Expr::InitList(items))) => {
+                    (Type::Array(elem.clone(), Some(items.len())), None)
+                }
+                (Type::Array(elem, None), Some(Expr::StringLit(s))) => {
+                    (Type::Array(elem.clone(), Some(s.len() + 1)), None)
+                }
+                _ => (decl_ty, decl_vla_dim),
             };
             stmts.push(Stmt::VarDecl { name: decl_name, ty: decl_ty, init: decl_init, is_static, vla_dim: decl_vla_dim });
         }

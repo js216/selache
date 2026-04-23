@@ -336,7 +336,7 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
         data_entries = deduped;
     }
     if !data_entries.is_empty() {
-        out.push_str(".SECTION/DM seg_dmda;\n");
+        out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for e in &data_entries {
             let sym = with_abi_suffix(&e.name);
             let _ = writeln!(out, ".GLOBAL {sym};");
@@ -364,7 +364,7 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
         }
     }
     if !bss_entries.is_empty() {
-        out.push_str(".SECTION/DM seg_dmda;\n");
+        out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for (name, sz) in &bss_entries {
             let sym = with_abi_suffix(name);
             let _ = writeln!(out, ".GLOBAL {sym};");
@@ -386,9 +386,10 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
     // (`L"..."`) are 32-bit per character irrespective of char_size.
     //
     if !all_strings.is_empty() || !all_wide_strings.is_empty() {
-        out.push_str(".SECTION/DM seg_dmda;\n");
+        out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for (i, s) in all_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".str{i}"));
+            let _ = writeln!(out, ".GLOBAL {name};");
             if char_size == 8 {
                 let mut bytes: Vec<u8> = s.as_bytes().to_vec();
                 bytes.push(0);
@@ -402,6 +403,7 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".wstr{i}"));
+            let _ = writeln!(out, ".GLOBAL {name};");
             let mut words: Vec<u32> = ws.clone();
             words.push(0);
             emit_var_bytes(&mut out, &name, &words);
@@ -1817,7 +1819,7 @@ mod tests {
     #[test]
     fn data_section_has_var() {
         let m = compile("int x = 10;\nint f() { return x; }");
-        assert!(m.text.contains(".SECTION/DM seg_dmda;"));
+        assert!(m.text.contains(".SECTION/DOUBLE32 seg_dmda;"));
         assert!(m.text.contains(".VAR x. = 0x0000000A;"));
     }
 
@@ -2176,7 +2178,7 @@ mod tests {
         // A static local becomes a global-like data symbol in seg_dmda.
         let m = compile("int counter() { static int n = 0; n++; return n; }");
         assert!(
-            m.text.contains(".SECTION/DM seg_dmda;"),
+            m.text.contains(".SECTION/DOUBLE32 seg_dmda;"),
             "expected data section, got:\n{}",
             m.text
         );
