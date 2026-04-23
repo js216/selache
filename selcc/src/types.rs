@@ -41,6 +41,308 @@ pub enum Type {
     Imaginary(Box<Type>),
 }
 
+/// Tag-to-fields resolver for struct/union types declared by tag only.
+///
+/// Size and alignment queries need to see the real field list of any
+/// nested aggregate; an empty-fields `Type::Struct` (the form produced
+/// by the parser when only a tag is visible at the use site) must be
+/// expanded through the translation unit's `struct_defs` table before
+/// its size can be computed. The `Types` module stays free of
+/// compiler-internal types by taking this behaviour as a trait.
+pub trait TypeCtx {
+    /// Look up the fields of a struct or union declared by tag.
+    fn resolve_tag(&self, name: &str) -> Option<&[(String, Type)]>;
+    /// Look up the target type of a typedef name.
+    fn resolve_typedef(&self, name: &str) -> Option<&Type> { let _ = name; None }
+}
+
+/// An empty context: no tag lookups possible. Used as a degenerate
+/// ctx when the caller has no access to struct_defs (e.g. unit tests
+/// that build types inline with full field lists).
+pub struct NullCtx;
+impl TypeCtx for NullCtx {
+    fn resolve_tag(&self, _name: &str) -> Option<&[(String, Type)]> { None }
+}
+
+/// Size in bytes, resolving tag-only struct/union references and
+/// typedefs through `ctx`. Callers that may see tag-only aggregates
+/// (globals, struct fields, sizeof, memcpy dst size, index scaling)
+/// MUST use this instead of `Type::size_bytes`, which returns 0 for
+/// an empty-fields struct and causes silent layout collapse.
+pub fn size_bytes_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
+    match ty {
+        Type::Void => 0,
+        Type::Bool => 1,
+        Type::Char => 1,
+        Type::Short => 2,
+        Type::Int | Type::Long | Type::Float | Type::Double => 4,
+        Type::LongLong | Type::ULongLong => 8,
+        Type::Unsigned(inner) => size_bytes_ctx(inner, ctx),
+        Type::Pointer(_) => 4,
+        Type::Array(elem, Some(n)) => size_bytes_ctx(elem, ctx) * (*n as u32),
+        Type::Array(_, None) => 0,
+        Type::Struct { name, fields } => {
+            if fields.is_empty() {
+                if let Some(sname) = name {
+                    if let Some(def) = ctx.resolve_tag(sname) {
+                        return struct_size_bytes_ctx(def, ctx);
+                    }
+                }
+                0
+            } else {
+                struct_size_bytes_ctx(fields, ctx)
+            }
+        }
+        Type::Union { name, fields } => {
+            if fields.is_empty() {
+                if let Some(uname) = name {
+                    if let Some(def) = ctx.resolve_tag(uname) {
+                        return def.iter().map(|(_, t)| size_bytes_ctx(t, ctx)).max().unwrap_or(0);
+                    }
+                }
+                0
+            } else {
+                fields.iter().map(|(_, t)| size_bytes_ctx(t, ctx)).max().unwrap_or(0)
+            }
+        }
+        Type::Enum { .. } => 4,
+        Type::Typedef(name) => {
+            if let Some(target) = ctx.resolve_typedef(name) {
+                return size_bytes_ctx(target, ctx);
+            }
+            // Typedef names sometimes alias a struct tag directly.
+            if let Some(def) = ctx.resolve_tag(name) {
+                return struct_size_bytes_ctx(def, ctx);
+            }
+            4
+        }
+        Type::Volatile(inner) | Type::Const(inner) => size_bytes_ctx(inner, ctx),
+        Type::Bitfield(inner, _) => size_bytes_ctx(inner, ctx),
+        Type::FunctionPtr { .. } => 4,
+        Type::Complex(inner) => 2 * size_bytes_ctx(inner, ctx),
+        Type::Imaginary(inner) => size_bytes_ctx(inner, ctx),
+    }
+}
+
+/// Size in 32-bit words, resolving tag-only references through `ctx`.
+pub fn size_words_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
+    match ty {
+        Type::Void => 0,
+        Type::Bool | Type::Char | Type::Short | Type::Int | Type::Long
+        | Type::Float | Type::Double => 1,
+        Type::LongLong | Type::ULongLong => 2,
+        Type::Unsigned(inner) => size_words_ctx(inner, ctx),
+        Type::Pointer(_) | Type::FunctionPtr { .. } => 1,
+        Type::Array(elem, Some(n)) => size_words_ctx(elem, ctx) * (*n as u32),
+        Type::Array(_, None) => 0,
+        Type::Struct { .. } => size_bytes_ctx(ty, ctx).div_ceil(4),
+        Type::Union { name, fields } => {
+            if fields.is_empty() {
+                if let Some(uname) = name {
+                    if let Some(def) = ctx.resolve_tag(uname) {
+                        return def.iter().map(|(_, t)| size_words_ctx(t, ctx)).max().unwrap_or(0);
+                    }
+                }
+                0
+            } else {
+                fields.iter().map(|(_, t)| size_words_ctx(t, ctx)).max().unwrap_or(0)
+            }
+        }
+        Type::Enum { .. } => 1,
+        Type::Typedef(name) => {
+            if let Some(target) = ctx.resolve_typedef(name) {
+                return size_words_ctx(target, ctx);
+            }
+            if let Some(def) = ctx.resolve_tag(name) {
+                let bytes: u32 = def.iter().map(|(_, t)| size_bytes_ctx(t, ctx)).sum();
+                return bytes.div_ceil(4);
+            }
+            1
+        }
+        Type::Volatile(inner) | Type::Const(inner) => size_words_ctx(inner, ctx),
+        Type::Bitfield(inner, _) => size_words_ctx(inner, ctx),
+        Type::Complex(inner) => 2 * size_words_ctx(inner, ctx),
+        Type::Imaginary(inner) => size_words_ctx(inner, ctx),
+    }
+}
+
+/// Alignment in bytes, resolving tag-only references through `ctx`.
+pub fn alignment_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
+    match ty {
+        Type::Void => 1,
+        Type::Char => 1,
+        Type::Short => 2,
+        Type::Int | Type::Long | Type::Float | Type::Double => 4,
+        Type::LongLong | Type::ULongLong => 4,
+        Type::Unsigned(inner) => alignment_ctx(inner, ctx),
+        Type::Pointer(_) | Type::FunctionPtr { .. } => 4,
+        Type::Array(elem, _) => alignment_ctx(elem, ctx),
+        Type::Struct { name, fields } => {
+            if fields.is_empty() {
+                if let Some(sname) = name {
+                    if let Some(def) = ctx.resolve_tag(sname) {
+                        return def.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1);
+                    }
+                }
+                1
+            } else {
+                fields.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1)
+            }
+        }
+        Type::Union { name, fields } => {
+            if fields.is_empty() {
+                if let Some(uname) = name {
+                    if let Some(def) = ctx.resolve_tag(uname) {
+                        return def.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1);
+                    }
+                }
+                1
+            } else {
+                fields.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1)
+            }
+        }
+        Type::Enum { .. } => 4,
+        Type::Typedef(name) => {
+            if let Some(target) = ctx.resolve_typedef(name) {
+                return alignment_ctx(target, ctx);
+            }
+            if let Some(def) = ctx.resolve_tag(name) {
+                return def.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1);
+            }
+            4
+        }
+        Type::Volatile(inner) | Type::Const(inner) => alignment_ctx(inner, ctx),
+        Type::Bitfield(inner, _) => alignment_ctx(inner, ctx),
+        Type::Bool => 1,
+        Type::Complex(inner) => alignment_ctx(inner, ctx),
+        Type::Imaginary(inner) => alignment_ctx(inner, ctx),
+    }
+}
+
+/// ctx-aware version of `struct_size_bytes` — the only difference is
+/// that nested field types are measured with `size_bytes_ctx` /
+/// `alignment_ctx` instead of the tag-blind methods on `Type`.
+pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u32 {
+    let mut offset: u32 = 0;
+    let mut bit_offset: u32 = 0;
+    let mut max_align: u32 = 1;
+
+    for (_, ty) in fields {
+        if let Type::Bitfield(base, width) = ty {
+            let storage_bits = size_bytes_ctx(base, ctx) * 8;
+            let w = *width as u32;
+            if w == 0 {
+                if bit_offset > 0 {
+                    offset += bit_offset.div_ceil(8);
+                    bit_offset = 0;
+                }
+                let align = alignment_ctx(base, ctx);
+                offset = align_up(offset, align);
+            } else if bit_offset + w > storage_bits {
+                offset += bit_offset.div_ceil(8);
+                let align = alignment_ctx(base, ctx);
+                offset = align_up(offset, align);
+                if align > max_align { max_align = align; }
+                bit_offset = w;
+            } else {
+                if bit_offset == 0 {
+                    let align = alignment_ctx(base, ctx);
+                    offset = align_up(offset, align);
+                    if align > max_align { max_align = align; }
+                }
+                bit_offset += w;
+            }
+        } else {
+            if bit_offset > 0 {
+                offset += bit_offset.div_ceil(8);
+                bit_offset = 0;
+            }
+            let align = alignment_ctx(ty, ctx);
+            offset = align_up(offset, align);
+            if align > max_align { max_align = align; }
+            offset += size_bytes_ctx(ty, ctx);
+        }
+    }
+    if bit_offset > 0 {
+        offset += bit_offset.div_ceil(8);
+    }
+    align_up(offset, max_align)
+}
+
+/// ctx-aware version of `struct_field_layout`. Uses `size_bytes_ctx` /
+/// `alignment_ctx` so tag-only aggregate fields do not collapse to size
+/// zero and mis-align every field that follows.
+pub fn struct_field_layout_ctx(
+    fields: &[(String, Type)],
+    target: &str,
+    ctx: &dyn TypeCtx,
+) -> Option<(u32, Option<u32>, Option<u8>)> {
+    let mut offset: u32 = 0;
+    let mut bit_offset: u32 = 0;
+
+    for (name, ty) in fields {
+        if let Type::Bitfield(base, width) = ty {
+            let storage_bits = size_bytes_ctx(base, ctx) * 8;
+            let w = *width as u32;
+            if w == 0 {
+                if bit_offset > 0 {
+                    offset += bit_offset.div_ceil(8);
+                    bit_offset = 0;
+                }
+                let align = alignment_ctx(base, ctx);
+                offset = align_up(offset, align);
+                if name == target {
+                    return Some((offset, Some(0), Some(*width)));
+                }
+            } else if bit_offset + w > storage_bits {
+                offset += bit_offset.div_ceil(8);
+                let align = alignment_ctx(base, ctx);
+                offset = align_up(offset, align);
+                if name == target {
+                    return Some((offset, Some(0), Some(*width)));
+                }
+                bit_offset = w;
+            } else {
+                if bit_offset == 0 {
+                    let align = alignment_ctx(base, ctx);
+                    offset = align_up(offset, align);
+                }
+                if name == target {
+                    return Some((offset, Some(bit_offset), Some(*width)));
+                }
+                bit_offset += w;
+            }
+        } else {
+            if bit_offset > 0 {
+                offset += bit_offset.div_ceil(8);
+                bit_offset = 0;
+            }
+            let align = alignment_ctx(ty, ctx);
+            offset = align_up(offset, align);
+            if name == target {
+                return Some((offset, None, None));
+            }
+            if name.starts_with("__anon") {
+                match ty {
+                    Type::Struct { fields: inner, .. } => {
+                        if let Some((nested_off, bo, bw)) = struct_field_layout_ctx(inner, target, ctx) {
+                            return Some((offset + nested_off, bo, bw));
+                        }
+                    }
+                    Type::Union { fields: inner, .. } => {
+                        if let Some((nested_off, bo, bw)) = struct_field_layout_ctx(inner, target, ctx) {
+                            return Some((offset + nested_off, bo, bw));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            offset += size_bytes_ctx(ty, ctx);
+        }
+    }
+    None
+}
+
 /// Compute the size in bytes of a struct, accounting for bitfield packing
 /// and natural alignment padding (C99 6.7.2.1).
 fn struct_size_bytes(fields: &[(String, Type)]) -> u32 {

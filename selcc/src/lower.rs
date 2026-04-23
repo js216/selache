@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::ir::{Cond, IrOp, Label, VReg};
 use crate::target;
 use crate::token::IntSuffix;
-use crate::types::Type;
+use crate::types::{Type, TypeCtx};
 
 /// How a local variable is stored.
 #[derive(Clone)]
@@ -204,6 +204,25 @@ impl LowerCtx {
         offset
     }
 
+}
+
+impl TypeCtx for LowerCtx {
+    fn resolve_tag(&self, name: &str) -> Option<&[(String, Type)]> {
+        for (def_name, def_fields) in &self.struct_defs {
+            if def_name == name && !def_fields.is_empty() {
+                return Some(def_fields.as_slice());
+            }
+        }
+        None
+    }
+    fn resolve_typedef(&self, name: &str) -> Option<&Type> {
+        for (td_name, td_ty) in &self.typedefs {
+            if td_name == name {
+                return Some(td_ty);
+            }
+        }
+        None
+    }
 }
 
 /// Collect all variable names that appear on the left side of an assignment.
@@ -651,7 +670,7 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     Type::Array(elem, _) => elem,
                     _ => unreachable!("VLA must be Array type"),
                 };
-                let elem_words = elem_ty.size_words().max(1);
+                let elem_words = crate::types::size_words_ctx(elem_ty, ctx).max(1);
                 let total_vreg = if elem_words == 1 {
                     count_vreg
                 } else {
@@ -896,32 +915,20 @@ fn struct_field_offset(
     field_name: &str,
     ctx: &LowerCtx,
 ) -> Option<(u32, Type)> {
-    // Fields may carry tag-only references to other struct/union types
-    // (`struct outer { struct inner a; int b; }`) whose `fields` vec is
-    // empty because the definition lives in `ctx.struct_defs`. The byte
-    // layout computed by `struct_field_layout` relies on each field's
-    // `size_bytes()`, which returns 0 for an empty-fields struct — that
-    // would collapse every following field to the same offset and cause
-    // adjacent-field aliasing (e.g. `o.a.val` and `o.b` both landing at
-    // byte 0 of the outer struct). Expand each field's type through the
-    // context before handing the list to the layout routine so the
-    // layout sees the real nested size.
-    let resolved: Vec<(String, Type)> = fields
-        .iter()
-        .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
-        .collect();
-    // Direct lookup in top-level fields.
-    if resolved.iter().any(|(n, _)| n == field_name) {
-        let (byte_off, _, _) = crate::types::struct_field_layout(&resolved, field_name)?;
-        let ty = resolved.iter()
+    // Direct lookup in top-level fields — delegate layout to the
+    // ctx-aware routine so tag-only aggregate fields are sized
+    // correctly rather than collapsing to 0 bytes.
+    if fields.iter().any(|(n, _)| n == field_name) {
+        let (byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, field_name, ctx)?;
+        let ty = fields.iter()
             .find(|(n, _)| n == field_name)
             .map(|(_, t)| t.clone())?;
         return Some((byte_off, ty));
     }
     // Search inside anonymous struct/union members.
-    for (name, ty) in &resolved {
+    for (name, ty) in fields {
         if !name.starts_with("__anon") { continue; }
-        let (anon_byte_off, _, _) = crate::types::struct_field_layout(&resolved, name)?;
+        let (anon_byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, name, ctx)?;
         match ty {
             Type::Union { fields: inner, .. } => {
                 if let Some(ft) = union_field_type(inner, field_name, ctx) {
@@ -937,81 +944,6 @@ fn struct_field_offset(
         }
     }
     None
-}
-
-/// Deep-resolve a type so nested struct/union tags are replaced by their
-/// full field definitions from `ctx.struct_defs`. This lets layout code
-/// (which only reads `Type::size_bytes`) see the real size of aggregate
-/// fields instead of the zero size that an empty-fields tag reports.
-fn resolve_type_deep(ty: &Type, ctx: &LowerCtx) -> Type {
-    match ty {
-        Type::Struct { name, fields } if fields.is_empty() => {
-            if let Some(sname) = name {
-                for (def_name, def_fields) in &ctx.struct_defs {
-                    if def_name == sname && !def_fields.is_empty() {
-                        let expanded: Vec<(String, Type)> = def_fields
-                            .iter()
-                            .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
-                            .collect();
-                        return Type::Struct { name: name.clone(), fields: expanded };
-                    }
-                }
-            }
-            ty.clone()
-        }
-        Type::Union { name, fields } if fields.is_empty() => {
-            if let Some(uname) = name {
-                for (def_name, def_fields) in &ctx.struct_defs {
-                    if def_name == uname && !def_fields.is_empty() {
-                        let expanded: Vec<(String, Type)> = def_fields
-                            .iter()
-                            .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
-                            .collect();
-                        return Type::Union { name: name.clone(), fields: expanded };
-                    }
-                }
-            }
-            ty.clone()
-        }
-        Type::Struct { name, fields } => {
-            let expanded: Vec<(String, Type)> = fields
-                .iter()
-                .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
-                .collect();
-            Type::Struct { name: name.clone(), fields: expanded }
-        }
-        Type::Union { name, fields } => {
-            let expanded: Vec<(String, Type)> = fields
-                .iter()
-                .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
-                .collect();
-            Type::Union { name: name.clone(), fields: expanded }
-        }
-        Type::Array(elem, n) => {
-            Type::Array(Box::new(resolve_type_deep(elem, ctx)), *n)
-        }
-        Type::Volatile(inner) => Type::Volatile(Box::new(resolve_type_deep(inner, ctx))),
-        Type::Const(inner) => Type::Const(Box::new(resolve_type_deep(inner, ctx))),
-        Type::Typedef(name) => {
-            for (td_name, td_ty) in &ctx.typedefs {
-                if td_name == name {
-                    return resolve_type_deep(td_ty, ctx);
-                }
-            }
-            // Typedef name may alias a struct tag directly.
-            for (def_name, def_fields) in &ctx.struct_defs {
-                if def_name == name && !def_fields.is_empty() {
-                    let expanded: Vec<(String, Type)> = def_fields
-                        .iter()
-                        .map(|(n, t)| (n.clone(), resolve_type_deep(t, ctx)))
-                        .collect();
-                    return Type::Struct { name: Some(name.clone()), fields: expanded };
-                }
-            }
-            ty.clone()
-        }
-        _ => ty.clone(),
-    }
 }
 
 fn union_field_type(fields: &[(String, Type)], field_name: &str, ctx: &LowerCtx) -> Option<Type> {
@@ -1168,7 +1100,7 @@ fn pointee_type(ty: &Type) -> Option<&Type> {
 /// A `sizeof` of 0 is treated as 1 so that a forward-declared struct
 /// pointer does not silently collapse every index to zero.
 fn scale_index_by_elem(ctx: &mut LowerCtx, index: VReg, elem_ty: &Type) -> VReg {
-    let size = elem_ty.size_bytes().max(1);
+    let size = crate::types::size_bytes_ctx(elem_ty, ctx).max(1);
     if size == 1 {
         return index;
     }
@@ -1463,7 +1395,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         // return its address.
         Expr::Cast(ty, inner) if matches!(inner.as_ref(), Expr::InitList(_)) => {
             let resolved_ty = resolve_type(ty, ctx);
-            let num_words = resolved_ty.size_words().max(1) as u32;
+            let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1) as u32;
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
             // See note in Stmt::Decl: aggregate compound literals
@@ -1945,7 +1877,20 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             Ok(dst)
         }
         Expr::Member(..) | Expr::Arrow(..) => {
+            // If the member itself is an aggregate (struct / union /
+            // array) its "value" in C is the address of the storage,
+            // not a single word loaded from it. Emitting a Load here
+            // would read the first scalar word of the aggregate and
+            // then treat that value as the array base for any outer
+            // `[i]` or `.field` — e.g. `o.a[i]` on an inner struct
+            // array would multiply-scale a garbage word instead of
+            // indexing into `o.a`.
             let addr = lower_lvalue_addr(ctx, expr)?;
+            if let Some(member_ty) = expr_type(expr, ctx) {
+                if is_aggregate_type(&member_ty, ctx) {
+                    return Ok(addr);
+                }
+            }
             let dst = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(dst, addr, 0));
             Ok(dst)
@@ -1953,7 +1898,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Sizeof(arg) => {
             match arg.as_ref() {
                 SizeofArg::Type(ty) => {
-                    let size = ty.size_bytes();
+                    let size = crate::types::size_bytes_ctx(ty, ctx);
                     let dst = ctx.alloc_vreg();
                     ctx.emit(IrOp::LoadImm(dst, size as i64));
                     Ok(dst)
@@ -1965,7 +1910,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         if let Some(&dim_vreg) = ctx.vla_dims.get(name.as_str()) {
                             // sizeof(vla) = count * elem_size_bytes
                             let elem_bytes = match ctx.local_types.get(name.as_str()) {
-                                Some(Type::Pointer(elem)) => elem.size_bytes().max(1),
+                                Some(Type::Pointer(elem)) => crate::types::size_bytes_ctx(elem, ctx).max(1),
                                 _ => 4,
                             };
                             let dst = ctx.alloc_vreg();
@@ -1981,7 +1926,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     }
                     // Non-VLA expression: infer type for accurate sizeof.
                     let size = match expr_type(inner, ctx) {
-                        Some(ty) => ty.size_bytes(),
+                        Some(ty) => crate::types::size_bytes_ctx(&ty, ctx),
                         None => 4, // default to int-sized
                     };
                     let dst = ctx.alloc_vreg();
@@ -2088,7 +2033,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 // sign/zero extension back to int (the register width).
                 // Without this, `(signed char)0x80` would stay 0x80
                 // instead of sign-extending to 0xFFFFFF80 (-128).
-                let dst_bytes = ty.size_bytes();
+                let dst_bytes = crate::types::size_bytes_ctx(ty, ctx);
                 if !dst_is_float && dst_bytes < 4 {
                     let bits = dst_bytes * 8;
                     let mask = (1u32 << bits).wrapping_sub(1) as i64;
@@ -2525,7 +2470,7 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
             if let (Some(elem), Some(_)) = (l_pt, r_pt) {
                 let raw = ctx.alloc_vreg();
                 ctx.emit(IrOp::Sub(raw, l, r));
-                let size = elem.size_bytes().max(1);
+                let size = crate::types::size_bytes_ctx(&elem, ctx).max(1);
                 if size == 1 {
                     ctx.emit(IrOp::Copy(dst, raw));
                 } else {
@@ -3173,7 +3118,7 @@ fn lower_compound_literal(
     items: &[Expr],
 ) -> Result<VReg> {
     let resolved_ty = resolve_type(ty, ctx);
-    let num_words = resolved_ty.size_words().max(1) as u32;
+    let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1) as u32;
     let slot = ctx.frame_size;
     ctx.frame_size += num_words;
 
@@ -3269,6 +3214,32 @@ fn lower_ternary(
     Ok(result)
 }
 
+/// Check whether a type is an aggregate in the C99 sense (struct, union,
+/// or array). Aggregates, when used as an rvalue, decay to their address
+/// rather than a loaded scalar value; callers that lower `Expr::Member` /
+/// `Expr::Arrow` to a value must treat them specially.
+fn is_aggregate_type(ty: &Type, ctx: &LowerCtx) -> bool {
+    match ty {
+        Type::Struct { .. } | Type::Union { .. } | Type::Array(_, _) => true,
+        Type::Volatile(inner) | Type::Const(inner) => is_aggregate_type(inner, ctx),
+        Type::Typedef(name) => {
+            for (td_name, td_ty) in &ctx.typedefs {
+                if td_name == name {
+                    return is_aggregate_type(td_ty, ctx);
+                }
+            }
+            // Typedef may alias a struct tag directly.
+            for (def_name, def_fields) in &ctx.struct_defs {
+                if def_name == name && !def_fields.is_empty() {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Check whether a type resolves to a struct or union (multi-word aggregate).
 fn is_struct_type(ty: &Type, ctx: &LowerCtx) -> bool {
     match ty {
@@ -3287,40 +3258,10 @@ fn is_struct_type(ty: &Type, ctx: &LowerCtx) -> bool {
 }
 
 /// Get the size in words of a type, resolving typedefs and named struct
-/// references through the context.
+/// references through the context. Thin wrapper over `size_words_ctx`
+/// kept for readability at call sites that historically used it.
 fn type_size_words(ty: &Type, ctx: &LowerCtx) -> u32 {
-    match ty {
-        Type::Typedef(name) => {
-            for (td_name, td_ty) in &ctx.typedefs {
-                if td_name == name {
-                    return type_size_words(td_ty, ctx);
-                }
-            }
-            ty.size_words()
-        }
-        Type::Volatile(inner) | Type::Const(inner) => type_size_words(inner, ctx),
-        Type::Struct { name: Some(sname), fields, .. } if fields.is_empty() => {
-            if let Some(flds) = resolve_struct_fields(ty, ctx) {
-                flds.iter().map(|(_, ft)| ft.size_words()).sum()
-            } else {
-                for (def_name, def_fields) in &ctx.struct_defs {
-                    if def_name == sname {
-                        return def_fields.iter().map(|(_, ft)| ft.size_words()).sum();
-                    }
-                }
-                0
-            }
-        }
-        Type::Union { name: Some(uname), fields, .. } if fields.is_empty() => {
-            for (def_name, def_fields) in &ctx.struct_defs {
-                if def_name == uname {
-                    return def_fields.iter().map(|(_, ft)| ft.size_words()).max().unwrap_or(0);
-                }
-            }
-            0
-        }
-        _ => ty.size_words(),
-    }
+    crate::types::size_words_ctx(ty, ctx)
 }
 
 /// Check whether a type resolves to a function pointer, following typedefs.

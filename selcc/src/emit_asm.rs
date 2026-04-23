@@ -39,8 +39,38 @@ pub struct AsmModule {
 /// chars pack into each 32-bit word (matching the `-char-size-8`
 /// mode and what every C-side runtime built that way expects). With
 /// `32`, each char occupies its own 32-bit word.
+/// Ctx view of a translation unit used to resolve struct tags and
+/// typedefs during size queries on global/static-local types.
+struct UnitTypeCtx<'a> {
+    struct_defs: &'a [(String, Vec<(String, crate::types::Type)>)],
+    typedefs: &'a [(String, crate::types::Type)],
+}
+
+impl<'a> crate::types::TypeCtx for UnitTypeCtx<'a> {
+    fn resolve_tag(&self, name: &str) -> Option<&[(String, crate::types::Type)]> {
+        for (def_name, def_fields) in self.struct_defs {
+            if def_name == name && !def_fields.is_empty() {
+                return Some(def_fields.as_slice());
+            }
+        }
+        None
+    }
+    fn resolve_typedef(&self, name: &str) -> Option<&crate::types::Type> {
+        for (td_name, td_ty) in self.typedefs {
+            if td_name == name {
+                return Some(td_ty);
+            }
+        }
+        None
+    }
+}
+
 pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
     let mut out = String::new();
+    let unit_tctx = UnitTypeCtx {
+        struct_defs: &unit.struct_defs,
+        typedefs: &unit.typedefs,
+    };
 
     // Build map of global variable names -> types for lowering.
     let global_types: HashMap<String, crate::types::Type> = unit
@@ -258,7 +288,7 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
             continue;
         }
         if let Some(init) = &global.init {
-            match build_init_words(init, global.ty.size_bytes()) {
+            match build_init_words(init, crate::types::size_bytes_ctx(&global.ty, &unit_tctx), &unit_tctx) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: global.name.clone(),
                     values,
@@ -266,7 +296,7 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", global.name);
                     // Fall back to zero-init so the symbol is still defined.
-                    let words = global.ty.size_bytes().div_ceil(4).max(1);
+                    let words = crate::types::size_bytes_ctx(&global.ty, &unit_tctx).div_ceil(4).max(1);
                     data_entries.push(DataEntry {
                         name: global.name.clone(),
                         values: vec![0u32; words as usize],
@@ -277,14 +307,14 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
     }
     for sl in &all_static_locals {
         if let Some(init) = &sl.init {
-            match build_init_words(init, sl.ty.size_bytes()) {
+            match build_init_words(init, crate::types::size_bytes_ctx(&sl.ty, &unit_tctx), &unit_tctx) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: sl.symbol.clone(),
                     values,
                 }),
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", sl.symbol);
-                    let words = sl.ty.size_bytes().div_ceil(4).max(1);
+                    let words = crate::types::size_bytes_ctx(&sl.ty, &unit_tctx).div_ceil(4).max(1);
                     data_entries.push(DataEntry {
                         name: sl.symbol.clone(),
                         values: vec![0u32; words as usize],
@@ -325,12 +355,12 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
             continue;
         }
         if global.init.is_none() && !data_names.contains(&global.name) && bss_seen.insert(global.name.clone()) {
-            bss_entries.push((global.name.clone(), global.ty.size_bytes()));
+            bss_entries.push((global.name.clone(), crate::types::size_bytes_ctx(&global.ty, &unit_tctx)));
         }
     }
     for sl in &all_static_locals {
         if sl.init.is_none() {
-            bss_entries.push((sl.symbol.clone(), sl.ty.size_bytes()));
+            bss_entries.push((sl.symbol.clone(), crate::types::size_bytes_ctx(&sl.ty, &unit_tctx)));
         }
     }
     if !bss_entries.is_empty() {
@@ -440,7 +470,7 @@ struct DataEntry {
 }
 
 /// Evaluate a const-initializer expression to a flat list of 32-bit words.
-fn build_init_words(init: &Expr, size_bytes: u32) -> Result<Vec<u32>> {
+fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeCtx) -> Result<Vec<u32>> {
     match init {
         Expr::StringLit(s) => {
             let mut v: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
@@ -450,110 +480,110 @@ fn build_init_words(init: &Expr, size_bytes: u32) -> Result<Vec<u32>> {
         Expr::InitList(items) => {
             let mut v = Vec::with_capacity(items.len());
             for item in items {
-                v.push(eval_const_expr(item)? as u32);
+                v.push(eval_const_expr(item, tctx)? as u32);
             }
             Ok(v)
         }
         other => {
             let words = size_bytes.div_ceil(4).max(1);
             let mut v = vec![0u32; words as usize];
-            v[0] = eval_const_expr(other)? as u32;
+            v[0] = eval_const_expr(other, tctx)? as u32;
             Ok(v)
         }
     }
 }
 
 /// Evaluate a constant expression at compile time (for initializers).
-fn eval_const_expr(expr: &Expr) -> Result<i32> {
+fn eval_const_expr(expr: &Expr, tctx: &dyn crate::types::TypeCtx) -> Result<i32> {
     match expr {
         Expr::IntLit(n, _) => Ok(*n as i32),
         Expr::FloatLit(f) => Ok((*f as f32).to_bits() as i32),
         Expr::CharLit(n) => Ok(*n as i32),
-        Expr::Unary { op: UnaryOp::Neg, operand } => Ok(-eval_const_expr(operand)?),
+        Expr::Unary { op: UnaryOp::Neg, operand } => Ok(-eval_const_expr(operand, tctx)?),
         Expr::Binary { op: BinaryOp::Add, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)?.wrapping_add(eval_const_expr(rhs)?))
+            Ok(eval_const_expr(lhs, tctx)?.wrapping_add(eval_const_expr(rhs, tctx)?))
         }
         Expr::Binary { op: BinaryOp::Sub, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)?.wrapping_sub(eval_const_expr(rhs)?))
+            Ok(eval_const_expr(lhs, tctx)?.wrapping_sub(eval_const_expr(rhs, tctx)?))
         }
         Expr::Binary { op: BinaryOp::Mul, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)?.wrapping_mul(eval_const_expr(rhs)?))
+            Ok(eval_const_expr(lhs, tctx)?.wrapping_mul(eval_const_expr(rhs, tctx)?))
         }
         Expr::Binary { op: BinaryOp::Div, lhs, rhs } => {
-            let r = eval_const_expr(rhs)?;
-            if r == 0 { Ok(0) } else { Ok(eval_const_expr(lhs)? / r) }
+            let r = eval_const_expr(rhs, tctx)?;
+            if r == 0 { Ok(0) } else { Ok(eval_const_expr(lhs, tctx)? / r) }
         }
         Expr::Binary { op: BinaryOp::Mod, lhs, rhs } => {
-            let r = eval_const_expr(rhs)?;
-            if r == 0 { Ok(0) } else { Ok(eval_const_expr(lhs)? % r) }
+            let r = eval_const_expr(rhs, tctx)?;
+            if r == 0 { Ok(0) } else { Ok(eval_const_expr(lhs, tctx)? % r) }
         }
         Expr::Binary { op: BinaryOp::BitOr, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)? | eval_const_expr(rhs)?)
+            Ok(eval_const_expr(lhs, tctx)? | eval_const_expr(rhs, tctx)?)
         }
         Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)? & eval_const_expr(rhs)?)
+            Ok(eval_const_expr(lhs, tctx)? & eval_const_expr(rhs, tctx)?)
         }
         Expr::Binary { op: BinaryOp::Shl, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)? << eval_const_expr(rhs)?)
+            Ok(eval_const_expr(lhs, tctx)? << eval_const_expr(rhs, tctx)?)
         }
         Expr::Binary { op: BinaryOp::Shr, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)? >> eval_const_expr(rhs)?)
+            Ok(eval_const_expr(lhs, tctx)? >> eval_const_expr(rhs, tctx)?)
         }
-        Expr::Comma(_l, r) => eval_const_expr(r),
-        Expr::DesignatedInit { value, .. } => eval_const_expr(value),
-        Expr::ArrayDesignator { value, .. } => eval_const_expr(value),
-        Expr::Cast(_, inner) => eval_const_expr(inner),
+        Expr::Comma(_l, r) => eval_const_expr(r, tctx),
+        Expr::DesignatedInit { value, .. } => eval_const_expr(value, tctx),
+        Expr::ArrayDesignator { value, .. } => eval_const_expr(value, tctx),
+        Expr::Cast(_, inner) => eval_const_expr(inner, tctx),
         Expr::Sizeof(arg) => {
             let size = match arg.as_ref() {
-                crate::ast::SizeofArg::Type(ty) => ty.size_bytes(),
+                crate::ast::SizeofArg::Type(ty) => crate::types::size_bytes_ctx(ty, tctx),
                 crate::ast::SizeofArg::Expr(_) => 4,
             };
             Ok(size as i32)
         }
         Expr::Ternary { cond, then_expr, else_expr } => {
-            let c = eval_const_expr(cond)?;
+            let c = eval_const_expr(cond, tctx)?;
             if c != 0 {
-                eval_const_expr(then_expr)
+                eval_const_expr(then_expr, tctx)
             } else {
-                eval_const_expr(else_expr)
+                eval_const_expr(else_expr, tctx)
             }
         }
         Expr::Binary { op: BinaryOp::Eq, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? == eval_const_expr(rhs)? { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? == eval_const_expr(rhs, tctx)? { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::Ne, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? != eval_const_expr(rhs)? { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? != eval_const_expr(rhs, tctx)? { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::Lt, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? < eval_const_expr(rhs)? { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? < eval_const_expr(rhs, tctx)? { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::Gt, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? > eval_const_expr(rhs)? { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? > eval_const_expr(rhs, tctx)? { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::Le, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? <= eval_const_expr(rhs)? { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? <= eval_const_expr(rhs, tctx)? { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::Ge, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? >= eval_const_expr(rhs)? { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? >= eval_const_expr(rhs, tctx)? { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::BitXor, lhs, rhs } => {
-            Ok(eval_const_expr(lhs)? ^ eval_const_expr(rhs)?)
+            Ok(eval_const_expr(lhs, tctx)? ^ eval_const_expr(rhs, tctx)?)
         }
         Expr::Binary { op: BinaryOp::LogAnd, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? != 0 && eval_const_expr(rhs)? != 0 { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? != 0 && eval_const_expr(rhs, tctx)? != 0 { 1 } else { 0 })
         }
         Expr::Binary { op: BinaryOp::LogOr, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs)? != 0 || eval_const_expr(rhs)? != 0 { 1 } else { 0 })
+            Ok(if eval_const_expr(lhs, tctx)? != 0 || eval_const_expr(rhs, tctx)? != 0 { 1 } else { 0 })
         }
-        Expr::Unary { op: UnaryOp::BitNot, operand } => Ok(!eval_const_expr(operand)?),
+        Expr::Unary { op: UnaryOp::BitNot, operand } => Ok(!eval_const_expr(operand, tctx)?),
         Expr::Unary { op: UnaryOp::LogNot, operand } => {
-            Ok(if eval_const_expr(operand)? == 0 { 1 } else { 0 })
+            Ok(if eval_const_expr(operand, tctx)? == 0 { 1 } else { 0 })
         }
         Expr::AddrOf(_) | Expr::Ident(_) | Expr::StringLit(_)
         | Expr::WideStringLit(_) | Expr::Deref(_) => Ok(0),
         Expr::InitList(items) => {
             if let Some(first) = items.first() {
-                eval_const_expr(first)
+                eval_const_expr(first, tctx)
             } else {
                 Ok(0)
             }

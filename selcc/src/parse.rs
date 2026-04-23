@@ -1956,7 +1956,20 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
             }
         }
         Expr::Sizeof(arg) => match arg.as_ref() {
-            SizeofArg::Type(ty) => Some(ty.size_bytes() as i64),
+            SizeofArg::Type(ty) => {
+                // The parser has no view of later-declared struct_defs,
+                // so a tag-only aggregate's layout is unknowable here.
+                // Returning its bogus zero-byte size would silently
+                // produce `int arr[sizeof(struct x)] == arr[0]` for a
+                // forward-referenced tag. Defer to lowering by marking
+                // this expression as non-constant; arrays of unknown
+                // constant dimension become VLAs downstream and are
+                // sized correctly once struct_defs is in scope.
+                if matches!(ty.unqualified(), Type::Struct { fields, .. } | Type::Union { fields, .. } if fields.is_empty()) {
+                    return None;
+                }
+                Some(ty.size_bytes() as i64)
+            }
             SizeofArg::Expr(_) => None,
         },
         Expr::Cast(_, inner) => try_const_eval(inner),
