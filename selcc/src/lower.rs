@@ -100,6 +100,19 @@ struct LowerCtx {
     switch_labels: Vec<Vec<Label>>,
     /// Running index into the innermost `switch_labels` entry.
     switch_label_idx: usize,
+    /// Return type of every function defined or declared in this translation
+    /// unit, keyed by function name. Used at call sites to decide whether
+    /// the callee returns a struct by value (and how many words) so that
+    /// the caller can route the result through the R0:R1 / hidden-pointer
+    /// ABI. Populated by `emit_module` before lowering each function.
+    function_return_types: HashMap<String, Type>,
+    /// Frame slot (word index) holding the hidden struct-return pointer
+    /// that the caller passed in R1 at entry. `Some` exactly when the
+    /// current function returns a struct larger than
+    /// `target::STRUCT_RET_MAX_REGS` words; `RetStruct` lowers to a
+    /// byte-by-byte copy into `*(DM(-struct_ret_slot, I6))` followed by
+    /// `R0 = <that pointer>`.
+    struct_ret_slot: Option<u32>,
 }
 
 /// Snapshot of the variable-name binding state at block-scope entry.
@@ -158,10 +171,32 @@ impl LowerCtx {
             return_type: Type::Void,
             switch_labels: Vec::new(),
             switch_label_idx: 0,
+            function_return_types: HashMap::new(),
+            struct_ret_slot: None,
         }
     }
 
     fn alloc_vreg(&mut self) -> VReg {
+        let v = self.next_vreg;
+        self.next_vreg += 1;
+        v
+    }
+
+    /// Allocate a vreg that is guaranteed non-zero. isel's
+    /// `IrOp::Load(dst, base, off)` and `IrOp::Store(val, base, off)`
+    /// treat `base == 0` as the sentinel for a frame-relative access,
+    /// so a vreg that the frontend intends to use as a pointer base
+    /// must never be allocated as VReg 0. The historical convention of
+    /// pinning VReg 0 to the first ARG_REG makes the issue invisible
+    /// for any function with at least one parameter, but a no-arg
+    /// function (`int test_main(void) { ... }`) leaves VReg 0 free for
+    /// the first body instruction. Skipping it here costs at most one
+    /// VReg id (regalloc never maps unreferenced vregs to physical
+    /// registers).
+    fn alloc_vreg_ptr(&mut self) -> VReg {
+        if self.next_vreg == 0 {
+            self.next_vreg = 1;
+        }
         let v = self.next_vreg;
         self.next_vreg += 1;
         v
@@ -456,11 +491,15 @@ pub fn lower_function(
     enum_constants: &[(String, i64)],
     typedefs: &[(String, Type)],
 ) -> Result<LowerResult> {
-    lower_function_with_known(func, global_types, struct_defs, enum_constants, typedefs, &HashSet::new())
+    lower_function_with_known(
+        func, global_types, struct_defs, enum_constants, typedefs,
+        &HashSet::new(), &HashMap::new(),
+    )
 }
 
 /// Lower a single function with a set of known function names for
-/// implicit declaration checking.
+/// implicit declaration checking and a map of callee return types used
+/// to route struct-by-value returns through the correct ABI path.
 pub fn lower_function_with_known(
     func: &Function,
     global_types: &HashMap<String, Type>,
@@ -468,6 +507,7 @@ pub fn lower_function_with_known(
     enum_constants: &[(String, i64)],
     typedefs: &[(String, Type)],
     known_functions: &HashSet<String>,
+    function_return_types: &HashMap<String, Type>,
 ) -> Result<LowerResult> {
     let mut ctx = LowerCtx::new();
     ctx.globals = global_types.clone();
@@ -476,6 +516,7 @@ pub fn lower_function_with_known(
     ctx.func_name = func.name.clone();
     ctx.return_type = func.return_type.clone();
     ctx.known_functions = known_functions.clone();
+    ctx.function_return_types = function_return_types.clone();
     for (name, val) in enum_constants {
         ctx.enum_constants.insert(name.clone(), *val);
     }
@@ -563,6 +604,7 @@ pub fn lower_function_with_known(
     // indices. emit_asm pins vregs 0..num_params to ARG_REGS[0..num_params],
     // so the correspondence must be slot-based (not param-based) to keep
     // struct-by-value consistent with the caller's flat-slot layout.
+    //
     let reg_slots = (total_slots as usize).min(target::ARG_REGS.len());
     for slot in 0..reg_slots {
         let v = ctx.alloc_vreg();
@@ -689,6 +731,25 @@ pub fn lower_function_with_known(
     }
     }
 
+    // Hidden struct-return pointer: when this function's return type is
+    // a struct larger than `target::STRUCT_RET_MAX_REGS` words, the
+    // caller allocates the destination buffer and passes its address
+    // in R1 (alongside the scalar argument registers R4/R8/R12). The
+    // callee must write the returned struct through that pointer and
+    // leave R0 = R1 on exit (the ABI convention). Capture R1
+    // into a frame slot here at entry so `RetStruct` can reload it
+    // regardless of how many intervening computations clobber R1.
+    if is_struct_type(&func.return_type, &ctx) {
+        let ret_words = type_size_words(&func.return_type, &ctx);
+        if ret_words > target::STRUCT_RET_MAX_REGS {
+            let ptr_vreg = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadStructRetPtr(ptr_vreg));
+            let slot = ctx.alloc_stack_slot();
+            ctx.emit(IrOp::Store(ptr_vreg, 0, slot as i32));
+            ctx.struct_ret_slot = Some(slot);
+        }
+    }
+
     // Lower the function body.
     for stmt in &func.body {
         lower_stmt(&mut ctx, stmt)?;
@@ -705,7 +766,7 @@ pub fn lower_function_with_known(
     let needs_ret = match last_label_pos {
         None => {
             // No labels at all — check if the function ends with Ret.
-            ctx.ops.last().is_none_or(|op| !matches!(op, IrOp::Ret(_)))
+            ctx.ops.last().is_none_or(|op| !matches!(op, IrOp::Ret(_) | IrOp::RetStruct { .. }))
         }
         Some(pos) => {
             let label_id = match &ctx.ops[pos] {
@@ -726,7 +787,7 @@ pub fn lower_function_with_known(
             } else {
                 let last_tail = tail.iter().rev()
                     .find(|op| !matches!(op, IrOp::Nop));
-                last_tail.is_none_or(|op| !matches!(op, IrOp::Ret(_) | IrOp::Branch(_)))
+                last_tail.is_none_or(|op| !matches!(op, IrOp::Ret(_) | IrOp::RetStruct { .. } | IrOp::Branch(_)))
             }
         }
     };
@@ -752,6 +813,35 @@ pub fn lower_function_with_known(
 fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
     match stmt {
         Stmt::Return(expr) => {
+            // `return <struct>;` requires routing the value through the
+            // struct-by-value ABI (R0:R1 for small structs, hidden-
+            // pointer copy for larger ones) instead of the single-word
+            // `Ret(Some(vreg))` scalar path -- the latter would collapse
+            // the struct to its first loaded word and the caller would
+            // read only one field of the result.
+            if let Some(e) = expr {
+                let returns_struct = is_struct_type(&ctx.return_type, ctx);
+                if returns_struct {
+                    let num_words = type_size_words(&ctx.return_type, ctx);
+                    let src_addr = lower_struct_expr_addr(ctx, e)?;
+                    let dst_addr = if num_words > target::STRUCT_RET_MAX_REGS {
+                        // Reload the hidden struct-return pointer the
+                        // caller passed in R1: it was captured into a
+                        // frame slot at function entry, so any
+                        // intervening user code that happened to use
+                        // R1 as a scratch has not lost it.
+                        let slot = ctx.struct_ret_slot
+                            .expect("large struct return without hidden-ptr slot");
+                        let v = ctx.alloc_vreg();
+                        ctx.emit(IrOp::Load(v, 0, slot as i32));
+                        Some(v)
+                    } else {
+                        None
+                    };
+                    ctx.emit(IrOp::RetStruct { src_addr, dst_addr, num_words });
+                    return Ok(());
+                }
+            }
             let val = match expr {
                 Some(e) => Some(lower_expr(ctx, e)?),
                 None => None,
@@ -899,7 +989,7 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     }
                     if is_struct_type(ty, ctx) && num_words > 1 {
                         let src_addr = lower_struct_expr_addr(ctx, init_expr)?;
-                        let dst_addr = ctx.alloc_vreg();
+                        let dst_addr = ctx.alloc_vreg_ptr();
                         // Use `storage_slot` so the copy starts at the
                         // deepest word (field 0) and walks upward.
                         ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
@@ -1703,7 +1793,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             if let Some(storage) = ctx.locals.get(name).cloned() {
                 match storage {
                     LocalStorage::Stack(offset) => {
-                        let dst = ctx.alloc_vreg();
+                        let dst = ctx.alloc_vreg_ptr();
                         ctx.emit(IrOp::FrameAddr(dst, offset as i32));
                         Ok(dst)
                     }
@@ -1713,7 +1803,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         let slot = ctx.alloc_stack_slot();
                         ctx.emit(IrOp::Store(vreg, 0, slot as i32));
                         ctx.locals.insert(name.clone(), LocalStorage::Stack(slot));
-                        let dst = ctx.alloc_vreg();
+                        let dst = ctx.alloc_vreg_ptr();
                         ctx.emit(IrOp::FrameAddr(dst, slot as i32));
                         Ok(dst)
                     }
@@ -1860,7 +1950,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             } else {
                 slot
             };
-            let dst = ctx.alloc_vreg();
+            let dst = ctx.alloc_vreg_ptr();
             ctx.emit(IrOp::FrameAddr(dst, base_slot as i32));
             Ok(dst)
         }
@@ -4393,6 +4483,101 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         | Expr::Deref(..) | Expr::Index(..) => {
             lower_lvalue_addr(ctx, expr)
         }
+        // Call returning a struct by value. The ordinary `lower_expr`
+        // path collapses the returned aggregate to a single VReg
+        // (field-zero only), which discards every word past R0 and
+        // hands the caller a truncated value. Lower the call through
+        // `CallStruct` / `CallIndirectStruct` instead, which writes
+        // all `num_words` words of the result into a caller-side
+        // frame buffer, then return that buffer's address.
+        Expr::Call { name, args } => {
+            let ret_ty = ctx.function_return_types.get(name).cloned()
+                .or_else(|| {
+                    // Fall back to the callee expression's inferred
+                    // type when it is a function pointer in the local
+                    // or global type table.
+                    ctx.local_types.get(name).or_else(|| ctx.globals.get(name))
+                        .and_then(function_ptr_ret_type)
+                });
+            let is_struct_ret = ret_ty.as_ref()
+                .is_some_and(|t| is_struct_type(t, ctx));
+            if !is_struct_ret {
+                let val = lower_expr(ctx, expr)?;
+                let slot = ctx.alloc_stack_slot();
+                ctx.emit(IrOp::Store(val, 0, slot as i32));
+                let addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(addr, slot as i32));
+                return Ok(addr);
+            }
+            let ret_ty = ret_ty.unwrap();
+            let num_words = type_size_words(&ret_ty, ctx).max(1);
+            let arg_vregs = lower_call_args(ctx, args)?;
+            // Reserve the `num_words`-slot buffer and point the
+            // destination address at the *deepest* slot: field 0 of an
+            // aggregate lives at the highest address (deepest frame
+            // slot) because SHARC stacks grow downward while C field
+            // offsets walk upward. `emit_struct_copy` then stores word
+            // w at `dst_addr + w * 4` (byte offset), which lands in
+            // slot (deepest - w). Pointing `dst_addr` at `slot`
+            // (shallowest) instead would put field 0 at the wrong
+            // slot and the caller would read the wrong field order.
+            let slot = ctx.frame_size;
+            ctx.frame_size += num_words;
+            let storage_slot = slot + num_words - 1;
+            let dst_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+            let callee_ty = ctx.local_types.get(name)
+                .or_else(|| ctx.globals.get(name));
+            let is_fnptr = callee_ty.is_some_and(|t| is_function_ptr_type(t, ctx));
+            if is_fnptr {
+                let addr = lower_expr(ctx, &Expr::Ident(name.clone()))?;
+                ctx.emit(IrOp::CallIndirectStruct {
+                    addr,
+                    args: arg_vregs,
+                    dst_addr,
+                    num_words,
+                });
+            } else {
+                ctx.emit(IrOp::CallStruct {
+                    name: name.clone(),
+                    args: arg_vregs,
+                    dst_addr,
+                    num_words,
+                });
+            }
+            Ok(dst_addr)
+        }
+        Expr::CallIndirect { func_expr, args } => {
+            let ret_ty = expr_function_ptr_ret_type(func_expr, ctx);
+            let is_struct_ret = ret_ty.as_ref()
+                .is_some_and(|t| is_struct_type(t, ctx));
+            if !is_struct_ret {
+                let val = lower_expr(ctx, expr)?;
+                let slot = ctx.alloc_stack_slot();
+                ctx.emit(IrOp::Store(val, 0, slot as i32));
+                let addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(addr, slot as i32));
+                return Ok(addr);
+            }
+            let ret_ty = ret_ty.unwrap();
+            let num_words = type_size_words(&ret_ty, ctx).max(1);
+            let fn_addr = lower_expr(ctx, func_expr)?;
+            let arg_vregs = lower_call_args(ctx, args)?;
+            // See direct-call branch for the rationale behind
+            // pointing `dst_addr` at the deepest slot.
+            let slot = ctx.frame_size;
+            ctx.frame_size += num_words;
+            let storage_slot = slot + num_words - 1;
+            let dst_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+            ctx.emit(IrOp::CallIndirectStruct {
+                addr: fn_addr,
+                args: arg_vregs,
+                dst_addr,
+                num_words,
+            });
+            Ok(dst_addr)
+        }
         _ => {
             let val = lower_expr(ctx, expr)?;
             let ty = expr_type(expr, ctx);
@@ -4400,10 +4585,57 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
             ctx.emit(IrOp::Store(val, 0, slot as i32));
-            let addr = ctx.alloc_vreg();
+            let addr = ctx.alloc_vreg_ptr();
             ctx.emit(IrOp::FrameAddr(addr, slot as i32));
             Ok(addr)
         }
+    }
+}
+
+/// Lower a call's argument list into vregs using the same struct-
+/// unpack logic as `Expr::Call`: scalars are evaluated directly,
+/// struct-by-value arguments get flattened into per-word vregs.
+fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
+    let mut arg_vregs = Vec::new();
+    for arg in args {
+        let arg_ty = expr_type(arg, ctx);
+        let arg_is_struct = arg_ty.as_ref()
+            .is_some_and(|t| is_struct_type(t, ctx));
+        if arg_is_struct {
+            let nw = arg_ty.as_ref()
+                .map_or(1, |t| type_size_words(t, ctx));
+            let addr = lower_struct_expr_addr(ctx, arg)?;
+            for w in 0..nw {
+                let tmp = ctx.alloc_vreg();
+                ctx.emit(IrOp::Load(tmp, addr, (w * 4) as i32));
+                arg_vregs.push(tmp);
+            }
+        } else {
+            arg_vregs.push(lower_expr(ctx, arg)?);
+        }
+    }
+    Ok(arg_vregs)
+}
+
+/// Pull the return type out of a `Type::FunctionPtr`, peeling any
+/// cv qualifiers / typedefs in the process. Returns `None` for any
+/// non-function-pointer type.
+fn function_ptr_ret_type(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::FunctionPtr { return_type, .. } => Some((**return_type).clone()),
+        Type::Volatile(inner) | Type::Const(inner) => function_ptr_ret_type(inner),
+        _ => None,
+    }
+}
+
+/// Resolve the return type of a function-pointer expression by looking
+/// up its identifier in the local/global type tables.
+fn expr_function_ptr_ret_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
+    match expr {
+        Expr::Ident(name) => ctx.local_types.get(name)
+            .or_else(|| ctx.globals.get(name))
+            .and_then(function_ptr_ret_type),
+        _ => None,
     }
 }
 
@@ -5101,7 +5333,7 @@ mod tests {
         known.insert("f".to_string());
         let result = lower_function_with_known(
             &unit.functions[0], &HashMap::new(), &unit.struct_defs,
-            &unit.enum_constants, &unit.typedefs, &known,
+            &unit.enum_constants, &unit.typedefs, &known, &HashMap::new(),
         );
         assert!(result.is_err(), "expected error for implicit function declaration");
         let err = result.unwrap_err();
@@ -5118,7 +5350,7 @@ mod tests {
         known.insert("bar".to_string());
         let result = lower_function_with_known(
             &unit.functions[0], &HashMap::new(), &unit.struct_defs,
-            &unit.enum_constants, &unit.typedefs, &known,
+            &unit.enum_constants, &unit.typedefs, &known, &HashMap::new(),
         );
         assert!(result.is_ok(), "expected declared function to be accepted");
     }

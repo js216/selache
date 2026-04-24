@@ -811,7 +811,8 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::StackSave(d)
         | IrOp::StackAlloc(d, _)
         | IrOp::FrameAddr(d, _)
-        | IrOp::LoadStackArg(d, _) => Some(*d),
+        | IrOp::LoadStackArg(d, _)
+        | IrOp::LoadStructRetPtr(d) => Some(*d),
 
         IrOp::Cmp(..)
         | IrOp::UCmp(..)
@@ -819,6 +820,9 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::Cmp64(..)
         | IrOp::UCmp64(..)
         | IrOp::Ret(_)
+        | IrOp::RetStruct { .. }
+        | IrOp::CallStruct { .. }
+        | IrOp::CallIndirectStruct { .. }
         | IrOp::Branch(_)
         | IrOp::BranchCond(..)
         | IrOp::Label(_)
@@ -877,6 +881,25 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
             v.extend_from_slice(args);
             v
         }
+        IrOp::CallStruct { args, dst_addr, .. } => {
+            let mut v = args.clone();
+            v.push(*dst_addr);
+            v
+        }
+        IrOp::CallIndirectStruct { addr, args, dst_addr, .. } => {
+            let mut v = vec![*addr];
+            v.extend_from_slice(args);
+            v.push(*dst_addr);
+            v
+        }
+        IrOp::RetStruct { src_addr, dst_addr, .. } => {
+            let mut v = vec![*src_addr];
+            if let Some(d) = dst_addr {
+                v.push(*d);
+            }
+            v
+        }
+        IrOp::LoadStructRetPtr(_) => Vec::new(),
         IrOp::Load(_, base, _) => vec![*base],
         IrOp::Store(val, base, _) => vec![*val, *base],
         IrOp::LoadGlobal(..) | IrOp::ReadGlobal(..) | IrOp::ReadGlobal64(..)
@@ -910,7 +933,15 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
 
 /// Check if an op has side effects beyond writing to its destination vreg.
 fn has_side_effects(op: &IrOp) -> bool {
-    matches!(op, IrOp::Call(..) | IrOp::StackSave(_) | IrOp::StackRestore(_) | IrOp::StackAlloc(..))
+    matches!(op,
+        IrOp::Call(..)
+        | IrOp::CallIndirect(..)
+        | IrOp::CallStruct { .. }
+        | IrOp::CallIndirectStruct { .. }
+        | IrOp::StackSave(_)
+        | IrOp::StackRestore(_)
+        | IrOp::StackAlloc(..)
+    )
 }
 
 // ---------------------------------------------------------------------------

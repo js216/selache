@@ -93,6 +93,15 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         )
         .collect();
 
+    // Map each callee's return type so per-call lowering can route
+    // struct-by-value returns through the R0:R1 / hidden-pointer ABI
+    // instead of truncating them to the single R0 scalar path.
+    let function_return_types: HashMap<String, crate::types::Type> = unit
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.return_type.clone()))
+        .collect();
+
     // Compile each function, threading static locals produced by earlier
     // functions back in as visible globals for later ones.
     let mut all_static_locals: Vec<lower::StaticLocal> = Vec::new();
@@ -113,20 +122,20 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     let mut compiled: Vec<CompiledFunction> = Vec::new();
     let mut skipped_functions: Vec<String> = Vec::new();
 
+    let unit_ctx = UnitCtx {
+        struct_defs: &unit.struct_defs,
+        enum_constants: &unit.enum_constants,
+        typedefs: &unit.typedefs,
+        known_functions: &known_functions,
+        variadic_callees: &unit.variadic_functions,
+        function_return_types: &function_return_types,
+    };
     for func in &unit.functions {
         let mut func_global_types = global_types.clone();
         for sl in &all_static_locals {
             func_global_types.insert(sl.symbol.clone(), sl.ty.clone());
         }
-        let fr = match emit_function_instrs(
-            func,
-            &func_global_types,
-            &unit.struct_defs,
-            &unit.enum_constants,
-            &unit.typedefs,
-            &known_functions,
-            &unit.variadic_functions,
-        ) {
+        let fr = match emit_function_instrs(func, &func_global_types, &unit_ctx) {
             Ok(fr) => fr,
             Err(e) => {
                 eprintln!("selcc: {}: {e}", func.name);
@@ -754,20 +763,32 @@ struct FnEmitResult {
     label_insertions: HashMap<usize, Vec<String>>,
 }
 
+/// TU-wide context reused across every function lowering: struct /
+/// typedef definitions, enum constants, global types, known-function
+/// set, and per-callee return-type map. Bundled into a single struct
+/// so that `emit_function_instrs` has a manageable argument count and
+/// per-function threading does not accumulate a new parameter each
+/// time the compiler learns a new TU-level fact.
+struct UnitCtx<'a> {
+    struct_defs: &'a [(String, Vec<(String, crate::types::Type)>)],
+    enum_constants: &'a [(String, i64)],
+    typedefs: &'a [(String, crate::types::Type)],
+    known_functions: &'a HashSet<String>,
+    variadic_callees: &'a HashSet<String>,
+    function_return_types: &'a HashMap<String, crate::types::Type>,
+}
+
 /// Run the per-function pipeline and return the final machine-instruction
 /// stream (prologue + body + epilogue, with branches resolved). The
 /// caller is responsible for converting each instruction to text.
 fn emit_function_instrs(
     func: &Function,
     global_types: &HashMap<String, crate::types::Type>,
-    struct_defs: &[(String, Vec<(String, crate::types::Type)>)],
-    enum_constants: &[(String, i64)],
-    typedefs: &[(String, crate::types::Type)],
-    known_functions: &HashSet<String>,
-    variadic_callees: &HashSet<String>,
+    unit: &UnitCtx<'_>,
 ) -> Result<FnEmitResult> {
     let lower_result = lower::lower_function_with_known(
-        func, global_types, struct_defs, enum_constants, typedefs, known_functions,
+        func, global_types, unit.struct_defs, unit.enum_constants,
+        unit.typedefs, unit.known_functions, unit.function_return_types,
     )?;
     let strings = lower_result.strings;
     let wide_strings = lower_result.wide_strings;
@@ -777,7 +798,26 @@ fn emit_function_instrs(
     let ir = ir_opt::dead_code_eliminate(&ir);
     let ir = ir_opt::detect_hardware_loops(&ir);
 
-    let isel_result = isel::select_with_name(&ir, &func.name, variadic_callees);
+    // Decide up-front whether this function participates in the
+    // struct-by-value return ABI: a callee-side `RetStruct` /
+    // `LoadStructRetPtr`, or a caller-side `CallStruct` /
+    // `CallIndirectStruct`. Only those shapes ever route data through
+    // the R0:R1 pair (or the R1 hidden-pointer slot), so only those
+    // functions need regalloc to permanently reserve R1. Permanently
+    // reserving it everywhere costs a usable scratch register and
+    // raises register pressure enough that nested ternary chains spill
+    // a join value down a path that the merging block cannot reload --
+    // a regalloc latent bug that the extra pressure would expose for
+    // every function in the TU instead of just the few that touch
+    // structs by value.
+    let reserves_r1 = ir.iter().any(|op| matches!(op,
+        crate::ir::IrOp::RetStruct { .. }
+        | crate::ir::IrOp::LoadStructRetPtr(_)
+        | crate::ir::IrOp::CallStruct { .. }
+        | crate::ir::IrOp::CallIndirectStruct { .. }
+    ));
+
+    let isel_result = isel::select_with_name(&ir, &func.name, unit.variadic_callees);
 
     // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
     // by-value parameters consume multiple ABI slots (one 32-bit word
@@ -795,7 +835,7 @@ fn emit_function_instrs(
         }
     }
     let (allocated, _spill_count, alloc_map) =
-        regalloc::allocate(&isel_result.instrs, num_params);
+        regalloc::allocate(&isel_result.instrs, num_params, reserves_r1);
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} after regalloc ===", func.name);
         for (i, mi) in allocated.iter().enumerate() {
@@ -1485,6 +1525,30 @@ fn eliminate_copies(
             let pass_is_target = branch_targets.contains(&i);
             let next_is_target = branch_targets.contains(&(i + 1));
 
+            // CJUMP and call-form IndirectBranch report their ABI-read
+            // registers (ARG_REGS + R0) through `source_regs` so the
+            // use-count phase sees them as live, but `remap_sources`
+            // for those instructions is the identity -- they carry no
+            // explicit operand fields the optimiser can rewrite.
+            // Forward-substituting a `Rn = Rm` Pass into a CJump
+            // therefore drops the Pass *and* fails to actually rewrite
+            // the call to read `Rm` instead of `Rn`. Any post-call use
+            // that read `Rn` -- in particular the caller-saved →
+            // callee-saved migration that holds a value live across
+            // the call -- is then left reading whatever was in `Rn`
+            // before the Pass. Refuse the forward-sub whenever the
+            // consumer is a call-shaped branch.
+            //
+            // The non-call IndirectBranch with `pm_m == 5` is the
+            // open-coded indirect-call lowering (see regalloc.rs);
+            // it has the same ABI-read semantics as a CJump.
+            let next_is_call = matches!(
+                instrs.get(i + 1).map(|m| &m.instr),
+                Some(Instruction::CJump { .. })
+                    | Some(Instruction::IndirectBranch { call: true, .. })
+                    | Some(Instruction::IndirectBranch { call: false, pm_m: 5, .. }),
+            );
+
             let dst_count = use_count.get(&dst).copied().unwrap_or(0);
             if dst != src
                 && dst_count == 1
@@ -1492,6 +1556,7 @@ fn eliminate_copies(
                 && source_regs(&instrs[i + 1].instr).contains(&dst)
                 && !pass_is_target
                 && !next_is_target
+                && !next_is_call
             {
                 removed.push(i);
                 skip_next_remap = Some((dst, src));

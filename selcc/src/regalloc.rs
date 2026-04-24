@@ -34,8 +34,12 @@ use selinstr::encode::{
 /// instruction lands (the slot AFTER any spill stores/loads inserted ahead of
 /// it). Labels in the input's position space must map through this so that
 /// a branch target lands on its instruction rather than on an inserted spill.
-pub fn allocate(instrs: &[MachInstr], num_params: u8) -> (Vec<MachInstr>, u32, Vec<usize>) {
-    let mut alloc = Allocator::new(num_params);
+pub fn allocate(
+    instrs: &[MachInstr],
+    num_params: u8,
+    reserves_r1: bool,
+) -> (Vec<MachInstr>, u32, Vec<usize>) {
+    let mut alloc = Allocator::new(num_params, reserves_r1);
     let mut out = Vec::new();
     let mut index_map = Vec::with_capacity(instrs.len());
 
@@ -80,7 +84,7 @@ struct Allocator {
 }
 
 impl Allocator {
-    fn new(num_params: u8) -> Self {
+    fn new(num_params: u8, reserves_r1: bool) -> Self {
         let mut vreg_to_phys = BTreeMap::new();
         let mut phys_to_vreg = BTreeMap::new();
         let mut pinned = BTreeSet::new();
@@ -107,6 +111,26 @@ impl Allocator {
             .entry(target::RETURN_REG)
             .or_insert(target::RETURN_REG_VREG);
         pinned.insert(target::RETURN_REG);
+        // Same deal for the hi half of a two-word struct return: pin a
+        // pseudo-vreg to physical R1 so isel's explicit `R1 = ...` and
+        // `... = R1` transfers survive regalloc remapping. Without this,
+        // the second word of the struct ends up in whatever register R1
+        // got renamed to and the caller reads back stale data.
+        //
+        // Only reserve R1 in functions whose body actually emits one of
+        // the struct-return ABI shapes (caller-side `CallStruct` /
+        // `CallIndirectStruct` or callee-side `RetStruct` /
+        // `LoadStructRetPtr`). Permanently reserving R1 in every
+        // function would lose a usable scratch register everywhere and
+        // increase register pressure enough to expose latent regalloc
+        // join-reconciliation bugs in deeply nested ternary chains.
+        if reserves_r1 {
+            vreg_to_phys.insert(target::RETURN_REG_HI_VREG, target::RETURN_REG_HI);
+            phys_to_vreg
+                .entry(target::RETURN_REG_HI)
+                .or_insert(target::RETURN_REG_HI_VREG);
+            pinned.insert(target::RETURN_REG_HI);
+        }
         Self {
             vreg_to_phys,
             phys_to_vreg,
@@ -149,6 +173,7 @@ impl Allocator {
             .filter(|(&vreg, &phys)| {
                 target::CALLER_SAVED.contains(&phys)
                     && vreg != target::RETURN_REG_VREG
+                    && vreg != target::RETURN_REG_HI_VREG
             })
             .map(|(&vreg, &phys)| (vreg, phys))
             .collect();
@@ -702,6 +727,7 @@ impl Allocator {
                     let resident = self.phys_to_vreg.get(&dest_phys).copied();
                     if let Some(v) = resident {
                         if v != rx && v != target::RETURN_REG_VREG
+                            && v != target::RETURN_REG_HI_VREG
                             && self.vreg_to_phys.get(&v).copied() == Some(dest_phys)
                         {
                             let slot = *self.spill_map.entry(v).or_insert_with(|| {
@@ -1162,7 +1188,7 @@ mod tests {
                 reloc: None,
             },
         ];
-        let (out, spills, _) = allocate(&instrs, 0);
+        let (out, spills, _) = allocate(&instrs, 0, false);
         assert_eq!(spills, 0);
         // Should still have a LoadImm and Return.
         assert!(out.iter().any(|m| matches!(m.instr, Instruction::LoadImm { .. })));
@@ -1205,7 +1231,7 @@ mod tests {
                 reloc: None,
             },
         ];
-        let (out, _, _) = allocate(&instrs, 0);
+        let (out, _, _) = allocate(&instrs, 0, false);
         // Verify all registers in the Add are in 0-15 range.
         for mi in &out {
             if let Instruction::Compute {
@@ -1244,7 +1270,7 @@ mod tests {
             },
             reloc: None,
         });
-        let (out, _, _) = allocate(&instrs, 0);
+        let (out, _, _) = allocate(&instrs, 0, false);
         // Collect the physical registers assigned to LoadImm instructions.
         let mut assigned = Vec::new();
         for mi in &out {
