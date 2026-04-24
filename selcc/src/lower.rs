@@ -803,15 +803,9 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     // Non-aggregate scalar initializers (including the
                     // degenerate `int x = {5};` form) keep the single
                     // slot at `slot_offset`.
-                    for (i, item) in items.iter().enumerate() {
-                        let val = lower_expr(ctx, item)?;
-                        let elem_slot = if is_aggregate {
-                            slot_offset + num_words - 1 - i as u32
-                        } else {
-                            slot_offset + i as u32
-                        };
-                        ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
-                    }
+                    lower_aggregate_init(
+                        ctx, items, ty, slot_offset, num_words, is_aggregate,
+                    )?;
                 } else if let Some(init_expr) = init {
                     // `char s[] = "hello"` and friends: expand the
                     // string literal into per-element stores.  Without
@@ -1505,16 +1499,9 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let is_aggregate = matches!(resolved_ty,
                 Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
             if let Expr::InitList(items) = inner.as_ref() {
-                for (i, item) in items.iter().enumerate() {
-                    if i as u32 >= num_words { break; }
-                    let val = lower_expr(ctx, item)?;
-                    let elem_slot = if is_aggregate {
-                        slot + num_words - 1 - i as u32
-                    } else {
-                        slot + i as u32
-                    };
-                    ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
-                }
+                lower_aggregate_init(
+                    ctx, items, &resolved_ty, slot, num_words, is_aggregate,
+                )?;
             }
             let base_slot = if is_aggregate {
                 slot + num_words - 1
@@ -3248,6 +3235,126 @@ fn lower_compound_assign(
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
         }
+    }
+}
+
+/// Lower an aggregate (or degenerate scalar) initializer list into stack
+/// stores, honouring C99 designated initializers (`[n] = v`, `.field = v`)
+/// and the "positional continues after designator" rule.
+///
+/// Layout: aggregates store element / field 0 at the deepest slot
+/// (`slot_base + num_words - 1`) so that adding an element / byte offset
+/// to the storage base address walks upward through memory in
+/// increasing-offset order.  Non-aggregate scalar init (`int x = {5};`)
+/// keeps the single slot at `slot_base`.
+///
+/// Holes between designators are zero-filled to match C99 semantics.
+fn lower_aggregate_init(
+    ctx: &mut LowerCtx,
+    items: &[Expr],
+    ty: &Type,
+    slot_base: u32,
+    num_words: u32,
+    is_aggregate: bool,
+) -> Result<()> {
+    // Non-aggregate degenerate case: `int x = {5};` — single slot, ignore
+    // anything past the first item.  No zero-fill needed.
+    if !is_aggregate {
+        for (i, item) in items.iter().enumerate() {
+            let inner = strip_designator(item);
+            let val = lower_expr(ctx, inner)?;
+            ctx.emit(IrOp::Store(val, 0, (slot_base + i as u32) as i32));
+        }
+        return Ok(());
+    }
+
+    // Aggregate: zero-fill every word first so holes between designators
+    // (`int a[5] = {[2]=7};` leaves a[0..2] and a[3..] at 0) are set.
+    let zero = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(zero, 0));
+    for w in 0..num_words {
+        ctx.emit(IrOp::Store(zero, 0, (slot_base + w) as i32));
+    }
+
+    // Resolve struct-field metadata once (used for `.field = v` designators).
+    let resolved_ty = resolve_type(ty, ctx);
+    let struct_fields: Option<Vec<(String, Type)>> =
+        resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
+
+    // Element stride (in words) for arrays: each positional step or
+    // `[n]` designator advances by `elem_words` words.  For structs the
+    // cursor tracks the field index and we resolve to byte offsets.
+    let elem_words: u32 = match resolved_ty.unqualified() {
+        Type::Array(elem_ty, _) => {
+            crate::types::size_bytes_ctx(elem_ty, ctx).div_ceil(4).max(1)
+        }
+        _ => 1,
+    };
+
+    // Cursor is the next element index (for arrays) or field index
+    // (for structs).  Designators reset the cursor; positional items
+    // advance it.
+    let mut cursor: u32 = 0;
+    for item in items {
+        let (word_off, inner_expr, next_cursor) = match item {
+            Expr::ArrayDesignator { index, value } => {
+                let idx = match index.as_ref() {
+                    Expr::IntLit(v, _) => *v as u32,
+                    _ => cursor,
+                };
+                let w = idx.saturating_mul(elem_words);
+                (w, value.as_ref(), idx.saturating_add(1))
+            }
+            Expr::DesignatedInit { field, value } => {
+                if let Some(fields) = struct_fields.as_deref() {
+                    if let Some((byte_off, _)) =
+                        struct_field_offset(fields, field, ctx)
+                    {
+                        let fidx = fields
+                            .iter()
+                            .position(|(n, _)| n == field)
+                            .unwrap_or(cursor as usize)
+                            as u32;
+                        (byte_off / 4, value.as_ref(), fidx.saturating_add(1))
+                    } else {
+                        // Unknown field: fall back to cursor-based store.
+                        (cursor.saturating_mul(elem_words), value.as_ref(),
+                         cursor.saturating_add(1))
+                    }
+                } else {
+                    (cursor.saturating_mul(elem_words), value.as_ref(),
+                     cursor.saturating_add(1))
+                }
+            }
+            other => {
+                let w = cursor.saturating_mul(elem_words);
+                (w, other, cursor.saturating_add(1))
+            }
+        };
+
+        if word_off >= num_words {
+            cursor = next_cursor;
+            continue;
+        }
+
+        // For aggregates the deepest slot holds word 0; element at word
+        // offset `w` sits at `slot_base + num_words - 1 - w`.
+        let elem_slot = slot_base + num_words - 1 - word_off;
+        let val = lower_expr(ctx, inner_expr)?;
+        ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+        cursor = next_cursor;
+    }
+    Ok(())
+}
+
+/// Peel a designator wrapper, returning the inner value expression.
+/// Used in scalar contexts where designators are meaningless but may
+/// still appear syntactically (e.g. `int x = {.f = 5}` — degenerate).
+fn strip_designator(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::DesignatedInit { value, .. }
+        | Expr::ArrayDesignator { value, .. } => strip_designator(value),
+        other => other,
     }
 }
 

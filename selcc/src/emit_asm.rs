@@ -461,9 +461,38 @@ fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeC
             Ok(v)
         }
         Expr::InitList(items) => {
-            let mut v = Vec::with_capacity(items.len());
+            // Honour designated initializers (`[n] = v`, `.field = v`).
+            // Holes between designators are zero-filled to match C99.
+            // Positional items after a designator continue from the
+            // designator's index + 1.  Sized at `size_bytes / 4` words
+            // when the caller knows the type; otherwise grows to fit.
+            let declared_words = (size_bytes.div_ceil(4)).max(1) as usize;
+            let mut v: Vec<u32> = vec![0u32; declared_words];
+            let mut cursor: usize = 0;
+            let ensure = |v: &mut Vec<u32>, idx: usize| {
+                if idx >= v.len() {
+                    v.resize(idx + 1, 0);
+                }
+            };
             for item in items {
-                v.push(eval_const_expr(item, tctx)? as u32);
+                let (idx, inner) = match item {
+                    Expr::ArrayDesignator { index, value } => {
+                        let i = eval_const_expr(index, tctx)? as usize;
+                        (i, value.as_ref())
+                    }
+                    Expr::DesignatedInit { value, .. } => {
+                        // Struct field offsets for global init are not
+                        // resolved here (const-eval has no field layout
+                        // context); write at cursor and carry on.  Tests
+                        // exercising struct-field-designated globals
+                        // would need an extended type-ctx.
+                        (cursor, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                ensure(&mut v, idx);
+                v[idx] = eval_const_expr(inner, tctx)? as u32;
+                cursor = idx + 1;
             }
             Ok(v)
         }
