@@ -102,6 +102,15 @@ struct LowerCtx {
     switch_label_idx: usize,
 }
 
+/// Snapshot of the variable-name binding state at block-scope entry.
+/// Used by [`LowerCtx::snapshot_scope`] / [`LowerCtx::restore_scope`]
+/// to implement C99 6.2.1 block scoping.
+struct ScopeSnapshot {
+    locals: HashMap<String, LocalStorage>,
+    local_types: HashMap<String, Type>,
+    vla_dims: HashMap<String, VReg>,
+}
+
 /// A static local variable collected during lowering.
 #[derive(Debug)]
 pub struct StaticLocal {
@@ -180,6 +189,32 @@ impl LowerCtx {
     /// Whether a vreg is the lo half of a 64-bit register pair.
     fn is_64bit_vreg(&self, vreg: VReg) -> bool {
         self.vreg_is_64bit.contains(&vreg)
+    }
+
+    /// Snapshot the variable-name bindings for block-scope entry. C99
+    /// 6.2.1/4 gives each `{...}` its own scope; declarations inside
+    /// shadow outer same-name identifiers without destroying them. The
+    /// snapshot records the current `locals`, `local_types`, and
+    /// `vla_dims` maps so that [`restore_scope`] can discard any
+    /// bindings introduced inside the block. Frame slots are *not*
+    /// rolled back: stack storage is monotonic across a function and
+    /// its layout is fixed at lowering time. Struct / union tag
+    /// definitions (C99 6.2.3) live in `struct_defs` and are
+    /// intentionally not part of this snapshot.
+    fn snapshot_scope(&self) -> ScopeSnapshot {
+        ScopeSnapshot {
+            locals: self.locals.clone(),
+            local_types: self.local_types.clone(),
+            vla_dims: self.vla_dims.clone(),
+        }
+    }
+
+    /// Restore variable-name bindings captured by [`snapshot_scope`],
+    /// ending the current block scope.
+    fn restore_scope(&mut self, snap: ScopeSnapshot) {
+        self.locals = snap.locals;
+        self.local_types = snap.local_types;
+        self.vla_dims = snap.vla_dims;
     }
 
     fn emit(&mut self, op: IrOp) {
@@ -977,6 +1012,7 @@ fn block_has_vla(stmts: &[Stmt]) -> bool {
 fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> {
     let has_vla = block_has_vla(stmts);
     let saved_depth = ctx.vla_depth;
+    let snap = ctx.snapshot_scope();
 
     if has_vla {
         // Save stack pointer before any VLA allocations in this block.
@@ -996,6 +1032,7 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
         }
         ctx.vla_depth = saved_depth;
     }
+    ctx.restore_scope(snap);
     Ok(())
 }
 
@@ -3148,26 +3185,35 @@ fn lower_if(
     ctx.emit(IrOp::LoadImm(zero, 0));
     ctx.emit(IrOp::Cmp(cond_val, zero));
 
+    // C99 6.8.4/3: each selection-statement substatement is itself a
+    // block, so declarations in `then_body` / `else_body` must not leak
+    // bindings into the enclosing scope.
     if let Some(else_stmts) = else_body {
         let lbl_else = ctx.alloc_label();
         let lbl_end = ctx.alloc_label();
         // Branch to else when condition is zero (not nonzero).
         ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_else));
+        let snap_then = ctx.snapshot_scope();
         for s in then_body {
             lower_stmt(ctx, s)?;
         }
+        ctx.restore_scope(snap_then);
         ctx.emit(IrOp::Branch(lbl_end));
         ctx.emit(IrOp::Label(lbl_else));
+        let snap_else = ctx.snapshot_scope();
         for s in else_stmts {
             lower_stmt(ctx, s)?;
         }
+        ctx.restore_scope(snap_else);
         ctx.emit(IrOp::Label(lbl_end));
     } else {
         let lbl_end = ctx.alloc_label();
         ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_end));
+        let snap_then = ctx.snapshot_scope();
         for s in then_body {
             lower_stmt(ctx, s)?;
         }
+        ctx.restore_scope(snap_then);
         ctx.emit(IrOp::Label(lbl_end));
     }
     Ok(())
@@ -3188,9 +3234,12 @@ fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
         break_label,
         continue_label: Some(continue_label),
     });
+    // C99 6.8.5/5: the loop body is its own block.
+    let snap = ctx.snapshot_scope();
     for s in body {
         lower_stmt(ctx, s)?;
     }
+    ctx.restore_scope(snap);
     ctx.loop_stack.pop();
 
     ctx.emit(IrOp::Branch(continue_label));
@@ -3205,6 +3254,11 @@ fn lower_for(
     step: Option<&Expr>,
     body: &[Stmt],
 ) -> Result<()> {
+    // C99 6.8.5/5: the entire `for` — including the init declaration
+    // in `for (int i = 0; ...; ...)` — is a block. The init binding
+    // must be visible in `cond`/`step`/body but not leak to the
+    // enclosing scope.
+    let snap_for = ctx.snapshot_scope();
     if let Some(init_stmt) = init {
         lower_stmt(ctx, init_stmt)?;
     }
@@ -3225,9 +3279,12 @@ fn lower_for(
         break_label,
         continue_label: Some(continue_label),
     });
+    // The loop body is itself a nested block.
+    let snap_body = ctx.snapshot_scope();
     for s in body {
         lower_stmt(ctx, s)?;
     }
+    ctx.restore_scope(snap_body);
     ctx.loop_stack.pop();
 
     if let Some(step_expr) = step {
@@ -3235,6 +3292,7 @@ fn lower_for(
     }
     ctx.emit(IrOp::Branch(continue_label));
     ctx.emit(IrOp::Label(break_label));
+    ctx.restore_scope(snap_for);
     Ok(())
 }
 
@@ -3248,9 +3306,12 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
         break_label,
         continue_label: Some(continue_label),
     });
+    // C99 6.8.5/5: loop body is its own block.
+    let snap = ctx.snapshot_scope();
     for s in body {
         lower_stmt(ctx, s)?;
     }
+    ctx.restore_scope(snap);
     ctx.loop_stack.pop();
 
     let cond_val = lower_expr(ctx, cond)?;
@@ -3331,9 +3392,12 @@ fn lower_switch(
     let saved_idx = ctx.switch_label_idx;
     ctx.switch_label_idx = 0;
     ctx.switch_labels.push(ir_labels);
+    // C99 6.8.4/3: the switch substatement is itself a block.
+    let snap = ctx.snapshot_scope();
     for s in body {
         lower_stmt(ctx, s)?;
     }
+    ctx.restore_scope(snap);
     ctx.switch_labels.pop();
     ctx.switch_label_idx = saved_idx;
     ctx.loop_stack.pop();
