@@ -2123,10 +2123,34 @@ mod tests {
     }
 
     #[test]
-    fn rt_inline_div_uses_recips() {
+    fn rt_signed_div32_calls_runtime() {
+        // Signed 32-bit `/` should emit a CJUMP to the `___div32`
+        // runtime helper rather than the old inline-float-reciprocal
+        // sequence (which rounded 100000/1000 to 99 because two Newton
+        // iterations leave only 24 bits of mantissa precision).
         let text = round_trip_disasm("int f(int a, int b) { return a / b; }");
-        assert!(text.iter().any(|t| t.contains("RECIPS")), "got: {text:?}");
-        assert!(text.iter().any(|t| t.contains("TRUNC")), "got: {text:?}");
+        assert!(
+            text.iter().any(|t| t.contains("CJUMP")),
+            "got: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|t| t.contains("RECIPS")),
+            "inline reciprocal should no longer appear: {text:?}"
+        );
+    }
+
+    #[test]
+    fn rt_unsigned_div32_calls_udiv() {
+        // Unsigned 32-bit `/` should emit a CJUMP to `___udiv32` so
+        // the shift-and-subtract helper is used (the test that motivated
+        // this change: `100000UL / 1000 == 100`).
+        let text = round_trip_disasm(
+            "int f(unsigned long a, unsigned long b) { return (int)(a / b); }",
+        );
+        assert!(
+            text.iter().any(|t| t.contains("CJUMP")),
+            "got: {text:?}"
+        );
     }
 
     #[test]

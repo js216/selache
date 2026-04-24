@@ -2779,8 +2779,20 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
             }
         }
         BinaryOp::Mul => ctx.emit(IrOp::Mul(dst, l, r)),
-        BinaryOp::Div => ctx.emit(IrOp::Div(dst, l, r)),
-        BinaryOp::Mod => ctx.emit(IrOp::Mod(dst, l, r)),
+        BinaryOp::Div => {
+            if is_unsigned {
+                ctx.emit(IrOp::UDiv(dst, l, r));
+            } else {
+                ctx.emit(IrOp::Div(dst, l, r));
+            }
+        }
+        BinaryOp::Mod => {
+            if is_unsigned {
+                ctx.emit(IrOp::UMod(dst, l, r));
+            } else {
+                ctx.emit(IrOp::Mod(dst, l, r));
+            }
+        }
         BinaryOp::BitAnd => ctx.emit(IrOp::BitAnd(dst, l, r)),
         BinaryOp::BitOr => ctx.emit(IrOp::BitOr(dst, l, r)),
         BinaryOp::BitXor => ctx.emit(IrOp::BitXor(dst, l, r)),
@@ -3365,8 +3377,20 @@ fn emit_compound_op(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg,
         BinaryOp::Add => ctx.emit(IrOp::Add(result, lhs, rhs)),
         BinaryOp::Sub => ctx.emit(IrOp::Sub(result, lhs, rhs)),
         BinaryOp::Mul => ctx.emit(IrOp::Mul(result, lhs, rhs)),
-        BinaryOp::Div => ctx.emit(IrOp::Div(result, lhs, rhs)),
-        BinaryOp::Mod => ctx.emit(IrOp::Mod(result, lhs, rhs)),
+        BinaryOp::Div => {
+            if is_unsigned {
+                ctx.emit(IrOp::UDiv(result, lhs, rhs));
+            } else {
+                ctx.emit(IrOp::Div(result, lhs, rhs));
+            }
+        }
+        BinaryOp::Mod => {
+            if is_unsigned {
+                ctx.emit(IrOp::UMod(result, lhs, rhs));
+            } else {
+                ctx.emit(IrOp::Mod(result, lhs, rhs));
+            }
+        }
         BinaryOp::BitAnd => ctx.emit(IrOp::BitAnd(result, lhs, rhs)),
         BinaryOp::BitOr => ctx.emit(IrOp::BitOr(result, lhs, rhs)),
         BinaryOp::BitXor => ctx.emit(IrOp::BitXor(result, lhs, rhs)),

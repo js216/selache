@@ -39,10 +39,14 @@ pub enum IrOp {
     Sub(VReg, VReg, VReg),
     /// dst = lhs * rhs
     Mul(VReg, VReg, VReg),
-    /// dst = lhs / rhs
+    /// dst = lhs / rhs (signed 32-bit divide, runtime call)
     Div(VReg, VReg, VReg),
-    /// dst = lhs % rhs
+    /// dst = lhs / rhs (unsigned 32-bit divide, runtime call)
+    UDiv(VReg, VReg, VReg),
+    /// dst = lhs % rhs (signed 32-bit modulo, runtime call)
     Mod(VReg, VReg, VReg),
+    /// dst = lhs % rhs (unsigned 32-bit modulo, runtime call)
+    UMod(VReg, VReg, VReg),
     /// dst = lhs & rhs
     BitAnd(VReg, VReg, VReg),
     /// dst = lhs | rhs

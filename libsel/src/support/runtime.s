@@ -462,3 +462,83 @@ ___umod64.:
       RTS;
 .___umod64..end:
       .type ___umod64.,STT_FUNC;
+
+// ===== 32-bit divide/modulo helpers ====================================
+// Standard SHARC+ C calling convention: R4 = dividend, R8 = divisor,
+// result in R0. Internally each wrapper CJUMPs to `__divrem_[us]32.`
+// (which already follows that same R4/R8 in ABI and returns quotient
+// in R0 / remainder in R1) and, for the modulo wrappers, shuffles R1
+// into R0 before returning.
+//
+// The inner `CJUMP ... (DB)` uses the ordinary selcc delay-slot push
+// idiom (`DM(I7,M7) = R2` + return-address push) so that
+// `__divrem_[us]32.`'s RFRAME-based epilogue finds the correct frame
+// link and return PC. The outer caller enters via its own CJUMP, so
+// the wrapper's epilogue likewise uses `I12 = DM(M7,I6); JUMP
+// (M14,I12) (DB); RFRAME` to return.
+//
+// Motivation: selcc's isel lowers 32-bit `/` and `%` to a CJUMP into
+// one of these. The previous inline-float-reciprocal sequence rounded
+// the boundary case `100000 / 1000` down to 99 because two Newton
+// iterations give only ~24 bits of mantissa precision and TRUNC
+// discarded the 0.9999... fraction; the shift-and-subtract helper is
+// exact across the full 32-bit range.
+
+// ___div32 -- signed 32-bit division
+      .GLOBAL ___div32.;
+___div32.:
+      CJUMP __divrem_s32. (DB);
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___div32_ret - 1;
+.___div32_ret:
+      // Quotient already in R0.
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+.___div32..end:
+      .type ___div32.,STT_FUNC;
+
+// ___mod32 -- signed 32-bit modulo
+      .GLOBAL ___mod32.;
+___mod32.:
+      CJUMP __divrem_s32. (DB);
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___mod32_ret - 1;
+.___mod32_ret:
+      R0 = R1;                         // remainder -> R0
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+.___mod32..end:
+      .type ___mod32.,STT_FUNC;
+
+// ___udiv32 -- unsigned 32-bit division
+      .GLOBAL ___udiv32.;
+___udiv32.:
+      CJUMP __divrem_u32. (DB);
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___udiv32_ret - 1;
+.___udiv32_ret:
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+.___udiv32..end:
+      .type ___udiv32.,STT_FUNC;
+
+// ___umod32 -- unsigned 32-bit modulo
+      .GLOBAL ___umod32.;
+___umod32.:
+      CJUMP __divrem_u32. (DB);
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___umod32_ret - 1;
+.___umod32_ret:
+      R0 = R1;
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+.___umod32..end:
+      .type ___umod32.,STT_FUNC;

@@ -95,13 +95,29 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                     if b != 0 {
                         // Match `IrOp::Div`'s runtime semantics: truncated
                         // signed 32-bit division. Folding lets the compiler
-                        // emit a literal load instead of the inline float
-                        // reciprocal sequence (which loses precision for
-                        // values above 2^24 — `BOARD_BAUD_DIV` lands in
-                        // that range and the float result rounds to a
-                        // baud-divider value the UART silently
-                        // mistransmits as nulls).
+                        // emit a literal load instead of a runtime call into
+                        // `___div32` for constants the frontend already knows.
                         let folded = ((a as i32).wrapping_div(b as i32)) as i64;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    } else {
+                        result.push(op.clone());
+                    }
+                } else {
+                    result.push(op.clone());
+                }
+            }
+
+            IrOp::UDiv(dst, lhs, rhs) => {
+                let lv = known.get(lhs).copied();
+                let rv = known.get(rhs).copied();
+                if let (Some(a), Some(b)) = (lv, rv) {
+                    if b != 0 {
+                        // Unsigned 32-bit division: fold using u32 semantics
+                        // so constants match the `___udiv32` runtime helper.
+                        let folded = ((a as u32).wrapping_div(b as u32)) as i64;
                         result.push(IrOp::LoadImm(*dst, folded));
                         known.insert(*dst, folded);
                         mark_consumed(&use_counts, &mut consumed, *lhs);
@@ -120,6 +136,24 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                 if let (Some(a), Some(b)) = (lv, rv) {
                     if b != 0 {
                         let folded = ((a as i32).wrapping_rem(b as i32)) as i64;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    } else {
+                        result.push(op.clone());
+                    }
+                } else {
+                    result.push(op.clone());
+                }
+            }
+
+            IrOp::UMod(dst, lhs, rhs) => {
+                let lv = known.get(lhs).copied();
+                let rv = known.get(rhs).copied();
+                if let (Some(a), Some(b)) = (lv, rv) {
+                    if b != 0 {
+                        let folded = ((a as u32).wrapping_rem(b as u32)) as i64;
                         result.push(IrOp::LoadImm(*dst, folded));
                         known.insert(*dst, folded);
                         mark_consumed(&use_counts, &mut consumed, *lhs);
@@ -727,7 +761,9 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::Sub(d, _, _)
         | IrOp::Mul(d, _, _)
         | IrOp::Div(d, _, _)
+        | IrOp::UDiv(d, _, _)
         | IrOp::Mod(d, _, _)
+        | IrOp::UMod(d, _, _)
         | IrOp::BitAnd(d, _, _)
         | IrOp::BitOr(d, _, _)
         | IrOp::BitXor(d, _, _)
@@ -818,7 +854,9 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::Sub(_, a, b)
         | IrOp::Mul(_, a, b)
         | IrOp::Div(_, a, b)
+        | IrOp::UDiv(_, a, b)
         | IrOp::Mod(_, a, b)
+        | IrOp::UMod(_, a, b)
         | IrOp::BitAnd(_, a, b)
         | IrOp::BitOr(_, a, b)
         | IrOp::BitXor(_, a, b)
