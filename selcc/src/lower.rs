@@ -109,6 +109,12 @@ struct ScopeSnapshot {
     locals: HashMap<String, LocalStorage>,
     local_types: HashMap<String, Type>,
     vla_dims: HashMap<String, VReg>,
+    /// Number of typedef entries at scope entry. Inner-block typedefs
+    /// are discarded by truncating back to this length (C99 6.2.1).
+    typedefs_len: usize,
+    /// Enum constants snapshot — inner `enum { E = 9 }` must not leak
+    /// out to the enclosing scope.
+    enum_constants: HashMap<String, i64>,
 }
 
 /// A static local variable collected during lowering.
@@ -206,15 +212,24 @@ impl LowerCtx {
             locals: self.locals.clone(),
             local_types: self.local_types.clone(),
             vla_dims: self.vla_dims.clone(),
+            typedefs_len: self.typedefs.len(),
+            enum_constants: self.enum_constants.clone(),
         }
     }
 
     /// Restore variable-name bindings captured by [`snapshot_scope`],
-    /// ending the current block scope.
+    /// ending the current block scope. Also rolls back inner-scope
+    /// `typedef` and `enum { ... }` constants (C99 6.2.1). Struct and
+    /// union *tag* definitions are handled separately: `struct_defs`
+    /// is populated once per function by the pre-scan in
+    /// `lower_function`, so rolling it back per block would hide
+    /// declarations from sibling scopes.
     fn restore_scope(&mut self, snap: ScopeSnapshot) {
         self.locals = snap.locals;
         self.local_types = snap.local_types;
         self.vla_dims = snap.vla_dims;
+        self.typedefs.truncate(snap.typedefs_len);
+        self.enum_constants = snap.enum_constants;
     }
 
     fn emit(&mut self, op: IrOp) {
@@ -317,7 +332,7 @@ fn collect_assigned(stmt: &Stmt, set: &mut HashSet<String>) {
             }
             collect_assigned_expr(cond, set);
         }
-        Stmt::Block(stmts) => {
+        Stmt::Block(stmts) | Stmt::DeclGroup(stmts) => {
             for s in stmts {
                 collect_assigned(s, set);
             }
@@ -329,7 +344,8 @@ fn collect_assigned(stmt: &Stmt, set: &mut HashSet<String>) {
             }
         }
         Stmt::CaseLabel(_) | Stmt::DefaultLabel
-        | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Asm(_) => {}
+        | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Asm(_)
+        | Stmt::EnumDecl(_) => {}
         Stmt::Label(_, inner) => collect_assigned(inner, set),
     }
 }
@@ -929,6 +945,23 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
         Stmt::Block(stmts) => {
             lower_block_with_vla_scope(ctx, stmts)?;
         }
+        Stmt::DeclGroup(stmts) => {
+            // Parser synthesizes this for `int a=1, b=2;` — a single
+            // declaration with multiple declarators (C99 6.7/5). All
+            // names are in the enclosing scope; no scope push/pop.
+            for s in stmts {
+                lower_stmt(ctx, s)?;
+            }
+        }
+        Stmt::EnumDecl(consts) => {
+            // Block-scoped `enum { X = v, ... };` — bind each constant
+            // in the current scope. The enclosing block's
+            // `restore_scope` rolls these back on scope exit so outer
+            // enumerators with the same name are uncovered (C99 6.2.1).
+            for (name, val) in consts {
+                ctx.enum_constants.insert(name.clone(), *val);
+            }
+        }
         Stmt::Switch { expr, body } => {
             lower_switch(ctx, expr, body)?;
         }
@@ -1137,7 +1170,9 @@ fn collect_local_struct_defs(stmts: &[Stmt], defs: &mut Vec<(String, Vec<(String
                 }
                 collect_local_struct_defs(body, defs);
             }
-            Stmt::Block(inner) => collect_local_struct_defs(inner, defs),
+            Stmt::Block(inner) | Stmt::DeclGroup(inner) => {
+                collect_local_struct_defs(inner, defs)
+            }
             Stmt::Switch { body, .. } => {
                 collect_local_struct_defs(body, defs);
             }
@@ -3330,7 +3365,9 @@ fn collect_case_labels(stmts: &[Stmt], out: &mut Vec<Option<Expr>>) {
         match s {
             Stmt::CaseLabel(e) => out.push(Some(e.clone())),
             Stmt::DefaultLabel => out.push(None),
-            Stmt::Block(inner) => collect_case_labels(inner, out),
+            Stmt::Block(inner) | Stmt::DeclGroup(inner) => {
+                collect_case_labels(inner, out)
+            }
             Stmt::If { then_body, else_body, .. } => {
                 collect_case_labels(then_body, out);
                 if let Some(eb) = else_body {

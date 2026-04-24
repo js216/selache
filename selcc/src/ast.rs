@@ -136,6 +136,16 @@ pub enum Stmt {
         cond: Expr,
     },
     Block(Vec<Stmt>),
+    /// Multi-declarator grouping synthesized by the parser for a single
+    /// declaration that declares several names, e.g. `int a=1, b=2;`.
+    /// Unlike [`Stmt::Block`] this has *no* scope semantics — all
+    /// declarations are in the enclosing scope per C99 6.7/5.
+    DeclGroup(Vec<Stmt>),
+    /// Block-local `enum { X = v, ... }` declaration. Constants bind
+    /// at the enclosing block's scope (C99 6.2.1) — lowering inserts
+    /// them into `ctx.enum_constants` inside the current scope and
+    /// the block's `restore_scope` rolls them back on exit.
+    EnumDecl(Vec<(String, i64)>),
     Switch {
         expr: Expr,
         body: Vec<Stmt>,

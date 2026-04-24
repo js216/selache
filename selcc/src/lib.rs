@@ -167,7 +167,7 @@ fn collect_stmt_refs(
                 collect_stmt_refs(s, fns, out);
             }
         }
-        Block(body) => {
+        Block(body) | DeclGroup(body) => {
             for s in body {
                 collect_stmt_refs(s, fns, out);
             }
@@ -180,7 +180,7 @@ fn collect_stmt_refs(
         }
         CaseLabel(e) => collect_expr_refs(e, fns, out),
         Label(_, inner) => collect_stmt_refs(inner, fns, out),
-        DefaultLabel | Break | Continue | Goto(_) | Asm(_) => {}
+        DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
     }
 }
 

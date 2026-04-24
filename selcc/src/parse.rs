@@ -48,6 +48,17 @@ struct Parser<'a> {
     typedef_names: std::collections::HashSet<String>,
     /// Enum constants collected during parsing.
     enum_constants: Vec<(String, i64)>,
+    /// Depth of nested function bodies / blocks currently being parsed.
+    /// Zero means file scope. Used so that `enum { ... }` parsed
+    /// inside a block can be redirected to a block-scoped
+    /// [`Stmt::EnumDecl`] rather than leaking into the flat
+    /// translation-unit [`Parser::enum_constants`] list.
+    block_depth: u32,
+    /// Constants collected by the most recent `enum { ... }` parsed
+    /// while `block_depth > 0`. The enclosing block-scoped statement
+    /// drains this into a [`Stmt::EnumDecl`] so that lowering can
+    /// honour per-block enumerator shadowing (C99 6.2.1).
+    pending_block_enum_consts: Vec<(String, i64)>,
     /// Current function name for __func__ (C99 6.4.2.2).
     current_function: String,
 }
@@ -61,6 +72,8 @@ impl<'a> Parser<'a> {
             current,
             typedef_names: std::collections::HashSet::new(),
             enum_constants: Vec::new(),
+            block_depth: 0,
+            pending_block_enum_consts: Vec::new(),
             current_function: String::new(),
         })
     }
@@ -224,7 +237,14 @@ impl<'a> Parser<'a> {
                             let val_expr = self.parse_assign()?;
                             next_val = const_eval(&val_expr);
                         }
-                        self.enum_constants.push((const_name, next_val));
+                        if self.block_depth > 0 {
+                            // Inside a function body: collect for a
+                            // block-scoped `Stmt::EnumDecl`.
+                            self.pending_block_enum_consts
+                                .push((const_name, next_val));
+                        } else {
+                            self.enum_constants.push((const_name, next_val));
+                        }
                         next_val += 1;
                         if self.current == Token::Comma {
                             self.advance()?;
@@ -994,11 +1014,16 @@ impl<'a> Parser<'a> {
 
     fn parse_block_stmts(&mut self) -> Result<Vec<Stmt>, Error> {
         self.expect(&Token::LBrace)?;
+        // Entering a block scope: any `enum { ... }` inside should
+        // bind per-block rather than leak out to the translation-unit
+        // enum table (C99 6.2.1).
+        self.block_depth += 1;
         let mut stmts = Vec::new();
         while self.current != Token::RBrace {
             stmts.push(self.parse_stmt()?);
         }
         self.expect(&Token::RBrace)?;
+        self.block_depth -= 1;
         Ok(stmts)
     }
 
@@ -1201,7 +1226,21 @@ impl<'a> Parser<'a> {
                         vla_dim: None,
                     });
                 }
-                _ => return Ok(Stmt::Block(Vec::new())),
+                _ => {
+                    // `enum { X = v, ... };` with no declarator: if the
+                    // parser collected pending block-scoped enum
+                    // constants while recognising the type, hand them
+                    // to the lowering as a scope-bound declaration so
+                    // they can be rolled back when the enclosing block
+                    // ends (C99 6.2.1).
+                    if !self.pending_block_enum_consts.is_empty() {
+                        let consts = std::mem::take(
+                            &mut self.pending_block_enum_consts,
+                        );
+                        return Ok(Stmt::EnumDecl(consts));
+                    }
+                    return Ok(Stmt::Block(Vec::new()));
+                }
             }
         }
 
@@ -1291,7 +1330,7 @@ impl<'a> Parser<'a> {
         if stmts.len() == 1 {
             Ok(stmts.into_iter().next().expect("checked len"))
         } else {
-            Ok(Stmt::Block(stmts))
+            Ok(Stmt::DeclGroup(stmts))
         }
     }
 
