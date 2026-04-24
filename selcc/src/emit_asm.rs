@@ -772,21 +772,48 @@ fn emit_function_instrs(
     let resolved = expand_large_frame_offsets(&resolved);
 
     // isel's IrOp::Ret handler emits the 4-instruction SHARC+ C-ABI
-    // leaf-return sequence as the last instructions of the body. The
-    // epilogue (callee-saved restores + frame teardown) must run BEFORE
-    // that sequence, otherwise the delayed indirect JUMP transfers
-    // control first and the restores are dead code. Split the body at
-    // the trailing return sequence and splice the epilogue between.
+    // leaf-return sequence at every `return` statement in the source.
+    // Each such sequence must be preceded by the epilogue (callee-saved
+    // restores + frame teardown) — otherwise the delayed indirect JUMP
+    // transfers control first and the restores are dead code, leaving
+    // the caller's callee-saved registers clobbered by the callee. A
+    // function with multiple return paths (early `return -x;` etc.)
+    // therefore needs the epilogue spliced before *each* occurrence of
+    // the return sequence, not just the trailing one.
+    //
+    // Scan `resolved` for every occurrence of the return-sequence
+    // fingerprint, splice the epilogue before each, and adjust the
+    // label-insertion indices from `resolve_branches` to account for
+    // the shifts (each insertion bumps every later index by
+    // `epilogue.len()`).
 
-    let (body_head, body_tail) = split_trailing_return_sequence(resolved);
+    let return_seq_starts = find_return_sequence_starts(&resolved);
+    let (body_with_epilogues, body_index_map) =
+        splice_epilogues(resolved, &return_seq_starts, &epilogue);
 
-    let mut instrs = Vec::with_capacity(
-        prologue.len() + body_head.len() + epilogue.len() + body_tail.len()
-    );
+    // Rebase label_insertions: keys were function-absolute indices
+    // (prologue_len + body_index). The prologue is unchanged; only
+    // positions inside the body shift, by `body_index_map`.
+    let mut rebased_label_insertions: HashMap<usize, Vec<String>> =
+        HashMap::with_capacity(label_insertions.len());
+    for (abs_idx, labels) in label_insertions.drain() {
+        let new_abs = if abs_idx >= prologue_len {
+            let body_idx = abs_idx - prologue_len;
+            let mapped = body_index_map
+                .get(body_idx)
+                .copied()
+                .unwrap_or(body_with_epilogues.len());
+            prologue_len + mapped
+        } else {
+            abs_idx
+        };
+        rebased_label_insertions.entry(new_abs).or_default().extend(labels);
+    }
+    let mut label_insertions = rebased_label_insertions;
+
+    let mut instrs = Vec::with_capacity(prologue.len() + body_with_epilogues.len());
     instrs.extend(prologue);
-    instrs.extend(body_head);
-    instrs.extend(epilogue);
-    instrs.extend(body_tail);
+    instrs.extend(body_with_epilogues);
 
     // RFRAME's ISA pseudocode is `I7 = I6; I6 = DM(0, I6)`. At the
     // moment RFRAME executes, `I6` is the callee's frame pointer, which
@@ -846,18 +873,32 @@ fn emit_function_instrs(
     })
 }
 
-/// Detach the 4-instruction SHARC+ C-ABI return sequence from the tail
-/// of the body so the epilogue can be spliced in front of it. The
-/// sequence is `I12 = DM(M7,I6)` + `JUMP (M14,I12) (DB)` + RFRAME + NOP.
-fn split_trailing_return_sequence(
-    mut body: Vec<MachInstr>,
-) -> (Vec<MachInstr>, Vec<MachInstr>) {
-    let n = body.len();
-    if n < 4 {
-        return (body, Vec::new());
+/// Locate the start index of every 4-instruction SHARC+ C-ABI return
+/// sequence in `body`. The sequence fingerprint is `I12 = DM(M7,I6)` +
+/// `JUMP (M14,I12) (DB)` + RFRAME + NOP, emitted once per `return`
+/// statement by `IrOp::Ret` in isel. Returned indices are in ascending
+/// order and never overlap (the scanner skips past each matched
+/// sequence before looking for the next).
+fn find_return_sequence_starts(body: &[MachInstr]) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + 4 <= body.len() {
+        if is_return_sequence_at(body, i) {
+            starts.push(i);
+            i += 4;
+        } else {
+            i += 1;
+        }
     }
-    let matches = matches!(
-        body[n - 4].instr,
+    starts
+}
+
+fn is_return_sequence_at(body: &[MachInstr], i: usize) -> bool {
+    if i + 4 > body.len() {
+        return false;
+    }
+    matches!(
+        body[i].instr,
         Instruction::UregDagMove {
             pm: false,
             write: false,
@@ -867,7 +908,7 @@ fn split_trailing_return_sequence(
             ..
         },
     ) && matches!(
-        body[n - 3].instr,
+        body[i + 1].instr,
         Instruction::IndirectBranch {
             call: false,
             pm_i: 4,
@@ -875,13 +916,33 @@ fn split_trailing_return_sequence(
             delayed: true,
             ..
         },
-    ) && matches!(body[n - 2].instr, Instruction::Rframe)
-        && matches!(body[n - 1].instr, Instruction::Nop);
-    if !matches {
-        return (body, Vec::new());
+    ) && matches!(body[i + 2].instr, Instruction::Rframe)
+        && matches!(body[i + 3].instr, Instruction::Nop)
+}
+
+/// Splice a copy of `epilogue` immediately before every return-sequence
+/// start in `body`. Returns the rewritten body together with a map
+/// from each original body index to its new index in the rewritten
+/// body (length `body.len() + 1`; the last entry is the new length, so
+/// callers can map a one-past-the-end index too).
+fn splice_epilogues(
+    body: Vec<MachInstr>,
+    return_starts: &[usize],
+    epilogue: &[MachInstr],
+) -> (Vec<MachInstr>, Vec<usize>) {
+    let mut out = Vec::with_capacity(body.len() + return_starts.len() * epilogue.len());
+    let mut index_map = Vec::with_capacity(body.len() + 1);
+    let mut next_return = 0;
+    for (i, mi) in body.into_iter().enumerate() {
+        if next_return < return_starts.len() && return_starts[next_return] == i {
+            out.extend(epilogue.iter().cloned());
+            next_return += 1;
+        }
+        index_map.push(out.len());
+        out.push(mi);
     }
-    let tail = body.split_off(n - 4);
-    (body, tail)
+    index_map.push(out.len());
+    (out, index_map)
 }
 
 // --------------------------------------------------------------------
