@@ -504,6 +504,31 @@ impl Allocator {
                             || (u & 0x70) == 0x10
                             || (u & 0x70) == 0x20)
                 };
+                // Indirect-call frame-link setup `R2 = I6`: the very
+                // next instruction will be `I6 = I7`, after which any
+                // spill store written via the FRAME_PTR-relative
+                // convention would land at an I7-relative address.
+                // The post-call reload reads via I6 *restored to its
+                // pre-call value* (RFRAME pops the saved frame
+                // pointer), so a spill written at I7 base does not
+                // round-trip and the reloaded vreg reads garbage. Run
+                // caller-saved migration BEFORE the `I6 = I7` swap so
+                // both the store and the reload share the caller's
+                // frame I6 base. Direct CJUMP does not have this
+                // issue: hardware preserves I6 across the call, so
+                // its spill point at the CJUMP itself is fine.
+                let dest_is_r2 = is_fixed(dest)
+                    && (dest & 0x70) == 0x00
+                    && (dest & 0x0F) == target::ureg_r(2);
+                let src_is_frame = is_fixed(src)
+                    && (src & 0x70) == 0x10
+                    && (src & 0x0F) == (target::ureg_i(target::FRAME_PTR) & 0x0F);
+                if dest_is_r2 && src_is_frame {
+                    self.spill_caller_saved(&mut spill_pre);
+                    for p in self.arg_setup_pins.drain(..) {
+                        self.pinned.remove(&p);
+                    }
+                }
                 let new_dest = if is_fixed(dest) {
                     dest & !target::UREG_FIXED_TAG
                 } else {
