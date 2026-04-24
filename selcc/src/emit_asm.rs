@@ -408,25 +408,25 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
 
     // Rodata: string literals.
     //
-    // Each byte of a narrow string occupies one full 32-bit word, the
-    // same layout that stack-allocated `char[]` locals use (see the
-    // `char s[] = "..."` initialiser expansion in lower.rs).  With
-    // that matching layout, a whole-word `DM(I4, M5)` load against a
-    // `const char *p` pointer-to-literal yields the i-th byte directly
-    // (zero-extended into R) once the index has been scaled by the
-    // same `size_words * 4` stride that local char arrays use --- no
-    // byte-extract shift/mask sequence needed.  Packing four bytes per
-    // word would force the pointer path to mask off three garbage
-    // bytes on every deref.  Wide strings (`L"..."`) are already
-    // 32-bit per character.
+    // Narrow strings are byte-packed: four bytes per 32-bit word, in
+    // little-endian order, matching the byte-addressed memory model
+    // the SHARC+ DM sees in `-char-size-8` mode.  A `const char *p`
+    // read emits a whole-word load at `p & ~3` followed by a
+    // `(p & 3) * 8` shift and `& 0xFF` mask to extract the target
+    // byte (see `narrow_deref_*` in lower.rs).  Stride-1 indexing
+    // therefore walks byte-by-byte through the packed layout as C99
+    // requires, so `(char *)&int` aliases and `char s[] = "abcd"`
+    // both work with the same access pattern.  Wide strings (`L"..."`)
+    // are already 32-bit per character and remain unpacked.
     //
     if !all_strings.is_empty() || !all_wide_strings.is_empty() {
         out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for (i, s) in all_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".str{i}"));
             let _ = writeln!(out, ".GLOBAL {name};");
-            let mut words: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
-            words.push(0);
+            let mut bytes: Vec<u8> = s.as_bytes().to_vec();
+            bytes.push(0);
+            let words = pack_bytes_le(&bytes);
             emit_var_bytes(&mut out, &name, &words);
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
@@ -440,6 +440,26 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
 
     Ok(AsmModule { text: out })
+}
+
+/// Pack a byte sequence into 32-bit words in little-endian order.
+/// Trailing bytes that do not fill a word are zero-padded in the high
+/// bytes of the final word.  Used for rodata string literals and for
+/// char-array initialisers so that byte-granularity reads via
+/// `(char *)&word + (addr & 3) * 8` pick up the correct byte.
+pub fn pack_bytes_le(bytes: &[u8]) -> Vec<u32> {
+    let mut words = Vec::with_capacity(bytes.len().div_ceil(4));
+    for chunk in bytes.chunks(4) {
+        let mut w: u32 = 0;
+        for (i, b) in chunk.iter().enumerate() {
+            w |= (*b as u32) << (i * 8);
+        }
+        words.push(w);
+    }
+    if words.is_empty() {
+        words.push(0);
+    }
+    words
 }
 
 /// Append the C-ABI trailing-dot suffix unless the caller already
@@ -486,9 +506,16 @@ struct DataEntry {
 fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeCtx) -> Result<Vec<u32>> {
     match init {
         Expr::StringLit(s) => {
-            let mut v: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
-            v.push(0);
-            Ok(v)
+            // Pack four bytes per word, little-endian, to match the
+            // byte-addressed access pattern used for all `char *`
+            // dereferences (see `emit_module` rodata comment).
+            let mut bytes: Vec<u8> = s.as_bytes().to_vec();
+            bytes.push(0);
+            // Pad to the declared array size so that sizeof() and
+            // zero-fill tail elements match the declaration.
+            let declared = size_bytes.max(bytes.len() as u32) as usize;
+            bytes.resize(declared, 0);
+            Ok(pack_bytes_le(&bytes))
         }
         Expr::InitList(items) => {
             // Honour designated initializers (`[n] = v`, `.field = v`).
@@ -2290,11 +2317,12 @@ mod tests {
     #[test]
     fn rt_string_global_in_data() {
         let m = compile(r#"const char *msg = "hello"; int f() { return 0; }"#);
-        // `hello` characters must show up as bytes in a .VAR sequence.
-        let has_hex_for_h = m.text.contains("0x00000068"); // 'h'
+        // `hello` is byte-packed as four bytes per word, little-endian:
+        // word 0 = "hell" = 0x6C6C6568, word 1 = 'o' + NUL padding.
+        let has_packed_hell = m.text.contains("0x6C6C6568");
         assert!(
-            has_hex_for_h,
-            "expected hello bytes in asm, got:\n{}",
+            has_packed_hell,
+            "expected packed hello bytes in asm, got:\n{}",
             m.text
         );
         let _ = selas::assemble_text(&m.text, None, &[], &[], false).unwrap();

@@ -816,19 +816,33 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     // The array's element count came from the literal's
                     // length (including the trailing NUL), so we always
                     // have room to walk one slot per byte.
-                    if let (Expr::StringLit(s), Type::Array(elem_ty, _)) =
+                    if let (Expr::StringLit(s), Type::Array(elem_ty, n)) =
                         (init_expr, ty)
                     {
                         if crate::types::size_bytes_ctx(elem_ty, ctx) == 1 {
+                            // Char-element arrays are byte-packed: four
+                            // bytes per word, little-endian.  The
+                            // initializer fills the declared length and
+                            // zero-pads the rest of the containing word
+                            // so byte reads past the NUL see zero.
+                            let declared = n.unwrap_or(0);
                             let bytes = s.as_bytes();
-                            for i in 0..num_words {
-                                let byte = bytes.get(i as usize).copied().unwrap_or(0);
+                            let total = declared.max(bytes.len());
+                            let packed_words = total.div_ceil(4).max(1);
+                            for wi in 0..packed_words {
+                                let mut w: u32 = 0;
+                                for b in 0..4 {
+                                    let bi = wi * 4 + b;
+                                    if bi < total {
+                                        let byte = bytes.get(bi).copied().unwrap_or(0);
+                                        w |= (byte as u32) << (b * 8);
+                                    }
+                                }
                                 let val = ctx.alloc_vreg();
-                                ctx.emit(IrOp::LoadImm(val, byte as i64));
-                                let elem_slot = slot_offset + num_words - 1 - i;
+                                ctx.emit(IrOp::LoadImm(val, w as i64));
+                                let elem_slot = slot_offset + num_words - 1 - (wi as u32);
                                 ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
                             }
-                            // Fall through nothing: init is done.
                             return Ok(());
                         }
                     }
@@ -1177,43 +1191,120 @@ fn pointee_type(ty: &Type) -> Option<&Type> {
     }
 }
 
-/// Narrow a freshly-loaded word to the byte (or half-word) width of the
-/// given scalar `elem_ty` and, if signed, sign-extend it back to 32 bits.
-/// Used after a `Load` through a `char *` or `short *` so the high bits of
-/// the containing 32-bit memory word (which may hold unrelated data when
-/// the storage behind the pointer is actually an `int` --- as in
-/// `(char *)&x`) do not leak into the result.  For 1-per-word char storage
-/// the high bits are already zero and this mask is a no-op; for packed
-/// int storage it picks the low byte, which is the little-endian LSB per
-/// C99 byte-order.
-fn narrow_load_to_elem(ctx: &mut LowerCtx, val: VReg, elem_ty: &Type) -> VReg {
-    let elem = elem_ty.unqualified();
-    let bytes = crate::types::size_bytes_ctx(elem, ctx);
-    if bytes == 0 || bytes >= 4 {
-        return val;
+/// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
+/// These types are byte-packed in memory (four per 32-bit word) and
+/// require a dynamic shift+mask when read or written through a pointer
+/// so byte-addressed access alignments hold.
+fn is_byte_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
+    crate::types::size_bytes_ctx(ty.unqualified(), ctx) == 1
+}
+
+/// Emit a byte-granularity load from `addr` (a byte address that may
+/// not be word-aligned).  Produces a 32-bit vreg holding the byte at
+/// `addr`, zero-extended by default and sign-extended if `signed`.
+/// Sequence:
+///   word_addr = addr & ~3
+///   word      = load(word_addr, 0)
+///   shift     = (addr & 3) << 3
+///   byte      = (word >> shift) & 0xFF
+///   if signed: sign-extend from bit 7
+/// The mask-off of the low two bits of the address is required
+/// because `(char *)&int + 1` aims into the middle of a packed word;
+/// the DM DAG fetches whole 32-bit parcels, so the software
+/// byte-extract is what makes a `char *` deref satisfy C99 6.3.2.3 p7.
+fn emit_byte_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
+    // word_addr = addr & ~3
+    let mask_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_word, !3i64 & 0xFFFFFFFF));
+    let word_addr = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(word_addr, addr, mask_word));
+    // word = load(word_addr, 0)
+    let word = ctx.alloc_vreg();
+    ctx.emit(IrOp::Load(word, word_addr, 0));
+    // low_bits = addr & 3
+    let three = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(three, 3));
+    let low_bits = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(low_bits, addr, three));
+    // shift = low_bits << 3  (i.e. * 8)
+    let shift_by = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shift_by, 3));
+    let shift = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(shift, low_bits, shift_by));
+    // shifted = word >> shift  (logical, since we're about to mask to 8 bits)
+    // SHARC ASHIFT takes a negative count for right shifts; emit a
+    // negation.
+    let neg_shift = ctx.alloc_vreg();
+    ctx.emit(IrOp::Neg(neg_shift, shift));
+    let shifted = ctx.alloc_vreg();
+    ctx.emit(IrOp::Lshr(shifted, word, neg_shift));
+    // byte = shifted & 0xFF
+    let mask_ff = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_ff, 0xFF));
+    let byte = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(byte, shifted, mask_ff));
+    if !signed {
+        return byte;
     }
-    let bits = (bytes * 8) as i64;
-    let mask = ((1u64 << bits) - 1) as i64;
-    let mask_v = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(mask_v, mask));
-    let masked = ctx.alloc_vreg();
-    ctx.emit(IrOp::BitAnd(masked, val, mask_v));
-    if elem.is_unsigned() {
-        return masked;
-    }
-    // Signed narrow type: sign-extend from bit (bits-1).  SHARC+ ASHIFT
-    // uses the same count for both directions; positive shifts left,
-    // negative shifts right arithmetically.
-    let shift = 32 - bits;
-    let shl_v = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(shl_v, shift));
-    let shifted_up = ctx.alloc_vreg();
-    ctx.emit(IrOp::Shl(shifted_up, masked, shl_v));
-    let shr_v = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(shr_v, -shift));
-    let signed_out = ctx.alloc_vreg();
-    ctx.emit(IrOp::Shr(signed_out, shifted_up, shr_v));
-    signed_out
+    // Sign-extend from bit 7: (byte << 24) >> 24 arithmetic.
+    let shl24 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl24, 24));
+    let up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(up, byte, shl24));
+    let neg24 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(neg24, -24));
+    let down = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(down, up, neg24));
+    down
+}
+
+/// Emit a byte-granularity store: write the low 8 bits of `val` to the
+/// byte at `addr`, preserving the other three bytes of the containing
+/// word.  Read-modify-write sequence:
+///   word_addr = addr & ~3
+///   old       = load(word_addr, 0)
+///   shift     = (addr & 3) << 3
+///   clear_mask= ~(0xFF << shift)
+///   cleared   = old & clear_mask
+///   placed    = (val & 0xFF) << shift
+///   new       = cleared | placed
+///   store(word_addr, 0) = new
+fn emit_byte_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
+    let mask_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_word, !3i64 & 0xFFFFFFFF));
+    let word_addr = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(word_addr, addr, mask_word));
+    let old = ctx.alloc_vreg();
+    ctx.emit(IrOp::Load(old, word_addr, 0));
+    let three = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(three, 3));
+    let low_bits = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(low_bits, addr, three));
+    let shift_by = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shift_by, 3));
+    let shift = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(shift, low_bits, shift_by));
+    // byte_mask = 0xFF << shift
+    let ff = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(ff, 0xFF));
+    let byte_mask = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(byte_mask, ff, shift));
+    // clear_mask = ~byte_mask
+    let clear_mask = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitNot(clear_mask, byte_mask));
+    let cleared = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(cleared, old, clear_mask));
+    // placed = (val & 0xFF) << shift
+    let ff2 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(ff2, 0xFF));
+    let val_byte = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(val_byte, val, ff2));
+    let placed = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(placed, val_byte, shift));
+    // new_word = cleared | placed
+    let new_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitOr(new_word, cleared, placed));
+    ctx.emit(IrOp::Store(new_word, word_addr, 0));
 }
 
 /// Multiply `index` by `sizeof(elem_ty)` in bytes and return a new vreg
@@ -1222,18 +1313,13 @@ fn narrow_load_to_elem(ctx: &mut LowerCtx, val: VReg, elem_ty: &Type) -> VReg {
 /// A `sizeof` of 0 is treated as 1 so that a forward-declared struct
 /// pointer does not silently collapse every index to zero.
 fn scale_index_by_elem(ctx: &mut LowerCtx, index: VReg, elem_ty: &Type) -> VReg {
-    // Memory on the SHARC is accessed in 32-bit words: every local
-    // array reserves one word per element (see `size_words_ctx`), and
-    // loads through `DM(I4, M5)` fetch a whole word.  Pointer
-    // arithmetic on narrow element types (`char`, `short`) therefore
-    // advances one word per logical step, not one byte --- otherwise
-    // `s[4]` on a `char s[]` stack array walks into the second byte of
-    // `s[0]`'s word rather than `s[4]`'s word.  Wider element types
-    // (int, long long, structs) already have `size_bytes` a multiple
-    // of 4, so their stride stays the same.
+    // C99 6.5.6 p8: pointer + integer advances by `sizeof(*p)` bytes.
+    // Memory is byte-addressed in `-char-size-8` mode; char-element
+    // arrays are byte-packed (see `size_words_ctx`) so stride-1
+    // indexing walks byte-by-byte through the packed layout and
+    // `(char *)&int` aliases behave as C99 requires.  Wider scalars
+    // (short, int, long long) keep their byte sizes (2, 4, 8).
     let size = crate::types::size_bytes_ctx(elem_ty, ctx).max(1);
-    let word_size = crate::types::size_words_ctx(elem_ty, ctx).max(1) * 4;
-    let size = size.max(word_size);
     if size == 1 {
         return index;
     }
@@ -1961,20 +2047,37 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     }
                 }
                 Expr::Deref(inner) => {
+                    let ptr_ty = expr_type(inner, ctx);
                     let ptr = lower_expr(ctx, inner)?;
+                    // Byte-granularity store for char / bool pointee:
+                    // load-modify-store the containing word so the
+                    // other three bytes survive.
+                    if let Some(pt) = ptr_ty.as_ref().and_then(pointee_type) {
+                        if is_byte_scalar(pt, ctx) {
+                            emit_byte_store(ctx, ptr, val);
+                            return Ok(val);
+                        }
+                    }
                     ctx.emit(IrOp::Store(val, ptr, 0));
                 }
                 Expr::Index(base, idx) => {
                     // C99 6.5.2.1: scale the index by `sizeof(*base)`.
                     let base_ty = expr_type(base, ctx);
+                    let elem_ty_opt = base_ty.as_ref().and_then(pointee_type).cloned();
                     let base_addr = lower_expr(ctx, base)?;
                     let index = lower_expr(ctx, idx)?;
-                    let scaled = match base_ty.as_ref().and_then(pointee_type) {
-                        Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
+                    let scaled = match elem_ty_opt.as_ref() {
+                        Some(elem) => scale_index_by_elem(ctx, index, elem),
                         None => index,
                     };
                     let addr = ctx.alloc_vreg();
                     ctx.emit(IrOp::Add(addr, base_addr, scaled));
+                    if let Some(ref et) = elem_ty_opt {
+                        if is_byte_scalar(et, ctx) {
+                            emit_byte_store(ctx, addr, val);
+                            return Ok(val);
+                        }
+                    }
                     ctx.emit(IrOp::Store(val, addr, 0));
                 }
                 Expr::Member(..) | Expr::Arrow(..) => {
@@ -1991,16 +2094,21 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Deref(inner) => {
             let ptr_ty = expr_type(inner, ctx);
             let ptr = lower_expr(ctx, inner)?;
-            // Load the value at the address in ptr using I4 as scratch.
-            // We emit: I4 = ptr_vreg, then dst = DM(I4, 0).
-            // Since we can't directly use a data register as an address,
-            // we load the address into I4 (scratch index register) first.
-            // For now, use a simplified Load through I4 with offset 0.
+            let pointee = ptr_ty.as_ref().and_then(pointee_type).cloned();
+            // Byte-granularity read for char / unsigned char / bool.
+            // A `char *` may aim at any byte in a packed 32-bit word,
+            // so load the whole word and shift/mask the target byte
+            // out.  Sign-extend if the pointee is signed.
+            if let Some(ref pt) = pointee {
+                if is_byte_scalar(pt, ctx) {
+                    let signed = !pt.is_unsigned();
+                    return Ok(emit_byte_load(ctx, ptr, signed));
+                }
+            }
             // A float pointee must land in an F-register so downstream
             // casts (e.g. `(int)*p`) see a float source and emit the
             // float->int conversion rather than a silent bit-preserving
             // copy.
-            let pointee = ptr_ty.as_ref().and_then(pointee_type).cloned();
             let is_float_pointee = pointee
                 .as_ref()
                 .map(|t| t.is_float())
@@ -2011,15 +2119,6 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 ctx.alloc_vreg()
             };
             ctx.emit(IrOp::Load(dst, ptr, 0));
-            // A `char *` or `short *` read lands the full 32-bit memory
-            // word in `dst`; when the pointer actually points into
-            // packed int storage (e.g. `(char *)&x`) the high bits are
-            // other bytes of the same word, not zero.  Narrow to the
-            // pointee's width per C99 byte-pun semantics.
-            if let Some(ref pt) = pointee {
-                let narrowed = narrow_load_to_elem(ctx, dst, pt);
-                return Ok(narrowed);
-            }
             Ok(dst)
         }
         Expr::AddrOf(inner) => {
@@ -2038,6 +2137,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             };
             let addr = ctx.alloc_vreg();
             ctx.emit(IrOp::Add(addr, base_addr, scaled));
+            // Byte-granularity read when indexing a char / unsigned
+            // char / bool element (byte-packed in memory).
+            if let Some(ref et) = elem_ty {
+                if is_byte_scalar(et, ctx) {
+                    let signed = !et.is_unsigned();
+                    return Ok(emit_byte_load(ctx, addr, signed));
+                }
+            }
             // A float element type must land in an F-register so that
             // `(int)arr[i]` sees a float source and emits the float->int
             // conversion instead of passing the raw bit pattern through.
@@ -2046,12 +2153,6 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 _ => ctx.alloc_vreg(),
             };
             ctx.emit(IrOp::Load(dst, addr, 0));
-            // Narrow `char`/`short`-element reads to the element's
-            // width; see `Expr::Deref` for rationale.
-            if let Some(ref et) = elem_ty {
-                let narrowed = narrow_load_to_elem(ctx, dst, et);
-                return Ok(narrowed);
-            }
             Ok(dst)
         }
         Expr::Member(..) | Expr::Arrow(..) => {
@@ -2657,13 +2758,8 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
                 let raw = ctx.alloc_vreg();
                 ctx.emit(IrOp::Sub(raw, l, r));
                 // Match the stride used by `scale_index_by_elem` so
-                // that `(p + n) - p == n` even when the pointee's
-                // `size_bytes` is smaller than the one-word-per-element
-                // layout (`char` stored 1-per-word in rodata / stack
-                // arrays).
-                let bytes = crate::types::size_bytes_ctx(&elem, ctx).max(1);
-                let words4 = crate::types::size_words_ctx(&elem, ctx).max(1) * 4;
-                let size = bytes.max(words4);
+                // that `(p + n) - p == n` in the same byte units.
+                let size = crate::types::size_bytes_ctx(&elem, ctx).max(1);
                 if size == 1 {
                     ctx.emit(IrOp::Copy(dst, raw));
                 } else {
@@ -3113,16 +3209,14 @@ fn maybe_scale_ptr_rhs(ctx: &mut LowerCtx, op: BinaryOp, target: &Expr,
 }
 
 /// Pointer arithmetic stride for `++`, `--`, `+=`, `-=` on a pointer
-/// whose type is `ty`.  Matches `scale_index_by_elem`: the larger of
-/// `sizeof(*ty)` in bytes and `size_words(*ty) * 4`, so that pointers
-/// into `char` storage (one byte per word) step by whole words.
+/// whose type is `ty`.  Matches `scale_index_by_elem`: `sizeof(*ty)`
+/// in bytes so byte-packed char arrays and `(char *)&int` aliases
+/// both walk byte-by-byte through the underlying storage.
 /// Returns 1 for non-pointer types.
 fn ptr_stride(ty: Option<&Type>, ctx: &LowerCtx) -> i64 {
     let Some(t) = ty else { return 1; };
     let Some(pt) = pointee_type(t) else { return 1; };
-    let bytes = crate::types::size_bytes_ctx(pt, ctx).max(1);
-    let words4 = crate::types::size_words_ctx(pt, ctx).max(1) * 4;
-    bytes.max(words4) as i64
+    crate::types::size_bytes_ctx(pt, ctx).max(1) as i64
 }
 
 fn lower_inc_dec(
@@ -3373,6 +3467,33 @@ fn lower_aggregate_init(
     let struct_fields: Option<Vec<(String, Type)>> =
         resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
 
+    // Byte-packed char-element array: each item is an 8-bit byte that
+    // lives in one of four byte slots of a 32-bit word.  Use a
+    // separate pass so we can combine multiple items into a single
+    // `Store` per word, honouring the same deepest-slot-first layout
+    // aggregates use for downward-growing stacks.
+    if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
+        if crate::types::size_bytes_ctx(elem_ty, ctx) == 1 {
+            lower_byte_array_init(ctx, items, slot_base, num_words)?;
+            return Ok(());
+        }
+    }
+
+    // Structs: use the actual field byte offsets so char / short
+    // fields at sub-word offsets (`struct { char a; char b; int c; }`)
+    // pack into shared words via byte-extract stores rather than
+    // claiming one word per field index.
+    if struct_fields.is_some() && !is_union_type(&resolved_ty) {
+        lower_struct_init(
+            ctx,
+            items,
+            struct_fields.as_deref().unwrap(),
+            slot_base,
+            num_words,
+        )?;
+        return Ok(());
+    }
+
     // Element stride (in words) for arrays: each positional step or
     // `[n]` designator advances by `elem_words` words.  For structs the
     // cursor tracks the field index and we resolve to byte offsets.
@@ -3435,6 +3556,173 @@ fn lower_aggregate_init(
         let val = lower_expr(ctx, inner_expr)?;
         ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
         cursor = next_cursor;
+    }
+    Ok(())
+}
+
+/// Initialise a byte-packed char-element array from an aggregate init
+/// list.  Each item lowers to a byte value (1-byte scalar), and four
+/// consecutive items share one 32-bit word at byte lanes 0..3 (little
+/// endian).  Designators `[n] = v` write byte index `n`; positional
+/// items continue from the cursor.  Because word storage is written in
+/// one `Store` per word and 32-bit vreg operations are the only
+/// primitive, items are assembled into a running word via shift-and-or
+/// and committed when the next word starts or at end of list.
+fn lower_byte_array_init(
+    ctx: &mut LowerCtx,
+    items: &[Expr],
+    slot_base: u32,
+    num_words: u32,
+) -> Result<()> {
+    // Resolve each item into (byte_idx, value_vreg_masked_to_byte).
+    // Non-constant values still emit properly; constant-foldable values
+    // are handled by the generic lower_expr path.
+    let mut byte_vals: Vec<(u32, VReg)> = Vec::with_capacity(items.len());
+    let mut cursor: u32 = 0;
+    for item in items {
+        let (idx, inner) = match item {
+            Expr::ArrayDesignator { index, value } => {
+                let i = match index.as_ref() {
+                    Expr::IntLit(v, _) => *v as u32,
+                    _ => cursor,
+                };
+                (i, value.as_ref())
+            }
+            Expr::DesignatedInit { value, .. } => (cursor, value.as_ref()),
+            other => (cursor, other),
+        };
+        let val = lower_expr(ctx, inner)?;
+        let mask_v = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(mask_v, 0xFF));
+        let masked = ctx.alloc_vreg();
+        ctx.emit(IrOp::BitAnd(masked, val, mask_v));
+        byte_vals.push((idx, masked));
+        cursor = idx.saturating_add(1);
+    }
+
+    // Bucket bytes by word index (byte_idx / 4).  A missing byte stays
+    // zero from the outer zero-fill that `lower_aggregate_init` just
+    // emitted.
+    for wi in 0..num_words {
+        let slot = slot_base + num_words - 1 - wi;
+        let mut word_acc: Option<VReg> = None;
+        for &(bi, v) in &byte_vals {
+            if bi / 4 != wi {
+                continue;
+            }
+            let lane = (bi % 4) * 8;
+            let shifted = if lane == 0 {
+                v
+            } else {
+                let sh = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(sh, lane as i64));
+                let out = ctx.alloc_vreg();
+                ctx.emit(IrOp::Shl(out, v, sh));
+                out
+            };
+            word_acc = Some(match word_acc {
+                None => shifted,
+                Some(prev) => {
+                    let merged = ctx.alloc_vreg();
+                    ctx.emit(IrOp::BitOr(merged, prev, shifted));
+                    merged
+                }
+            });
+        }
+        if let Some(w) = word_acc {
+            ctx.emit(IrOp::Store(w, 0, slot as i32));
+        }
+    }
+    Ok(())
+}
+
+/// Initialise a struct from an aggregate init list using real field
+/// byte offsets.  Char / short fields at sub-word offsets share a
+/// 32-bit word with their neighbours via byte-extract stores so the
+/// layout matches what `struct_field_layout_ctx` reports to member-
+/// access code.  Positional items walk fields in declaration order;
+/// `.field = v` designators jump to that field and subsequent
+/// positional items continue from there.
+fn lower_struct_init(
+    ctx: &mut LowerCtx,
+    items: &[Expr],
+    fields: &[(String, Type)],
+    slot_base: u32,
+    num_words: u32,
+) -> Result<()> {
+    let mut cursor: usize = 0;
+    for item in items {
+        let (fidx, inner) = match item {
+            Expr::DesignatedInit { field, value } => {
+                let idx = fields
+                    .iter()
+                    .position(|(n, _)| n == field)
+                    .unwrap_or(cursor);
+                (idx, value.as_ref())
+            }
+            Expr::ArrayDesignator { .. } => {
+                // An array designator inside a struct init list is
+                // malformed; skip it to avoid crashing but keep the
+                // cursor moving so trailing positional items still
+                // line up.
+                cursor = cursor.saturating_add(1);
+                continue;
+            }
+            other => (cursor, other),
+        };
+        if fidx >= fields.len() {
+            cursor = fidx + 1;
+            continue;
+        }
+        let (fname, fty) = &fields[fidx];
+        let Some((byte_off, _, _)) =
+            crate::types::struct_field_layout_ctx(fields, fname, ctx)
+        else {
+            cursor = fidx + 1;
+            continue;
+        };
+        let word_off = byte_off / 4;
+        if word_off >= num_words {
+            cursor = fidx + 1;
+            continue;
+        }
+        let elem_slot = slot_base + num_words - 1 - word_off;
+        let val = lower_expr(ctx, inner)?;
+        let fbytes = crate::types::size_bytes_ctx(fty, ctx);
+        if fbytes == 1 {
+            // Char-width field: merge into the containing word via
+            // byte-extract store, preserving any neighbouring bytes
+            // already present in the same word.
+            let lane = (byte_off % 4) * 8;
+            let ff = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(ff, 0xFF));
+            let val_byte = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitAnd(val_byte, val, ff));
+            let placed = if lane == 0 {
+                val_byte
+            } else {
+                let sh = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(sh, lane as i64));
+                let out = ctx.alloc_vreg();
+                ctx.emit(IrOp::Shl(out, val_byte, sh));
+                out
+            };
+            // Read-modify-write the word so earlier byte fields
+            // already written to the same slot survive.
+            let old = ctx.alloc_vreg();
+            ctx.emit(IrOp::Load(old, 0, elem_slot as i32));
+            let mask_v = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(mask_v, !(0xFFi64 << lane) & 0xFFFFFFFF));
+            let cleared = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitAnd(cleared, old, mask_v));
+            let merged = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitOr(merged, cleared, placed));
+            ctx.emit(IrOp::Store(merged, 0, elem_slot as i32));
+        } else {
+            // Wider (word-aligned) field: plain word store.
+            ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+        }
+        cursor = fidx + 1;
     }
     Ok(())
 }

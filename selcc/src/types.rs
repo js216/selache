@@ -133,7 +133,21 @@ pub fn size_words_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
         Type::LongLong | Type::ULongLong => 2,
         Type::Unsigned(inner) => size_words_ctx(inner, ctx),
         Type::Pointer(_) | Type::FunctionPtr { .. } => 1,
-        Type::Array(elem, Some(n)) => size_words_ctx(elem, ctx) * (*n as u32),
+        Type::Array(elem, Some(n)) => {
+            // Narrow-element arrays (`char`, `signed char`, `unsigned
+            // char`) are byte-packed: four bytes per 32-bit word, so
+            // C99 byte-address semantics hold through `(char *)` casts
+            // and `p[i]` indexing.  Without packing a `char s[5]`
+            // would reserve five words, forcing pointer arithmetic
+            // into a word-stride that the `(char *)&int` alias case
+            // cannot satisfy.
+            let ebytes = size_bytes_ctx(elem, ctx);
+            if ebytes == 1 {
+                (*n as u32).div_ceil(4).max(1)
+            } else {
+                size_words_ctx(elem, ctx) * (*n as u32)
+            }
+        }
         Type::Array(_, None) => 0,
         Type::Struct { .. } => size_bytes_ctx(ty, ctx).div_ceil(4),
         Type::Union { name, fields } => {
@@ -489,7 +503,15 @@ impl Type {
             Type::LongLong | Type::ULongLong => 2,
             Type::Unsigned(inner) => inner.size_words(),
             Type::Pointer(_) => 1,
-            Type::Array(elem, Some(n)) => elem.size_words() * (*n as u32),
+            Type::Array(elem, Some(n)) => {
+                // Narrow-element arrays pack four bytes per word; see
+                // the ctx-aware `size_words_ctx` for rationale.
+                if elem.size_bytes() == 1 {
+                    (*n as u32).div_ceil(4).max(1)
+                } else {
+                    elem.size_words() * (*n as u32)
+                }
+            }
             Type::Array(_, None) => 0,
             Type::Struct { fields, .. } => {
                 // Round up bytes to words.
