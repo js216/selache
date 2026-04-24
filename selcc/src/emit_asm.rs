@@ -93,6 +93,15 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         )
         .collect();
 
+    // Map each callee's return type so per-call lowering can route
+    // struct-by-value returns through the R0:R1 / hidden-pointer ABI
+    // instead of truncating them to the single R0 scalar path.
+    let function_return_types: HashMap<String, crate::types::Type> = unit
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.return_type.clone()))
+        .collect();
+
     // Compile each function, threading static locals produced by earlier
     // functions back in as visible globals for later ones.
     let mut all_static_locals: Vec<lower::StaticLocal> = Vec::new();
@@ -113,20 +122,20 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     let mut compiled: Vec<CompiledFunction> = Vec::new();
     let mut skipped_functions: Vec<String> = Vec::new();
 
+    let unit_ctx = UnitCtx {
+        struct_defs: &unit.struct_defs,
+        enum_constants: &unit.enum_constants,
+        typedefs: &unit.typedefs,
+        known_functions: &known_functions,
+        variadic_callees: &unit.variadic_functions,
+        function_return_types: &function_return_types,
+    };
     for func in &unit.functions {
         let mut func_global_types = global_types.clone();
         for sl in &all_static_locals {
             func_global_types.insert(sl.symbol.clone(), sl.ty.clone());
         }
-        let fr = match emit_function_instrs(
-            func,
-            &func_global_types,
-            &unit.struct_defs,
-            &unit.enum_constants,
-            &unit.typedefs,
-            &known_functions,
-            &unit.variadic_functions,
-        ) {
+        let fr = match emit_function_instrs(func, &func_global_types, &unit_ctx) {
             Ok(fr) => fr,
             Err(e) => {
                 eprintln!("selcc: {}: {e}", func.name);
@@ -754,20 +763,32 @@ struct FnEmitResult {
     label_insertions: HashMap<usize, Vec<String>>,
 }
 
+/// TU-wide context reused across every function lowering: struct /
+/// typedef definitions, enum constants, global types, known-function
+/// set, and per-callee return-type map. Bundled into a single struct
+/// so that `emit_function_instrs` has a manageable argument count and
+/// per-function threading does not accumulate a new parameter each
+/// time the compiler learns a new TU-level fact.
+struct UnitCtx<'a> {
+    struct_defs: &'a [(String, Vec<(String, crate::types::Type)>)],
+    enum_constants: &'a [(String, i64)],
+    typedefs: &'a [(String, crate::types::Type)],
+    known_functions: &'a HashSet<String>,
+    variadic_callees: &'a HashSet<String>,
+    function_return_types: &'a HashMap<String, crate::types::Type>,
+}
+
 /// Run the per-function pipeline and return the final machine-instruction
 /// stream (prologue + body + epilogue, with branches resolved). The
 /// caller is responsible for converting each instruction to text.
 fn emit_function_instrs(
     func: &Function,
     global_types: &HashMap<String, crate::types::Type>,
-    struct_defs: &[(String, Vec<(String, crate::types::Type)>)],
-    enum_constants: &[(String, i64)],
-    typedefs: &[(String, crate::types::Type)],
-    known_functions: &HashSet<String>,
-    variadic_callees: &HashSet<String>,
+    unit: &UnitCtx<'_>,
 ) -> Result<FnEmitResult> {
     let lower_result = lower::lower_function_with_known(
-        func, global_types, struct_defs, enum_constants, typedefs, known_functions,
+        func, global_types, unit.struct_defs, unit.enum_constants,
+        unit.typedefs, unit.known_functions, unit.function_return_types,
     )?;
     let strings = lower_result.strings;
     let wide_strings = lower_result.wide_strings;
@@ -777,7 +798,7 @@ fn emit_function_instrs(
     let ir = ir_opt::dead_code_eliminate(&ir);
     let ir = ir_opt::detect_hardware_loops(&ir);
 
-    let isel_result = isel::select_with_name(&ir, &func.name, variadic_callees);
+    let isel_result = isel::select_with_name(&ir, &func.name, unit.variadic_callees);
 
     // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
     // by-value parameters consume multiple ABI slots (one 32-bit word
@@ -1620,6 +1641,28 @@ fn source_regs(instr: &Instruction) -> Vec<u8> {
         }
         Instruction::UregMemAccess { write: true, ureg, .. } if ureg < 0x10 => {
             regs.push(ureg & 0xF);
+        }
+        // Writing an R-register value to memory through the post-modify
+        // indirect path (`DM(I, M) = Rn`). Without listing Rn as a
+        // source, eliminate_copies's use-count would miss every indirect
+        // store that consumes the Pass-migrated destination and would
+        // then fuse away the preceding `Rn = Rm` migration, leaving the
+        // store to read an uninitialised register at runtime.
+        Instruction::UregDagMove { write: true, ureg, .. } if ureg < 0x10 => {
+            regs.push(ureg & 0xF);
+        }
+        // Moving an R-register value into an I-/M-register (`Ix = Rn`,
+        // emitted as `URegMove { dest = I_pre(x), src = Rn }`). `src`
+        // is the R-register read. Same rationale as `UregDagMove`: the
+        // post-call `I4 = R11` transfers that fetch a struct-return
+        // base pointer do not currently count as source uses, so the
+        // Pass-migrated R11 migration gets eliminated and the I4
+        // transfer reads garbage.
+        Instruction::URegMove { src, .. } if src < 0x10 => {
+            regs.push(src & 0xF);
+        }
+        Instruction::UregTransfer { src_ureg, .. } if src_ureg < 0x10 => {
+            regs.push(src_ureg & 0xF);
         }
         Instruction::Return { compute: Some(c), .. } => {
             compute_source_regs(&c, &mut regs);

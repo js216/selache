@@ -107,6 +107,16 @@ impl Allocator {
             .entry(target::RETURN_REG)
             .or_insert(target::RETURN_REG_VREG);
         pinned.insert(target::RETURN_REG);
+        // Same deal for the hi half of a two-word struct return: pin a
+        // pseudo-vreg to physical R1 so isel's explicit `R1 = ...` and
+        // `... = R1` transfers survive regalloc remapping. Without this,
+        // the second word of the struct ends up in whatever register R1
+        // got renamed to and the caller reads back stale data.
+        vreg_to_phys.insert(target::RETURN_REG_HI_VREG, target::RETURN_REG_HI);
+        phys_to_vreg
+            .entry(target::RETURN_REG_HI)
+            .or_insert(target::RETURN_REG_HI_VREG);
+        pinned.insert(target::RETURN_REG_HI);
         Self {
             vreg_to_phys,
             phys_to_vreg,
@@ -149,6 +159,7 @@ impl Allocator {
             .filter(|(&vreg, &phys)| {
                 target::CALLER_SAVED.contains(&phys)
                     && vreg != target::RETURN_REG_VREG
+                    && vreg != target::RETURN_REG_HI_VREG
             })
             .map(|(&vreg, &phys)| (vreg, phys))
             .collect();
@@ -702,6 +713,7 @@ impl Allocator {
                     let resident = self.phys_to_vreg.get(&dest_phys).copied();
                     if let Some(v) = resident {
                         if v != rx && v != target::RETURN_REG_VREG
+                            && v != target::RETURN_REG_HI_VREG
                             && self.vreg_to_phys.get(&v).copied() == Some(dest_phys)
                         {
                             let slot = *self.spill_map.entry(v).or_insert_with(|| {
