@@ -108,7 +108,8 @@ pub enum IrOp {
     FNeg(VReg, VReg),
     /// dst = FLOAT src (integer to float conversion)
     IntToFloat(VReg, VReg),
-    /// dst = FIX src (float to integer conversion)
+    /// dst = TRUNC src (float to integer conversion, truncation toward
+    /// zero per C99 6.3.1.4p1)
     FloatToInt(VReg, VReg),
     /// Compare float: sets flags for subsequent BranchCond
     FCmp(VReg, VReg),

@@ -2002,12 +2002,20 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // array would multiply-scale a garbage word instead of
             // indexing into `o.a`.
             let addr = lower_lvalue_addr(ctx, expr)?;
-            if let Some(member_ty) = expr_type(expr, ctx) {
-                if is_aggregate_type(&member_ty, ctx) {
+            let member_ty = expr_type(expr, ctx);
+            if let Some(ref mty) = member_ty {
+                if is_aggregate_type(mty, ctx) {
                     return Ok(addr);
                 }
             }
-            let dst = ctx.alloc_vreg();
+            // A float-typed member (including reads through a union
+            // that aliases int bits as float) must land in an F-register
+            // so that downstream casts like `(int)u.f` know to emit a
+            // float->int conversion (FIX/TRUNC) rather than a no-op copy.
+            let dst = match member_ty {
+                Some(ref mty) if mty.is_float() => ctx.alloc_vreg_float(),
+                _ => ctx.alloc_vreg(),
+            };
             ctx.emit(IrOp::Load(dst, addr, 0));
             Ok(dst)
         }
@@ -2134,7 +2142,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             }
 
             if src_is_float && !dst_is_float {
-                // Float -> int: FIX
+                // Float -> int: TRUNC (truncate toward zero per C99).
                 let dst = ctx.alloc_vreg();
                 ctx.emit(IrOp::FloatToInt(dst, val));
                 Ok(dst)

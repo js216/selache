@@ -1090,10 +1090,15 @@ pub fn select_with_name(
             }
 
             IrOp::FloatToInt(dst, src) => {
+                // C99 6.3.1.4p1: float-to-int conversion truncates toward
+                // zero. SHARC+ `FIX` rounds by the current MODE1 rounding
+                // mode (power-on default is round-to-nearest-even), which
+                // would round 3.75 -> 4 instead of 3. `TRUNC` always
+                // truncates toward zero and so matches C semantics.
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Fix {
+                        compute: ComputeOp::Falu(FaluOp::Trunc {
                             rn: *dst as u8,
                             rx: *src as u8,
                         }),
