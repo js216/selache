@@ -1963,13 +1963,27 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             Ok(val)
         }
         Expr::Deref(inner) => {
+            let ptr_ty = expr_type(inner, ctx);
             let ptr = lower_expr(ctx, inner)?;
             // Load the value at the address in ptr using I4 as scratch.
             // We emit: I4 = ptr_vreg, then dst = DM(I4, 0).
             // Since we can't directly use a data register as an address,
             // we load the address into I4 (scratch index register) first.
             // For now, use a simplified Load through I4 with offset 0.
-            let dst = ctx.alloc_vreg();
+            // A float pointee must land in an F-register so downstream
+            // casts (e.g. `(int)*p`) see a float source and emit the
+            // float->int conversion rather than a silent bit-preserving
+            // copy.
+            let is_float_pointee = ptr_ty
+                .as_ref()
+                .and_then(pointee_type)
+                .map(|t| t.is_float())
+                .unwrap_or(false);
+            let dst = if is_float_pointee {
+                ctx.alloc_vreg_float()
+            } else {
+                ctx.alloc_vreg()
+            };
             ctx.emit(IrOp::Load(dst, ptr, 0));
             Ok(dst)
         }
@@ -1980,15 +1994,22 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Index(base, idx) => {
             // C99 6.5.2.1: `base[idx]` scales the index by `sizeof(*base)`.
             let base_ty = expr_type(base, ctx);
+            let elem_ty = base_ty.as_ref().and_then(pointee_type).cloned();
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
-            let scaled = match base_ty.as_ref().and_then(pointee_type) {
-                Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
+            let scaled = match elem_ty.as_ref() {
+                Some(elem) => scale_index_by_elem(ctx, index, elem),
                 None => index,
             };
             let addr = ctx.alloc_vreg();
             ctx.emit(IrOp::Add(addr, base_addr, scaled));
-            let dst = ctx.alloc_vreg();
+            // A float element type must land in an F-register so that
+            // `(int)arr[i]` sees a float source and emits the float->int
+            // conversion instead of passing the raw bit pattern through.
+            let dst = match elem_ty.as_ref() {
+                Some(t) if t.is_float() => ctx.alloc_vreg_float(),
+                _ => ctx.alloc_vreg(),
+            };
             ctx.emit(IrOp::Load(dst, addr, 0));
             Ok(dst)
         }
