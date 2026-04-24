@@ -2375,6 +2375,19 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             };
             let addr = ctx.alloc_vreg();
             ctx.emit(IrOp::Add(addr, base_addr, scaled));
+            // C99 6.3.2.1p3: when the indexed element is itself an
+            // aggregate (array / struct / union) its "value" in an
+            // rvalue context is its address, not a loaded word.
+            // Emitting a scalar Load here would read the first word of
+            // the aggregate and then treat that as the base for any
+            // outer `[j]` or `.field` — e.g. `m[i][j]` on
+            // `int m[N][M]` would multiply-scale a garbage word
+            // instead of indexing into row `m[i]`.
+            if let Some(ref et) = elem_ty {
+                if is_aggregate_type(et, ctx) {
+                    return Ok(addr);
+                }
+            }
             // Byte-granularity read when indexing a char / unsigned
             // char / bool element (byte-packed in memory).
             if let Some(ref et) = elem_ty {
