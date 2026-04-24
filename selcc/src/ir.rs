@@ -72,51 +72,10 @@ pub enum IrOp {
     UCmp(VReg, VReg),
     /// Return with optional value register
     Ret(Option<VReg>),
-    /// Copy the incoming hidden struct-return pointer (passed by the
-    /// caller in R1 per the SHARC+ C-ABI) into `dst`. Only legal at
-    /// function entry: the R1 value is clobberable by any intervening
-    /// instruction, so the frontend emits this op before any other
-    /// use of R1. A no-op for struct returns small enough to travel
-    /// in R0:R1 directly.
-    LoadStructRetPtr(VReg),
-    /// Return a struct by value of `num_words` 32-bit words living at
-    /// `src_addr`. For `num_words ≤ target::STRUCT_RET_MAX_REGS` the
-    /// words are read into R0 (and R1 for the two-word case) directly
-    /// by isel. For larger structs the caller's destination pointer
-    /// -- which arrived in R1 at entry and was captured into a frame
-    /// slot by a `LoadStructRetPtr` / `Store` pair -- is reloaded into
-    /// `dst_addr` by the frontend and passed here; isel copies the
-    /// `num_words` words through that pointer and sets R0 = dst_addr.
-    RetStruct {
-        src_addr: VReg,
-        dst_addr: Option<VReg>,
-        num_words: u32,
-    },
     /// dst = call name(args...)
     Call(VReg, String, Vec<VReg>),
     /// dst = call indirect through addr_vreg(args...)
     CallIndirect(VReg, VReg, Vec<VReg>),
-    /// Call `name(args...)` whose return type is a struct of `num_words`
-    /// 32-bit words, placing the returned value into the caller-side
-    /// buffer at `dst_addr`. For `num_words ≤ 2` the callee returns the
-    /// words in R0 (and R1 when num_words == 2); for larger structs the
-    /// caller passes `dst_addr` in R1 as a hidden first argument and
-    /// the callee writes through that pointer. The isel lowering picks
-    /// the right path from `num_words`.
-    CallStruct {
-        name: String,
-        args: Vec<VReg>,
-        dst_addr: VReg,
-        num_words: u32,
-    },
-    /// Indirect counterpart of `CallStruct`: the callee address lives
-    /// in `addr`. Same ABI split rules as `CallStruct`.
-    CallIndirectStruct {
-        addr: VReg,
-        args: Vec<VReg>,
-        dst_addr: VReg,
-        num_words: u32,
-    },
     /// Unconditional jump
     Branch(Label),
     /// Conditional jump based on most recent Cmp

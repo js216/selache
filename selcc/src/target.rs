@@ -37,26 +37,6 @@ pub const CALLEE_SAVED: &[u8] = &[8, 9, 10, 11, 12, 13, 14, 15];
 /// Return value is in R0.
 pub const RETURN_REG: u8 = 0;
 
-/// Second return-value register for small-struct returns. The SHARC+
-/// C-ABI at `-proc ADSP-21569 -char-size-8` splits a two-word struct return
-/// across R0 (first word / field at byte offset 0) and R1 (second
-/// word / field at byte offset 4); larger struct returns go through
-/// a hidden pointer the caller passes in R1 instead. Both conventions
-/// reuse R1, so R1 is reserved whenever a struct return is in flight
-/// and must not appear in the scalar argument registers.
-pub const RETURN_REG_HI: u8 = 1;
-
-/// Register carrying the hidden destination pointer for struct returns
-/// larger than `STRUCT_RET_MAX_REGS` words. The ABI
-/// places the caller's buffer address in R1 (alongside scalar args
-/// R4/R8/R12) and the callee returns R0 = R1 after writing through it.
-pub const STRUCT_RET_PTR_REG: u8 = 1;
-
-/// Largest struct (in 32-bit words) that is returned in registers
-/// (R0 for 1 word, R0:R1 for 2 words). Strictly-greater sizes use the
-/// hidden-pointer convention.
-pub const STRUCT_RET_MAX_REGS: u32 = 2;
-
 /// Pseudo-vreg that the register allocator pins to physical R0. isel
 /// uses this number as the destination vreg for the return-value move
 /// so that post-regalloc the `Pass` ends up writing physical R0, not
@@ -69,15 +49,6 @@ pub const STRUCT_RET_MAX_REGS: u32 = 2;
 /// chosen to stay clear of both the physical register numbers and
 /// any normal vreg the rest of the compiler might produce.
 pub const RETURN_REG_VREG: u8 = 0xFF;
-
-/// Pseudo-vreg pinned to physical R1 for the second word of a
-/// small-struct return (R0:R1 pair). Rationale identical to
-/// `RETURN_REG_VREG`: regalloc interprets rn/rx fields as vreg numbers
-/// and would otherwise remap a bare `1` through its pinning table,
-/// colliding with the first argument slot (R4 = ARG_REGS[0] often
-/// holds vreg id 0 and spills overlap low ids). 0xFE stays clear of
-/// both physical register numbers and ordinary vreg ids.
-pub const RETURN_REG_HI_VREG: u8 = 0xFE;
 
 /// 16 data registers total (R0-R15).
 pub const NUM_REGS: u8 = 16;
