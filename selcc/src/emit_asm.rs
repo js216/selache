@@ -134,14 +134,44 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 continue;
             }
         };
+        // Each function numbers its string literals from 0 via
+        // `ctx.strings`, but the emitted data section uses a single
+        // module-scope `.strN` table deduplicated across functions.
+        // Build a local-index → global-index remap and rewrite the
+        // reloc symbol on every `.strN` / `.wstrN` LoadImm so later
+        // functions do not silently alias an earlier function's
+        // `.str0.` (and walk the wrong string payload).
+        let mut str_remap: Vec<usize> = Vec::with_capacity(fr.strings.len());
         for s in fr.strings {
-            if !all_strings.contains(&s) {
+            let idx = all_strings.iter().position(|e| e == &s).unwrap_or_else(|| {
                 all_strings.push(s);
-            }
+                all_strings.len() - 1
+            });
+            str_remap.push(idx);
         }
+        let mut wstr_remap: Vec<usize> = Vec::with_capacity(fr.wide_strings.len());
         for ws in fr.wide_strings {
-            if !all_wide_strings.contains(&ws) {
+            let idx = all_wide_strings.iter().position(|e| e == &ws).unwrap_or_else(|| {
                 all_wide_strings.push(ws);
+                all_wide_strings.len() - 1
+            });
+            wstr_remap.push(idx);
+        }
+        let mut instrs = fr.instrs;
+        for mi in instrs.iter_mut() {
+            let Some(r) = mi.reloc.as_mut() else { continue; };
+            if let Some(rest) = r.symbol.strip_prefix(".str") {
+                if let Ok(local) = rest.parse::<usize>() {
+                    if let Some(&g) = str_remap.get(local) {
+                        r.symbol = format!(".str{g}");
+                    }
+                }
+            } else if let Some(rest) = r.symbol.strip_prefix(".wstr") {
+                if let Ok(local) = rest.parse::<usize>() {
+                    if let Some(&g) = wstr_remap.get(local) {
+                        r.symbol = format!(".wstr{g}");
+                    }
+                }
             }
         }
         for sl in fr.static_locals {
@@ -149,7 +179,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         }
         compiled.push(CompiledFunction {
             name: func.name.clone(),
-            instrs: fr.instrs,
+            instrs,
             label_insertions: fr.label_insertions,
             is_static: func.is_static,
         });
