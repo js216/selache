@@ -1504,8 +1504,11 @@ pub fn select_with_name(
             }
 
             IrOp::Shl64(dst, lhs, rhs) => {
-                // 64-bit left shift via runtime call (shift amount in rhs lo).
-                emit_runtime_call_64_binop(&mut instrs, "___shl64", *dst, *lhs, *rhs);
+                // Inline 64-bit left shift. The inline expansion mirrors
+                // `emit_inline_shr_64` but in the opposite direction so
+                // the helper stays self-contained (no cross-function
+                // register-ABI dependency).
+                emit_inline_shl_64(&mut instrs, *dst, *lhs, *rhs);
             }
 
             IrOp::Shr64(dst, lhs, rhs) => {
@@ -2177,6 +2180,112 @@ fn emit_inline_shr_64(
         reloc: None,
     });
     // Copy result from R0:R1 to the destination vreg pair.
+    if dst_lo != 0 {
+        instrs.push(MachInstr::compute_pass(dst_lo, 0));
+    }
+    if dst_hi != 1 {
+        instrs.push(MachInstr::compute_pass(dst_hi, 1));
+    }
+}
+
+/// Emit an inline 64-bit left shift that handles any shift count in
+/// `[0, 63]` branch-free, mirroring the trick in `emit_inline_shr_64`.
+///
+/// For a 64-bit value `(hi:lo)` shifted left by `n`:
+///
+/// ```text
+///     new_lo = lo << n                 (for n >= 32, hardware gives 0)
+///     new_hi = (hi << n) | (lo << (n - 32))
+/// ```
+///
+/// The hardware LSHIFT with a signed count does exactly this: a
+/// positive count of magnitude >= 32 produces zero, a negative count
+/// shifts right.  For `n < 32`, `(n - 32)` is negative, so the second
+/// term becomes `lo >> (32 - n)` — the familiar "carry-in from low
+/// word" merge.  For `n >= 32`, the carry term becomes `lo << (n - 32)`
+/// and the `hi << n` term is zero, so `new_hi = lo << (n - 32)`.
+///
+/// Calling convention matches the inline right shift: lhs in vreg 0/1
+/// (lo:hi), shift count in vreg 2, scratch in vreg 3/4/5/7; result
+/// lands in vreg 0/1 and is then copied to the destination pair.
+/// Staying in the low-numbered vreg space keeps the sequence
+/// internally consistent (regalloc rewrites the vreg ids, but the
+/// instructions reference the same vregs before and after the rewrite).
+fn emit_inline_shl_64(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+) {
+    let dst_lo = dst as u8;
+    let dst_hi = (dst + 1) as u8;
+    let lhs_lo = lhs as u8;
+    let lhs_hi = (lhs + 1) as u8;
+    let rhs_lo = rhs as u8;
+    // vreg 0 = lhs_lo, vreg 1 = lhs_hi, vreg 2 = rhs_lo.
+    if lhs_lo != 0 {
+        instrs.push(MachInstr::compute_pass(0, lhs_lo));
+    }
+    if lhs_hi != 1 {
+        instrs.push(MachInstr::compute_pass(1, lhs_hi));
+    }
+    if rhs_lo != 2 {
+        instrs.push(MachInstr::compute_pass(2, rhs_lo));
+    }
+    // R4 = -32 (constant).
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: target::ureg_r(4),
+            value: (-32i32) as u32,
+        },
+        reloc: None,
+    });
+    // R5 = R2 + R4 = n - 32.  Positive for n >= 32, negative for n < 32.
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Add { rn: 5, rx: 2, ry: 4 }),
+        },
+        reloc: None,
+    });
+    // R7 = LSHIFT(lo, R5).  For n < 32 this is `lo >> (32 - n)` (the
+    // carry bits that drift into the new high word); for n >= 32 it
+    // is `lo << (n - 32)` (the entire new high word).  For n == 0
+    // the count is -32, which LSHIFT turns into zero — exactly what
+    // the merge needs.
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 7, rx: 0, ry: 5 }),
+        },
+        reloc: None,
+    });
+    // R1 = LSHIFT(hi, R2) = hi << n.  Zero for n >= 32, which leaves
+    // R7 as the sole contributor to the new high word in that range.
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 1, rx: 1, ry: 2 }),
+        },
+        reloc: None,
+    });
+    // R1 = R1 | R7 = new high word.
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Or { rn: 1, rx: 1, ry: 7 }),
+        },
+        reloc: None,
+    });
+    // R0 = LSHIFT(lo, R2) = lo << n = new low word.
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 0, rx: 0, ry: 2 }),
+        },
+        reloc: None,
+    });
+    // Copy result from vreg 0:1 to the destination pair.
     if dst_lo != 0 {
         instrs.push(MachInstr::compute_pass(dst_lo, 0));
     }

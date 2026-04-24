@@ -359,29 +359,35 @@ __divrem_s64.:
       .type __divrem_s64.,STT_FUNC;
 
 // ___shl64  -- 64-bit left shift
-// Input:  R4:R1 = value (lo:hi), R2:R3 = shift count (lo only used)
-// Output: R4:R1 = result (lo:hi)
+// Input:  R0:R1 = value (lo:hi), R2:R3 = shift count (lo only used)
+// Output: R0:R1 = result (lo:hi)
+//
+// Matches the selcc runtime-call ABI used by ___div64/___mod64
+// (R0:R1 = lhs lo:hi, R2:R3 = rhs lo:hi, result in R0:R1).  Shift
+// amount must be treated as unsigned in [0, 63]; counts outside that
+// range invoke C undefined behaviour and the caller is responsible
+// for masking.
       .GLOBAL ___shl64.;
 ___shl64.:
-      R8 = PASS R2;
-      // If shift >= 32, high = low << (shift-32), low = 0
+      R8 = PASS R2;                  // shift count
       R9 = 32;
       COMP(R8, R9);
       IF GE JUMP .shl64_big;
-      // shift < 32: high = (high << shift) | (low >> (32-shift))
-      R1 = LSHIFT R1 BY R8;
-      R9 = R9 - R8;
-      R10 = LSHIFT R4 BY R9;         // logical right shift (32-shift) -- wrong direction
-      // SHARC LSHIFT is unsigned: positive=left, negative=right
-      R9 = -R9;
-      R10 = LSHIFT R4 BY R9;         // low >> (32-shift)
-      R1 = R1 OR R10;
-      R4 = LSHIFT R4 BY R8;
+      // shift < 32:
+      //   new_hi = (hi << shift) | (lo >> (32 - shift))
+      //   new_lo =  lo << shift
+      R1 = LSHIFT R1 BY R8;          // hi <<= shift
+      R9 = R9 - R8;                  // 32 - shift
+      R9 = -R9;                      // negate for SHARC right-shift
+      R10 = LSHIFT R0 BY R9;         // lo >> (32 - shift)
+      R1 = R1 OR R10;                // merge into new hi
+      R0 = LSHIFT R0 BY R8;          // new lo
       RTS;
 .shl64_big:
-      R8 = R8 - R9;                  // shift - 32
-      R1 = LSHIFT R4 BY R8;
-      R4 = 0;
+      // shift >= 32:  new_hi = lo << (shift - 32), new_lo = 0
+      R8 = R8 - R9;
+      R1 = LSHIFT R0 BY R8;
+      R0 = 0;
       RTS;
 .___shl64..end:
       .type ___shl64.,STT_FUNC;

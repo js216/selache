@@ -1657,9 +1657,16 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
 /// Lower an expression, returning the vreg that holds the result.
 fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
     match expr {
-        Expr::IntLit(val, _) => {
-            // If the literal exceeds 32-bit signed range, emit a 64-bit load.
-            if *val > i64::from(i32::MAX) || *val < i64::from(i32::MIN) {
+        Expr::IntLit(val, suffix) => {
+            // A literal is 64-bit when either its value exceeds the 32-bit
+            // signed range or its suffix forces `long long` / `unsigned long
+            // long`.  The suffix check is required: `1LL << 32` must lower
+            // the literal as a 64-bit pair, otherwise the shift becomes a
+            // 32-bit LSHIFT-by-32 and the runtime computes zero.
+            let is_64 = *val > i64::from(i32::MAX)
+                || *val < i64::from(i32::MIN)
+                || int_literal_type(*val, *suffix).is_long_long();
+            if is_64 {
                 let dst = ctx.alloc_vreg_pair();
                 ctx.emit(IrOp::LoadImm64(dst, *val));
                 return Ok(dst);
@@ -3306,6 +3313,49 @@ fn lower_inc_dec(
     }
 }
 
+/// Emit the binary operation for a 64-bit compound assignment, given loaded
+/// lhs and rhs 64-bit vreg pairs. Returns the result 64-bit vreg pair.
+fn emit_compound_op_64(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg,
+                       is_unsigned: bool) -> Result<VReg> {
+    let result = ctx.alloc_vreg_pair();
+    match op {
+        BinaryOp::Add => ctx.emit(IrOp::Add64(result, lhs, rhs)),
+        BinaryOp::Sub => ctx.emit(IrOp::Sub64(result, lhs, rhs)),
+        BinaryOp::Mul => ctx.emit(IrOp::Mul64(result, lhs, rhs)),
+        BinaryOp::Div => {
+            if is_unsigned {
+                ctx.emit(IrOp::UDiv64(result, lhs, rhs));
+            } else {
+                ctx.emit(IrOp::Div64(result, lhs, rhs));
+            }
+        }
+        BinaryOp::Mod => {
+            if is_unsigned {
+                ctx.emit(IrOp::UMod64(result, lhs, rhs));
+            } else {
+                ctx.emit(IrOp::Mod64(result, lhs, rhs));
+            }
+        }
+        BinaryOp::BitAnd => ctx.emit(IrOp::BitAnd64(result, lhs, rhs)),
+        BinaryOp::BitOr => ctx.emit(IrOp::BitOr64(result, lhs, rhs)),
+        BinaryOp::BitXor => ctx.emit(IrOp::BitXor64(result, lhs, rhs)),
+        BinaryOp::Shl => ctx.emit(IrOp::Shl64(result, lhs, rhs)),
+        BinaryOp::Shr => {
+            if is_unsigned {
+                ctx.emit(IrOp::UShr64(result, lhs, rhs));
+            } else {
+                ctx.emit(IrOp::Shr64(result, lhs, rhs));
+            }
+        }
+        _ => {
+            return Err(Error::NotImplemented(format!(
+                "64-bit compound assignment op: {op:?}"
+            )));
+        }
+    }
+    Ok(result)
+}
+
 /// Emit the binary operation for a compound assignment, given loaded lhs and
 /// rhs vregs. Returns the result vreg.
 fn emit_compound_op(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg,
@@ -3353,6 +3403,15 @@ fn lower_compound_assign(
     // Compound `>>=` etc. follow the C usual-arithmetic-conversions
     // rule: if either operand is unsigned, the operation is unsigned.
     let is_unsigned = is_unsigned_expr(target, ctx) || is_unsigned_expr(value, ctx);
+
+    // Detect 64-bit target: `long long x; x <<= n;` must load/op/store
+    // as a two-word pair. Without this dispatch the 32-bit paths below
+    // would truncate both operands and the result.
+    let target_is_64 = expr_type(target, ctx).is_some_and(|t| t.is_long_long());
+    if target_is_64 {
+        return lower_compound_assign_64(ctx, op, target, value, is_unsigned);
+    }
+
     match target {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
@@ -3419,6 +3478,103 @@ fn lower_compound_assign(
             let rhs_val = maybe_scale_ptr_rhs(ctx, op, target, rhs_val);
             let result = emit_compound_op(ctx, op, lhs, rhs_val, is_unsigned)?;
             ctx.emit(IrOp::Store(result, addr, 0));
+            Ok(result)
+        }
+    }
+}
+
+/// Compound assignment where the target is a `long long` / `unsigned long
+/// long`.  Loads the lhs as a 64-bit pair, widens the rhs to 64-bit if it
+/// arrived as a 32-bit value, applies the 64-bit binop, and stores the
+/// result back through the appropriate 64-bit store path.
+fn lower_compound_assign_64(
+    ctx: &mut LowerCtx,
+    op: BinaryOp,
+    target: &Expr,
+    value: &Expr,
+    is_unsigned: bool,
+) -> Result<VReg> {
+    // Helper: load the 64-bit rhs, widening a 32-bit expression if needed.
+    // Shift operators take a 32-bit count — do NOT widen their rhs.
+    let rhs_is_shift_count = matches!(op, BinaryOp::Shl | BinaryOp::Shr);
+    let load_rhs = |ctx: &mut LowerCtx| -> Result<VReg> {
+        let rhs = lower_expr(ctx, value)?;
+        if rhs_is_shift_count {
+            // Runtime helpers and inline shift sequences read the
+            // count from the lo word of the rhs pair; they ignore
+            // the hi word.  Passing a plain 32-bit vreg works the
+            // same way because Shl64/Shr64/UShr64 only use the lo.
+            return Ok(rhs);
+        }
+        if ctx.is_64bit_vreg(rhs) {
+            Ok(rhs)
+        } else {
+            Ok(widen_to_64(ctx, rhs, value))
+        }
+    };
+
+    match target {
+        Expr::Ident(name) => {
+            if let Some(storage) = ctx.locals.get(name).cloned() {
+                let lhs = match storage {
+                    LocalStorage::Stack(offset) => {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::Load64(dst, 0, offset as i32));
+                        dst
+                    }
+                    LocalStorage::Reg(vreg) => {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::Copy64(dst, vreg));
+                        dst
+                    }
+                    LocalStorage::Static(ref sym) => {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::ReadGlobal64(dst, sym.clone()));
+                        dst
+                    }
+                };
+                let rhs = load_rhs(ctx)?;
+                let result = emit_compound_op_64(ctx, op, lhs, rhs, is_unsigned)?;
+                match storage {
+                    LocalStorage::Stack(offset) => {
+                        ctx.emit(IrOp::Store64(result, 0, offset as i32));
+                    }
+                    LocalStorage::Reg(vreg) => {
+                        ctx.emit(IrOp::Copy(vreg, result));
+                        ctx.emit(IrOp::Copy(vreg + 1, result + 1));
+                    }
+                    LocalStorage::Static(ref sym) => {
+                        ctx.emit(IrOp::WriteGlobal64(result, sym.clone()));
+                    }
+                }
+                Ok(result)
+            } else if ctx.globals.contains_key(name) {
+                let lhs = ctx.alloc_vreg_pair();
+                ctx.emit(IrOp::ReadGlobal64(lhs, name.clone()));
+                let rhs = load_rhs(ctx)?;
+                let result = emit_compound_op_64(ctx, op, lhs, rhs, is_unsigned)?;
+                ctx.emit(IrOp::WriteGlobal64(result, name.clone()));
+                Ok(result)
+            } else {
+                Err(Error::NotImplemented(format!("undefined variable: {name}")))
+            }
+        }
+        Expr::Deref(inner) => {
+            let ptr = lower_expr(ctx, inner)?;
+            let lhs = ctx.alloc_vreg_pair();
+            ctx.emit(IrOp::Load64(lhs, ptr, 0));
+            let rhs = load_rhs(ctx)?;
+            let result = emit_compound_op_64(ctx, op, lhs, rhs, is_unsigned)?;
+            ctx.emit(IrOp::Store64(result, ptr, 0));
+            Ok(result)
+        }
+        _ => {
+            let addr = lower_lvalue_addr(ctx, target)?;
+            let lhs = ctx.alloc_vreg_pair();
+            ctx.emit(IrOp::Load64(lhs, addr, 0));
+            let rhs = load_rhs(ctx)?;
+            let result = emit_compound_op_64(ctx, op, lhs, rhs, is_unsigned)?;
+            ctx.emit(IrOp::Store64(result, addr, 0));
             Ok(result)
         }
     }
