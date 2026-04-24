@@ -1307,6 +1307,161 @@ fn emit_byte_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
     ctx.emit(IrOp::Store(new_word, word_addr, 0));
 }
 
+/// Per-field bitfield layout info for a Member/Arrow lvalue.  When the
+/// named field is a C99 6.7.2.1 bitfield, this carries everything needed
+/// for the shift-mask load and read-modify-write store: the starting bit
+/// within the storage unit, the field width in bits, and whether the
+/// underlying base type is signed (controls sign-extension on load).
+/// The container address comes from `lower_lvalue_addr`, which already
+/// points at the storage unit start because `struct_field_layout_ctx`
+/// returns a byte offset aligned to the base type.
+struct BitfieldInfo {
+    bit_offset: u32,
+    bit_width: u8,
+    signed: bool,
+}
+
+/// If the Member/Arrow expression names a bitfield field, return its
+/// layout info; otherwise `None`. Honours anonymous struct/union members
+/// by re-running `struct_field_layout_ctx` on the nested field list.
+fn member_bitfield_info(expr: &Expr, ctx: &LowerCtx) -> Option<BitfieldInfo> {
+    let (base, field) = match expr {
+        Expr::Member(base, field) => (base.as_ref(), field.as_str()),
+        Expr::Arrow(base, field) => (base.as_ref(), field.as_str()),
+        _ => return None,
+    };
+    let base_ty = expr_type(base, ctx)?;
+    let struct_ty = match expr {
+        Expr::Member(..) => base_ty,
+        Expr::Arrow(..) => strip_to_pointer(&base_ty)?.clone(),
+        _ => return None,
+    };
+    if is_union_type(&struct_ty) {
+        // A bitfield that is itself the sole member of a union, or a
+        // union aliasing bit-level storage, is not exercised by the
+        // test suite; fall through to the plain path so union semantics
+        // remain unchanged for non-bitfield members.
+        return None;
+    }
+    let fields = resolve_struct_fields(&struct_ty, ctx)?;
+    let (_, bit_off, bit_width) = crate::types::struct_field_layout_ctx(fields, field, ctx)?;
+    let width = bit_width?;
+    let bit_offset = bit_off?;
+    // Recover the underlying integer signedness from the field's
+    // declared type so signed bitfields sign-extend on load.
+    let fty = fields
+        .iter()
+        .find(|(n, _)| n == field)
+        .map(|(_, t)| t.clone())
+        .or_else(|| {
+            // Search inside anonymous members.
+            for (name, ty) in fields {
+                if !name.starts_with("__anon") { continue; }
+                if let Type::Struct { fields: inner, .. } | Type::Union { fields: inner, .. } = ty {
+                    if let Some(ft) = inner.iter().find(|(n, _)| n == field).map(|(_, t)| t.clone()) {
+                        return Some(ft);
+                    }
+                }
+            }
+            None
+        })?;
+    let signed = match &fty {
+        Type::Bitfield(base, _) => !base.is_unsigned(),
+        _ => return None,
+    };
+    Some(BitfieldInfo { bit_offset, bit_width: width, signed })
+}
+
+/// Emit IR to load a bitfield from a storage unit pointed to by
+/// `container_addr`. Loads the full 32-bit unit, shifts the field into
+/// the low bits, masks to the field width, and sign-extends if the
+/// underlying type is signed (C99 6.7.2.1 p9). Uses the same
+/// Shr/Lshr/Shl idiom as `emit_byte_load` (SHARC ASHIFT takes a negated
+/// count for right shifts; see the Neg emits below).
+fn emit_bitfield_load(ctx: &mut LowerCtx, container_addr: VReg, info: &BitfieldInfo) -> VReg {
+    let word = ctx.alloc_vreg();
+    ctx.emit(IrOp::Load(word, container_addr, 0));
+    let width = info.bit_width as i64;
+    let bit_off = info.bit_offset as i64;
+    // Shift right by bit_offset (logical) to bring the field to bit 0,
+    // then mask to `width` bits.  The shift+mask is equivalent to a
+    // single pair of shifts if we want to sign-extend, but mirroring
+    // the byte-load sequence keeps the signed/unsigned paths parallel.
+    let shifted = if bit_off == 0 {
+        word
+    } else {
+        let sh_imm = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(sh_imm, bit_off));
+        let neg_sh = ctx.alloc_vreg();
+        ctx.emit(IrOp::Neg(neg_sh, sh_imm));
+        let tmp = ctx.alloc_vreg();
+        ctx.emit(IrOp::Lshr(tmp, word, neg_sh));
+        tmp
+    };
+    let mask_val = if width >= 32 { -1i64 } else { (1i64 << width) - 1 };
+    let mask_imm = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_imm, mask_val));
+    let masked = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(masked, shifted, mask_imm));
+    if !info.signed || width >= 32 {
+        return masked;
+    }
+    // Sign-extend from bit (width-1): (masked << (32-width)) >> (32-width) arithmetic.
+    let pad = 32 - width;
+    let pad_imm = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(pad_imm, pad));
+    let up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(up, masked, pad_imm));
+    let neg_pad = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(neg_pad, -pad));
+    let down = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(down, up, neg_pad));
+    down
+}
+
+/// Emit IR to store `val` into a bitfield whose storage unit starts at
+/// `container_addr`. Read-modify-write: load container, clear the field
+/// slot, OR in `(val & field_mask) << bit_offset`, store back. This
+/// matches the pattern in `emit_byte_store` and preserves bits outside
+/// the field per C99 6.7.2.1.
+fn emit_bitfield_store(
+    ctx: &mut LowerCtx,
+    container_addr: VReg,
+    val: VReg,
+    info: &BitfieldInfo,
+) {
+    let width = info.bit_width as i64;
+    let bit_off = info.bit_offset as i64;
+    let field_mask_val = if width >= 32 { -1i64 } else { (1i64 << width) - 1 };
+    let shifted_mask_val = (field_mask_val as u64)
+        .wrapping_shl(bit_off as u32) as i64;
+
+    let old = ctx.alloc_vreg();
+    ctx.emit(IrOp::Load(old, container_addr, 0));
+    // clear_mask = ~(field_mask << bit_offset)
+    let clear_mask = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(clear_mask, !shifted_mask_val));
+    let cleared = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(cleared, old, clear_mask));
+    // placed = (val & field_mask) << bit_offset
+    let fm = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(fm, field_mask_val));
+    let truncated = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(truncated, val, fm));
+    let placed = if bit_off == 0 {
+        truncated
+    } else {
+        let sh_imm = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(sh_imm, bit_off));
+        let tmp = ctx.alloc_vreg();
+        ctx.emit(IrOp::Shl(tmp, truncated, sh_imm));
+        tmp
+    };
+    let new_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitOr(new_word, cleared, placed));
+    ctx.emit(IrOp::Store(new_word, container_addr, 0));
+}
+
 /// Multiply `index` by `sizeof(elem_ty)` in bytes and return a new vreg
 /// holding the scaled offset. When `sizeof` is 1 (character types), the
 /// input vreg is returned unchanged to avoid emitting a `× 1` multiply.
@@ -2089,7 +2244,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 }
                 Expr::Member(..) | Expr::Arrow(..) => {
                     let addr = lower_lvalue_addr(ctx, target)?;
-                    ctx.emit(IrOp::Store(val, addr, 0));
+                    if let Some(info) = member_bitfield_info(target, ctx) {
+                        emit_bitfield_store(ctx, addr, val, &info);
+                    } else {
+                        ctx.emit(IrOp::Store(val, addr, 0));
+                    }
                 }
                 _ => {
                     let addr = lower_lvalue_addr(ctx, target)?;
@@ -2172,6 +2331,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // array would multiply-scale a garbage word instead of
             // indexing into `o.a`.
             let addr = lower_lvalue_addr(ctx, expr)?;
+            if let Some(info) = member_bitfield_info(expr, ctx) {
+                return Ok(emit_bitfield_load(ctx, addr, &info));
+            }
             let member_ty = expr_type(expr, ctx);
             if let Some(ref mty) = member_ty {
                 if is_aggregate_type(mty, ctx) {
