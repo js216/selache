@@ -1177,6 +1177,45 @@ fn pointee_type(ty: &Type) -> Option<&Type> {
     }
 }
 
+/// Narrow a freshly-loaded word to the byte (or half-word) width of the
+/// given scalar `elem_ty` and, if signed, sign-extend it back to 32 bits.
+/// Used after a `Load` through a `char *` or `short *` so the high bits of
+/// the containing 32-bit memory word (which may hold unrelated data when
+/// the storage behind the pointer is actually an `int` --- as in
+/// `(char *)&x`) do not leak into the result.  For 1-per-word char storage
+/// the high bits are already zero and this mask is a no-op; for packed
+/// int storage it picks the low byte, which is the little-endian LSB per
+/// C99 byte-order.
+fn narrow_load_to_elem(ctx: &mut LowerCtx, val: VReg, elem_ty: &Type) -> VReg {
+    let elem = elem_ty.unqualified();
+    let bytes = crate::types::size_bytes_ctx(elem, ctx);
+    if bytes == 0 || bytes >= 4 {
+        return val;
+    }
+    let bits = (bytes * 8) as i64;
+    let mask = ((1u64 << bits) - 1) as i64;
+    let mask_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_v, mask));
+    let masked = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(masked, val, mask_v));
+    if elem.is_unsigned() {
+        return masked;
+    }
+    // Signed narrow type: sign-extend from bit (bits-1).  SHARC+ ASHIFT
+    // uses the same count for both directions; positive shifts left,
+    // negative shifts right arithmetically.
+    let shift = 32 - bits;
+    let shl_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl_v, shift));
+    let shifted_up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(shifted_up, masked, shl_v));
+    let shr_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shr_v, -shift));
+    let signed_out = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(signed_out, shifted_up, shr_v));
+    signed_out
+}
+
 /// Multiply `index` by `sizeof(elem_ty)` in bytes and return a new vreg
 /// holding the scaled offset. When `sizeof` is 1 (character types), the
 /// input vreg is returned unchanged to avoid emitting a `× 1` multiply.
@@ -1961,9 +2000,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // casts (e.g. `(int)*p`) see a float source and emit the
             // float->int conversion rather than a silent bit-preserving
             // copy.
-            let is_float_pointee = ptr_ty
+            let pointee = ptr_ty.as_ref().and_then(pointee_type).cloned();
+            let is_float_pointee = pointee
                 .as_ref()
-                .and_then(pointee_type)
                 .map(|t| t.is_float())
                 .unwrap_or(false);
             let dst = if is_float_pointee {
@@ -1972,6 +2011,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 ctx.alloc_vreg()
             };
             ctx.emit(IrOp::Load(dst, ptr, 0));
+            // A `char *` or `short *` read lands the full 32-bit memory
+            // word in `dst`; when the pointer actually points into
+            // packed int storage (e.g. `(char *)&x`) the high bits are
+            // other bytes of the same word, not zero.  Narrow to the
+            // pointee's width per C99 byte-pun semantics.
+            if let Some(ref pt) = pointee {
+                let narrowed = narrow_load_to_elem(ctx, dst, pt);
+                return Ok(narrowed);
+            }
             Ok(dst)
         }
         Expr::AddrOf(inner) => {
@@ -1998,6 +2046,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 _ => ctx.alloc_vreg(),
             };
             ctx.emit(IrOp::Load(dst, addr, 0));
+            // Narrow `char`/`short`-element reads to the element's
+            // width; see `Expr::Deref` for rationale.
+            if let Some(ref et) = elem_ty {
+                let narrowed = narrow_load_to_elem(ctx, dst, et);
+                return Ok(narrowed);
+            }
             Ok(dst)
         }
         Expr::Member(..) | Expr::Arrow(..) => {
