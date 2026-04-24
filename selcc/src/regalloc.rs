@@ -463,13 +463,21 @@ impl Allocator {
             }
 
             Instruction::URegMove { dest, src } => {
-                // Tag-bit + I/M-group-nibble combo identifies a fixed
-                // I/M-register encoding (see LoadImm comment for full
-                // discussion). Anything else is a raw R-vreg id that
-                // must be mapped to a physical register.
+                // Tag-bit + register-group-nibble combo identifies a
+                // fixed R/I/M-register encoding (see LoadImm comment for
+                // full discussion). Anything else is a raw R-vreg id
+                // that must be mapped to a physical register. R-group
+                // (0x00) is load-bearing for the CallIndirect frame-link
+                // `R2 = I6` save: without it, regalloc treats the 0x82
+                // as a plain vreg 2 and remaps R2 to whatever physical
+                // register vreg 2 lives in, so the delay-slot push
+                // `DM(I7,M7) = R2` stores an unrelated value and the
+                // callee's RFRAME restores the wrong frame pointer.
                 let is_fixed = |u: u8| {
                     u & target::UREG_FIXED_TAG != 0
-                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
+                        && ((u & 0x70) == 0x00
+                            || (u & 0x70) == 0x10
+                            || (u & 0x70) == 0x20)
                 };
                 let new_dest = if is_fixed(dest) {
                     dest & !target::UREG_FIXED_TAG
@@ -497,6 +505,29 @@ impl Allocator {
                 mi.instr
             }
 
+            Instruction::IndirectBranch { pm_m, .. } => {
+                // Two isel shapes produce IndirectBranch: the CallIndirect
+                // lowering open-codes a `JUMP (M13, I12) (DB)` with
+                // manual frame-link pushes (pm_m = 5, selecting M13
+                // which startup.s pins to 0); the function-return
+                // epilogue emits `JUMP (M14, I12) (DB)` (pm_m = 6, M14
+                // which is pinned to +1 to compensate for the
+                // retaddr-1 the caller pushed). Only the call shape
+                // needs caller-saved spill and arg-pin release — at
+                // the return epilogue no vregs are live and no pins
+                // are active. Keying the branch on pm_m keeps the
+                // dispatch local to this match arm instead of
+                // threading a call/return marker through the whole
+                // isel → regalloc pipeline.
+                if pm_m == 5 {
+                    self.spill_caller_saved(&mut spill_pre);
+                    for p in self.arg_setup_pins.drain(..) {
+                        self.pinned.remove(&p);
+                    }
+                }
+                mi.instr
+            }
+
             Instruction::Nop
             | Instruction::Idle
             | Instruction::Rframe
@@ -505,7 +536,6 @@ impl Allocator {
             | Instruction::DoLoop { .. }
             | Instruction::DualMove { .. }
             | Instruction::Modify { .. }
-            | Instruction::IndirectBranch { .. }
             | Instruction::BitOp { .. }
             | Instruction::StackOp { .. }
             | Instruction::DagModify { .. }

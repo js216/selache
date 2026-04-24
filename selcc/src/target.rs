@@ -14,12 +14,6 @@ pub const FRAME_PTR: u8 = 6;
 /// I4 is used as a scratch index register for global accesses.
 pub const SCRATCH_I: u8 = 4;
 
-/// PM I-register index for indirect calls (I12 = PM DAG2 index 4).
-pub const INDIRECT_CALL_PMI: u8 = 4;
-
-/// PM M-register index for indirect calls (M12 = PM DAG2 index 4).
-pub const INDIRECT_CALL_PMM: u8 = 4;
-
 /// Integer/pointer argument registers for the SHARC+ C-ABI: the
 /// first three scalar args go in R4, R8, R12 (in that order).
 /// The 4th and subsequent args are passed on the stack, NOT in R0.

@@ -531,73 +531,157 @@ pub fn select_with_name(
             }
 
             IrOp::CallIndirect(dst, addr, args) => {
-                // Indirect call through function pointer.
-                // Transfer the function address from a data register to
-                // PM I12 by storing through DM(I4) and loading into I12,
-                // set M12 = 0, then emit CALL (I12, M12).
+                // Indirect call through a function pointer held in a
+                // data-register vreg. SHARC+ has no single-instruction
+                // indirect CJUMP, so this path open-codes the frame-link
+                // magic that CJUMP performs implicitly for direct calls:
+                // save I6 into R2, set I6 = I7 (new frame pointer), then
+                // issue a delayed `JUMP (M13, I12) (DB)` with two delay
+                // slots that push R2 and the return-address-minus-one,
+                // matching exactly what the callee's prologue/epilogue
+                // (`RFRAME`, `I12 = DM(M7,I6); JUMP (M14,I12) (DB)`)
+                // expects on the frame stack. M13 is initialized to 0
+                // by startup.s so the post-modify of I12 through M13
+                // leaves the address-generator in a defined state.
+                //
+                // The previous version emitted a plain `CALL (M12,I12)`
+                // with I12 loaded via `LoadImm { value: *addr }` — where
+                // *addr was the VREG number, not its runtime contents —
+                // and skipped the frame-link bookkeeping entirely, so
+                // the callee's RFRAME popped uninitialised memory into
+                // I6 and control never returned.
 
-                // Stack arguments (args 4+): push in reverse order.
+                // Stack arguments (args 3+): push in reverse order via
+                // post-modify `DM(I7, M7) = Rn` so each push decrements
+                // I7. A fixed-offset write without decrementing I7
+                // leaves the stored args in the range the indirect
+                // branch's own delay-slot pushes (R2 link and return
+                // address) overwrite, silently trampling the first
+                // stack-passed arg.
                 for (i, arg) in args.iter().enumerate().rev() {
                     if i >= target::ARG_REGS.len() {
-                        let stack_offset = (i - target::ARG_REGS.len()) as i8;
                         instrs.push(MachInstr {
-                            instr: Instruction::ComputeLoadStore {
-                                compute: None,
-                                access: MemAccess {
-                                    pm: false,
-                                    write: true,
-                                    i_reg: target::STACK_PTR,
-                                },
-                                dreg: *arg as u8,
-                                offset: stack_offset,
+                            instr: Instruction::UregDagMove {
+                                pm: false,
+                                write: true,
+                                ureg: *arg as u8,
+                                i_reg: target::STACK_PTR,
+                                m_reg: 7, // M7 = -1
                                 cond: target::COND_TRUE,
+                                compute: None,
+                                post_modify: true,
                             },
                             reloc: None,
                         });
                     }
                 }
-                // Register arguments (args 0-3).
+                // Register arguments (args 0-2). Tag the destination
+                // ureg with `0xC0 | phys` (UREG_FIXED_TAG | phys) so
+                // regalloc treats it as a fixed physical register
+                // instead of a raw vreg id; without the tag, regalloc
+                // remaps the phys number (e.g. 4) through its pinning
+                // table and the argument ends up in a different
+                // register than the callee reads from.
                 for (i, arg) in args.iter().enumerate() {
                     if i >= target::ARG_REGS.len() {
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    if *arg as u8 != phys {
-                        instrs.push(MachInstr::compute_pass(phys, *arg as u8));
-                    }
+                    instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
                 }
-                // Load address into I12 for the indirect call. Tagged
-                // with UREG_FIXED_TAG so the regalloc passes the encoding
-                // through unchanged (instead of treating 0x1C as a vreg
-                // and remapping it to a data register).
+                // Move the function address (held in a data-register
+                // vreg) into I12. `URegMove` with the src tagged as a
+                // raw vreg lets regalloc rewrite it to the physical
+                // register the fp actually ended up in; the dest is
+                // tagged fixed so I12 passes through unchanged.
                 instrs.push(MachInstr {
-                    instr: Instruction::LoadImm {
-                        ureg: target::UREG_FIXED_TAG | target::ureg_i(12),
-                        value: *addr,
+                    instr: Instruction::URegMove {
+                        dest: target::ureg_i_pre(12),
+                        src: *addr as u8,
                     },
                     reloc: None,
                 });
-                // M12 = 0 (no post-modify). M-register ureg: 0x20 + (12 - 8) = 0x24.
-                // Same tagging as for I12 above.
+                // Save caller's frame pointer into R2, set I6 = I7 so
+                // the delay-slot pushes below land at the top of the
+                // new frame. These two ureg transfers also double as
+                // the SHARC+ DAG-latch delay between writing I12 and
+                // using it as the address-generator source of the
+                // indirect branch -- without at least one cycle of
+                // separation the AG reads a stale I12 and the branch
+                // lands on whatever address I12 previously held.
                 instrs.push(MachInstr {
-                    instr: Instruction::LoadImm {
-                        ureg: target::UREG_FIXED_TAG | 0x24,
-                        value: 0,
+                    instr: Instruction::URegMove {
+                        dest: target::UREG_FIXED_TAG | target::ureg_r(2),
+                        src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
                     },
                     reloc: None,
                 });
-                // CALL (I12, M12)
+                instrs.push(MachInstr {
+                    instr: Instruction::URegMove {
+                        dest: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
+                        src: target::UREG_FIXED_TAG | target::ureg_i(target::STACK_PTR),
+                    },
+                    reloc: None,
+                });
+                // JUMP (M13, I12) (DB): delayed indirect branch; the
+                // two delay slots push R2 and the return address onto
+                // the frame stack, which is exactly what a direct
+                // CJUMP (DB) would do automatically. M13 = 0 from
+                // startup leaves the I12 post-modify a no-op.
+                // `pm_i = 4` selects I12 (DAG2 offset), `pm_m = 5`
+                // selects M13 (DAG2 offset).
                 instrs.push(MachInstr {
                     instr: Instruction::IndirectBranch {
-                        call: true,
+                        call: false,
                         cond: target::COND_TRUE,
-                        pm_i: target::INDIRECT_CALL_PMI,
-                        pm_m: target::INDIRECT_CALL_PMM,
-                        delayed: false,
+                        pm_i: 4,
+                        pm_m: 5,
+                        delayed: true,
                         compute: None,
                     },
                     reloc: None,
                 });
+                // Delay slot 1: push R2 (the saved caller frame ptr).
+                instrs.push(MachInstr {
+                    instr: Instruction::UregDagMove {
+                        pm: false,
+                        write: true,
+                        ureg: target::UREG_FIXED_TAG | target::ureg_r(2),
+                        i_reg: target::STACK_PTR,
+                        m_reg: 7, // M7 = -1
+                        cond: target::COND_TRUE,
+                        compute: None,
+                        post_modify: true,
+                    },
+                    reloc: None,
+                });
+                // Delay slot 2: push (return_label - 1). The callee's
+                // epilogue does `JUMP (M14, I12) (DB)` with M14 = +1,
+                // so the pushed value must be label-1 for control to
+                // land on the instruction immediately after the
+                // indirect branch sequence. The `.L_ret_` prefix tells
+                // emit_asm to (a) place the label at the following
+                // instruction and (b) append `-1` to the symbol in the
+                // emitted text so the linker produces the right
+                // relocation addend.
+                let ret_label_name = format!(
+                    ".L_ret_{}_indirect_{}",
+                    func_name, call_site_counter
+                );
+                call_site_counter += 1;
+                instrs.push(MachInstr {
+                    instr: Instruction::ImmStore {
+                        pm: false,
+                        i_reg: target::STACK_PTR,
+                        m_reg: 7,
+                        value: 0,
+                    },
+                    reloc: Some(Reloc {
+                        symbol: ret_label_name.clone(),
+                        kind: RelocKind::Addr24,
+                    }),
+                });
+                call_return_labels.push((instrs.len(), ret_label_name));
                 // Result in R0, via the pinned `RETURN_REG_VREG`.
                 instrs.push(MachInstr::compute_pass(
                     *dst as u8,
