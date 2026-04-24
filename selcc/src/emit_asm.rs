@@ -34,11 +34,12 @@ pub struct AsmModule {
 
 /// Emit a complete translation unit as SHARC+ assembly text.
 ///
-/// `char_size` (in bits) controls the in-memory layout of `char[]` data
-/// (string literals, char/uint8_t initializers, etc.). With `8`, four
-/// chars pack into each 32-bit word (matching the `-char-size-8`
-/// mode and what every C-side runtime built that way expects). With
-/// `32`, each char occupies its own 32-bit word.
+/// String literals and narrow-element data always land one byte per
+/// 32-bit word so the same whole-word `DM` load sequence the back end
+/// emits for stack-allocated `char[]` locals also works for pointer
+/// dereferences into rodata; the historical `char_size` knob that used
+/// to pack four bytes per word is kept in the signature for caller
+/// compatibility but no longer influences layout.
 /// Ctx view of a translation unit used to resolve struct tags and
 /// typedefs during size queries on global/static-local types.
 struct UnitTypeCtx<'a> {
@@ -65,7 +66,7 @@ impl<'a> crate::types::TypeCtx for UnitTypeCtx<'a> {
     }
 }
 
-pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
+pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> {
     let mut out = String::new();
     let unit_tctx = UnitTypeCtx {
         struct_defs: &unit.struct_defs,
@@ -377,29 +378,26 @@ pub fn emit_module(unit: &TranslationUnit, char_size: u8) -> Result<AsmModule> {
 
     // Rodata: string literals.
     //
-    // With `-char-size-8`, four chars pack into each 32-bit word
-    // (little-endian byte order, terminator included). The C runtime
-    // (printf, strlen, etc.) reads the format string one byte at a
-    // time via `*p++`; if we wrote one char per word the second byte
-    // would always be 0 and the string would terminate after the
-    // first character, silently producing no output. Wide strings
-    // (`L"..."`) are 32-bit per character irrespective of char_size.
+    // Each byte of a narrow string occupies one full 32-bit word, the
+    // same layout that stack-allocated `char[]` locals use (see the
+    // `char s[] = "..."` initialiser expansion in lower.rs).  With
+    // that matching layout, a whole-word `DM(I4, M5)` load against a
+    // `const char *p` pointer-to-literal yields the i-th byte directly
+    // (zero-extended into R) once the index has been scaled by the
+    // same `size_words * 4` stride that local char arrays use --- no
+    // byte-extract shift/mask sequence needed.  Packing four bytes per
+    // word would force the pointer path to mask off three garbage
+    // bytes on every deref.  Wide strings (`L"..."`) are already
+    // 32-bit per character.
     //
     if !all_strings.is_empty() || !all_wide_strings.is_empty() {
         out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for (i, s) in all_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".str{i}"));
             let _ = writeln!(out, ".GLOBAL {name};");
-            if char_size == 8 {
-                let mut bytes: Vec<u8> = s.as_bytes().to_vec();
-                bytes.push(0);
-                let words = pack_bytes_le(&bytes);
-                emit_var_bytes(&mut out, &name, &words);
-            } else {
-                let mut words: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
-                words.push(0);
-                emit_var_bytes(&mut out, &name, &words);
-            }
+            let mut words: Vec<u32> = s.as_bytes().iter().map(|&b| b as u32).collect();
+            words.push(0);
+            emit_var_bytes(&mut out, &name, &words);
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".wstr{i}"));
@@ -424,23 +422,6 @@ fn with_abi_suffix(name: &str) -> String {
     } else {
         format!("{name}.")
     }
-}
-
-/// Pack a byte stream into little-endian 32-bit words, zero-padding
-/// the final word if the byte count is not a multiple of 4.
-fn pack_bytes_le(bytes: &[u8]) -> Vec<u32> {
-    let n_words = bytes.len().div_ceil(4);
-    let mut out = Vec::with_capacity(n_words);
-    for chunk_start in (0..bytes.len()).step_by(4) {
-        let mut word = 0u32;
-        for j in 0..4 {
-            if let Some(&b) = bytes.get(chunk_start + j) {
-                word |= (b as u32) << (8 * j);
-            }
-        }
-        out.push(word);
-    }
-    out
 }
 
 /// Emit a `.VAR name = v0, v1, ...;` initializer line. Using `.VAR`
