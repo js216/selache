@@ -2602,7 +2602,14 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
             if let (Some(elem), Some(_)) = (l_pt, r_pt) {
                 let raw = ctx.alloc_vreg();
                 ctx.emit(IrOp::Sub(raw, l, r));
-                let size = crate::types::size_bytes_ctx(&elem, ctx).max(1);
+                // Match the stride used by `scale_index_by_elem` so
+                // that `(p + n) - p == n` even when the pointee's
+                // `size_bytes` is smaller than the one-word-per-element
+                // layout (`char` stored 1-per-word in rodata / stack
+                // arrays).
+                let bytes = crate::types::size_bytes_ctx(&elem, ctx).max(1);
+                let words4 = crate::types::size_words_ctx(&elem, ctx).max(1) * 4;
+                let size = bytes.max(words4);
                 if size == 1 {
                     ctx.emit(IrOp::Copy(dst, raw));
                 } else {
@@ -3038,12 +3045,39 @@ fn lower_float_comparison(
     Ok(dst)
 }
 
+/// For compound assignments `p += n` / `p -= n` on pointer targets,
+/// scale `n` by the pointee stride so the pointer advances by the
+/// same amount as the binary `p + n` path.
+fn maybe_scale_ptr_rhs(ctx: &mut LowerCtx, op: BinaryOp, target: &Expr,
+                       rhs: VReg) -> VReg {
+    if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+        return rhs;
+    }
+    let Some(ty) = expr_type(target, ctx) else { return rhs; };
+    let Some(pt) = pointee_type(&ty).cloned() else { return rhs; };
+    scale_index_by_elem(ctx, rhs, &pt)
+}
+
+/// Pointer arithmetic stride for `++`, `--`, `+=`, `-=` on a pointer
+/// whose type is `ty`.  Matches `scale_index_by_elem`: the larger of
+/// `sizeof(*ty)` in bytes and `size_words(*ty) * 4`, so that pointers
+/// into `char` storage (one byte per word) step by whole words.
+/// Returns 1 for non-pointer types.
+fn ptr_stride(ty: Option<&Type>, ctx: &LowerCtx) -> i64 {
+    let Some(t) = ty else { return 1; };
+    let Some(pt) = pointee_type(t) else { return 1; };
+    let bytes = crate::types::size_bytes_ctx(pt, ctx).max(1);
+    let words4 = crate::types::size_words_ctx(pt, ctx).max(1) * 4;
+    bytes.max(words4) as i64
+}
+
 fn lower_inc_dec(
     ctx: &mut LowerCtx,
     operand: &Expr,
     is_inc: bool,
     is_pre: bool,
 ) -> Result<VReg> {
+    let stride = ptr_stride(expr_type(operand, ctx).as_ref(), ctx);
     match operand {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
@@ -3065,7 +3099,7 @@ fn lower_inc_dec(
                     }
                 };
                 let one = ctx.alloc_vreg();
-                ctx.emit(IrOp::LoadImm(one, 1));
+                ctx.emit(IrOp::LoadImm(one, stride));
                 let new_val = ctx.alloc_vreg();
                 if is_inc {
                     ctx.emit(IrOp::Add(new_val, old_val, one));
@@ -3090,7 +3124,7 @@ fn lower_inc_dec(
                 let old_val = ctx.alloc_vreg();
                 ctx.emit(IrOp::ReadGlobal(old_val, name.clone()));
                 let one = ctx.alloc_vreg();
-                ctx.emit(IrOp::LoadImm(one, 1));
+                ctx.emit(IrOp::LoadImm(one, stride));
                 let new_val = ctx.alloc_vreg();
                 if is_inc {
                     ctx.emit(IrOp::Add(new_val, old_val, one));
@@ -3108,7 +3142,7 @@ fn lower_inc_dec(
             let old_val = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(old_val, addr, 0));
             let one = ctx.alloc_vreg();
-            ctx.emit(IrOp::LoadImm(one, 1));
+            ctx.emit(IrOp::LoadImm(one, stride));
             let new_val = ctx.alloc_vreg();
             if is_inc {
                 ctx.emit(IrOp::Add(new_val, old_val, one));
@@ -3192,6 +3226,7 @@ fn lower_compound_assign(
                     }
                 };
                 let rhs = lower_expr(ctx, value)?;
+                let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
                 let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
                 match storage {
                     LocalStorage::Stack(offset) => {
@@ -3210,6 +3245,7 @@ fn lower_compound_assign(
                 let lhs = ctx.alloc_vreg();
                 ctx.emit(IrOp::ReadGlobal(lhs, name.clone()));
                 let rhs = lower_expr(ctx, value)?;
+                let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
                 let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
                 ctx.emit(IrOp::StoreGlobal(result, name.clone()));
                 Ok(result)
@@ -3222,6 +3258,7 @@ fn lower_compound_assign(
             let lhs = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs = lower_expr(ctx, value)?;
+            let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
             let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
@@ -3231,6 +3268,7 @@ fn lower_compound_assign(
             let lhs = ctx.alloc_vreg();
             ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs_val = lower_expr(ctx, value)?;
+            let rhs_val = maybe_scale_ptr_rhs(ctx, op, target, rhs_val);
             let result = emit_compound_op(ctx, op, lhs, rhs_val, is_unsigned)?;
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
