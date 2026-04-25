@@ -184,7 +184,9 @@ impl<'a> Parser<'a> {
             let mut ty = if has_void { Type::Void }
                 else if has_float { Type::Float }
                 else if has_double { Type::Double }
+                else if has_char && has_unsigned { Type::Unsigned(Box::new(Type::Char)) }
                 else if has_char { Type::Char }
+                else if has_short && has_unsigned { Type::Unsigned(Box::new(Type::Short)) }
                 else if has_short { Type::Short }
                 else if long_count >= 2 && has_unsigned { Type::ULongLong }
                 else if long_count >= 2 { Type::LongLong }
