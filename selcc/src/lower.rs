@@ -3464,10 +3464,17 @@ fn lower_for(
         lower_stmt(ctx, init_stmt)?;
     }
 
+    // C99 6.8.6.2: a `continue` inside a `for` must jump to the
+    // post-expression (step), then fall through to the condition test.
+    // We therefore split the loop top from the continue target: the
+    // top label receives the back-edge after stepping, while the
+    // continue label sits just before the step expression so that
+    // `continue` runs the step like a normal iteration end.
+    let top_label = ctx.alloc_label();
     let continue_label = ctx.alloc_label();
     let break_label = ctx.alloc_label();
 
-    ctx.emit(IrOp::Label(continue_label));
+    ctx.emit(IrOp::Label(top_label));
     if let Some(cond_expr) = cond {
         let cond_val = lower_expr(ctx, cond_expr)?;
         let zero = ctx.alloc_vreg();
@@ -3488,20 +3495,24 @@ fn lower_for(
     ctx.restore_scope(snap_body);
     ctx.loop_stack.pop();
 
+    ctx.emit(IrOp::Label(continue_label));
     if let Some(step_expr) = step {
         lower_expr(ctx, step_expr)?;
     }
-    ctx.emit(IrOp::Branch(continue_label));
+    ctx.emit(IrOp::Branch(top_label));
     ctx.emit(IrOp::Label(break_label));
     ctx.restore_scope(snap_for);
     Ok(())
 }
 
 fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> {
+    // C99 6.8.6.2: `continue` in a do-while must jump to the
+    // controlling condition, not back to the top of the body.
+    let top_label = ctx.alloc_label();
     let continue_label = ctx.alloc_label();
     let break_label = ctx.alloc_label();
 
-    ctx.emit(IrOp::Label(continue_label));
+    ctx.emit(IrOp::Label(top_label));
 
     ctx.loop_stack.push(LoopContext {
         break_label,
@@ -3515,11 +3526,12 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
     ctx.restore_scope(snap);
     ctx.loop_stack.pop();
 
+    ctx.emit(IrOp::Label(continue_label));
     let cond_val = lower_expr(ctx, cond)?;
     let zero = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(zero, 0));
     ctx.emit(IrOp::Cmp(cond_val, zero));
-    ctx.emit(IrOp::BranchCond(Cond::NonZero, continue_label));
+    ctx.emit(IrOp::BranchCond(Cond::NonZero, top_label));
     ctx.emit(IrOp::Label(break_label));
     Ok(())
 }
