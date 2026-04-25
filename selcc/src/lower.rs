@@ -4099,6 +4099,30 @@ fn lower_aggregate_init(
         // For aggregates the deepest slot holds word 0; element at word
         // offset `w` sits at `slot_base + num_words - 1 - w`.
         let elem_slot = slot_base + num_words - 1 - word_off;
+        // Nested aggregate element with a brace-enclosed initializer
+        // (e.g. `int m[2][3] = { {1,2,3}, {4,5,6} }` or an array of
+        // structs).  Recurse so the inner brace gets its own cursor /
+        // designator handling rather than collapsing to a single
+        // scalar store.
+        if let (Expr::InitList(inner_items), Type::Array(elem_ty, _)) =
+            (inner_expr, resolved_ty.unqualified())
+        {
+            let resolved_elem = resolve_type(elem_ty, ctx);
+            let elem_is_aggregate = matches!(
+                resolved_elem.unqualified(),
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+            );
+            if elem_is_aggregate {
+                let inner_words =
+                    crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
+                let inner_base = elem_slot + 1 - inner_words;
+                lower_aggregate_init(
+                    ctx, inner_items, elem_ty, inner_base, inner_words, true,
+                )?;
+                cursor = next_cursor;
+                continue;
+            }
+        }
         let val = lower_expr(ctx, inner_expr)?;
         ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
         cursor = next_cursor;
@@ -4233,6 +4257,36 @@ fn lower_struct_init(
             continue;
         }
         let elem_slot = slot_base + num_words - 1 - word_off;
+        // Nested aggregate field with a brace-enclosed initializer:
+        // `.in = { ... }` where `in` is itself a struct / array / union.
+        // Recurse so the inner brace runs through its own
+        // designator/cursor logic (with its own zero-fill).  Without
+        // this, `lower_expr` would attempt to evaluate the InitList as
+        // a scalar value and store a single garbage word, dropping the
+        // sibling fields entirely.
+        if let Expr::InitList(inner_items) = inner {
+            let resolved_fty = resolve_type(fty, ctx);
+            let fty_is_aggregate = matches!(
+                resolved_fty.unqualified(),
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+            );
+            if fty_is_aggregate {
+                let inner_words =
+                    crate::types::size_words_ctx(&resolved_fty, ctx).max(1) as u32;
+                // Inner's deepest slot must coincide with the outer
+                // field's deepest slot (`elem_slot`).  With the inner
+                // call laying out word `i` at
+                // `inner_base + inner_words - 1 - i`, equating its
+                // word-0 slot to `elem_slot` gives
+                // `inner_base = elem_slot - inner_words + 1`.
+                let inner_base = elem_slot + 1 - inner_words;
+                lower_aggregate_init(
+                    ctx, inner_items, fty, inner_base, inner_words, true,
+                )?;
+                cursor = fidx + 1;
+                continue;
+            }
+        }
         let val = lower_expr(ctx, inner)?;
         let fbytes = crate::types::size_bytes_ctx(fty, ctx);
         if fbytes == 1 {
