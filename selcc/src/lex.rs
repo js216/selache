@@ -532,6 +532,18 @@ impl<'a> Lexer<'a> {
 
     fn read_escape_char(&mut self, line: u32, col: u32) -> Result<char, Error> {
         match self.peek() {
+            Some(b'a') => {
+                self.advance();
+                Ok('\x07')
+            }
+            Some(b'b') => {
+                self.advance();
+                Ok('\x08')
+            }
+            Some(b'f') => {
+                self.advance();
+                Ok('\x0c')
+            }
             Some(b'n') => {
                 self.advance();
                 Ok('\n')
@@ -544,6 +556,10 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Ok('\r')
             }
+            Some(b'v') => {
+                self.advance();
+                Ok('\x0b')
+            }
             Some(b'\\') => {
                 self.advance();
                 Ok('\\')
@@ -555,6 +571,10 @@ impl<'a> Lexer<'a> {
             Some(b'"') => {
                 self.advance();
                 Ok('"')
+            }
+            Some(b'?') => {
+                self.advance();
+                Ok('?')
             }
             Some(b'0'..=b'7') => {
                 let mut val: u8 = 0;
