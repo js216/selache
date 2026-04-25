@@ -2443,6 +2443,17 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     return Ok(emit_byte_load(ctx, ptr, signed));
                 }
             }
+            // C99 6.3.2.1p3: when the pointee is itself an aggregate
+            // (array / struct / union) the "value" of `*ptr` in an
+            // rvalue context is its address, not a loaded scalar word.
+            // For `int (*pa)[3]`, `*pa` has type `int[3]`; emitting a
+            // scalar Load here would read `arr[0]` and then any outer
+            // `[i]` would treat that integer as the array base.
+            if let Some(ref pt) = pointee {
+                if is_aggregate_type(pt, ctx) {
+                    return Ok(ptr);
+                }
+            }
             // A float pointee must land in an F-register so downstream
             // casts (e.g. `(int)*p`) see a float source and emit the
             // float->int conversion rather than a silent bit-preserving
