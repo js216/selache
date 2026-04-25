@@ -4114,8 +4114,18 @@ fn lower_aggregate_init(
         // structs).  Recurse so the inner brace gets its own cursor /
         // designator handling rather than collapsing to a single
         // scalar store.
-        if let (Expr::InitList(inner_items), Type::Array(elem_ty, _)) =
-            (inner_expr, resolved_ty.unqualified())
+        // Treat a compound literal `(T){...}` the same as a bare
+        // `{...}` initializer in this position (C99 6.5.2.5).
+        let nested_items = match inner_expr {
+            Expr::InitList(items) => Some(items.as_slice()),
+            Expr::Cast(_, boxed) => match boxed.as_ref() {
+                Expr::InitList(items) => Some(items.as_slice()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let (Some(inner_items), Type::Array(elem_ty, _)) =
+            (nested_items, resolved_ty.unqualified())
         {
             let resolved_elem = resolve_type(elem_ty, ctx);
             let elem_is_aggregate = matches!(
@@ -4273,8 +4283,20 @@ fn lower_struct_init(
         // designator/cursor logic (with its own zero-fill).  Without
         // this, `lower_expr` would attempt to evaluate the InitList as
         // a scalar value and store a single garbage word, dropping the
-        // sibling fields entirely.
-        if let Expr::InitList(inner_items) = inner {
+        // sibling fields entirely.  A nested compound literal
+        // `(type){...}` for the same field is equivalent at the
+        // initializer level (C99 6.5.2.5 makes `{...}` and
+        // `(T){...}` interchangeable in initializer context); peel
+        // its `Expr::Cast` wrapper so the same recursion applies.
+        let init_list = match inner {
+            Expr::InitList(items) => Some(items.as_slice()),
+            Expr::Cast(_, boxed) => match boxed.as_ref() {
+                Expr::InitList(items) => Some(items.as_slice()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(inner_items) = init_list {
             let resolved_fty = resolve_type(fty, ctx);
             let fty_is_aggregate = matches!(
                 resolved_fty.unqualified(),
@@ -4376,19 +4398,30 @@ fn lower_compound_literal(
 
     let is_aggregate = matches!(resolved_ty,
         Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
+    let is_array = matches!(resolved_ty, Type::Array(..));
 
     lower_aggregate_init(ctx, items, &resolved_ty, slot, num_words, is_aggregate)?;
 
-    if is_aggregate {
-        // Array / struct / union compound literals decay (or are used as
-        // anonymous storage) via their base address.  For aggregates the
-        // init helper places element / field 0 at the deepest slot, so
-        // the correct base for indexing upward is `slot + num_words - 1`.
+    if is_array {
+        // C99 6.3.2.1: an array rvalue decays to a pointer to its first
+        // element.  The init helper places element 0 at the deepest slot
+        // so callers can walk upward through valid storage on a
+        // downward-growing stack; return that slot's address.
         let base_slot = slot + num_words - 1;
         let dst = ctx.alloc_vreg_ptr();
         ctx.emit(IrOp::FrameAddr(dst, base_slot as i32));
         return Ok(dst);
     }
+
+    // Struct / union compound-literal rvalues do NOT decay: by-value
+    // callers (function-argument passing, struct return, struct
+    // assignment) detect the struct type and route through
+    // `lower_struct_expr_addr` which has its own `Expr::Cast(_, InitList)`
+    // arm.  If `lower_expr` is reached directly for a struct compound
+    // literal (e.g. evaluated for side effects) all that matters is that
+    // the initializer stores have run; the returned scalar is unused
+    // beyond satisfying the VReg contract, so load word 0 as a
+    // placeholder.
 
     // Scalar compound literal: return the loaded value.
     let dst = if resolved_ty.is_float() {
@@ -4535,6 +4568,15 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
     match expr {
         Expr::Ident(_) | Expr::Member(..) | Expr::Arrow(..)
         | Expr::Deref(..) | Expr::Index(..) => {
+            lower_lvalue_addr(ctx, expr)
+        }
+        // Struct / union compound literal: `(struct foo){...}`.  The
+        // lvalue-addr arm at `lower_lvalue_addr` already allocates frame
+        // storage, runs `lower_aggregate_init`, and returns the address
+        // of the deepest slot (where field 0 lives on a downward-growing
+        // stack).  Reuse it so by-value callers get a real struct-base
+        // address rather than the truncated `lower_expr` rvalue.
+        Expr::Cast(_, inner) if matches!(inner.as_ref(), Expr::InitList(_)) => {
             lower_lvalue_addr(ctx, expr)
         }
         // Call returning a struct by value. The ordinary `lower_expr`
