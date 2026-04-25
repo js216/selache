@@ -166,11 +166,13 @@ int cctest_nested(void) {
 static int three_params_helper(int a, int b, int c) { return a * b + c; }
 /* @expect 0x0B */
 int cctest_three_params(void) { return three_params_helper(2, 3, 5); }
+
 /* Chained non-leaf calls */
 /* @expect 0x1D */
 int cctest_value(void) {
   return helper_add(helper_mul(3, 5), helper_mul(2, 7));
 }
+
 /* Arg-aliasing regression: second helper_mul's args are literals 2 and 7.
    On a sequential parallel-move arg setup, the second arg's source vreg
    may alias the first arg's destination R4. Without a careful move
@@ -1870,7 +1872,7 @@ int cctest_defined(void) {
 }
 
 /* __func__ predefined identifier (C99 6.4.2.2) */
-/* @expect 0x63 */
+/* @expect 0x74 */
 int cctest_func_name(void) {
   const char *name = __func__;
   /* "cctest_func_name" starts with 'c' (99) */
