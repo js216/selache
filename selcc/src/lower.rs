@@ -2642,26 +2642,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
 
             // C99 6.3.1.2: conversion to _Bool: any scalar != 0 becomes 1, else 0
             if *ty == Type::Bool {
-                let zero = ctx.alloc_vreg();
-                if src_is_float {
-                    let fzero = ctx.alloc_vreg_float();
-                    ctx.emit(IrOp::LoadImm(zero, 0));
-                    ctx.emit(IrOp::IntToFloat(fzero, zero));
-                    ctx.emit(IrOp::FCmp(val, fzero));
-                } else {
-                    ctx.emit(IrOp::LoadImm(zero, 0));
-                    ctx.emit(IrOp::Cmp(val, zero));
-                }
-                let dst = ctx.alloc_vreg();
-                let label_true = ctx.alloc_label();
-                let label_end = ctx.alloc_label();
-                ctx.emit(IrOp::BranchCond(Cond::Ne, label_true));
-                ctx.emit(IrOp::LoadImm(dst, 0));
-                ctx.emit(IrOp::Branch(label_end));
-                ctx.emit(IrOp::Label(label_true));
-                ctx.emit(IrOp::LoadImm(dst, 1));
-                ctx.emit(IrOp::Label(label_end));
-                return Ok(dst);
+                return Ok(lower_to_bool(ctx, val));
             }
 
             // 64-bit -> 32-bit truncation.
@@ -4803,6 +4784,12 @@ fn expr_function_ptr_ret_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
 /// Insert an implicit float-to-int or int-to-float conversion if the source
 /// vreg type does not match the destination type.
 fn coerce_vreg(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
+    // C99 6.3.1.2: any scalar conversion to _Bool yields 0 or 1.
+    // Without this, `_Bool b = 42;` would store the raw 42 byte and a
+    // later `b == 1` test would fail.
+    if *dst_ty == Type::Bool {
+        return lower_to_bool(ctx, val);
+    }
     let src_is_float = ctx.is_float_vreg(val);
     let dst_is_float = dst_ty.is_float();
     if src_is_float && !dst_is_float {
@@ -4816,6 +4803,32 @@ fn coerce_vreg(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
     } else {
         val
     }
+}
+
+/// C99 6.3.1.2 conversion to `_Bool`: any nonzero scalar becomes 1, zero
+/// becomes 0. Handles both integer and float source vregs.
+fn lower_to_bool(ctx: &mut LowerCtx, val: VReg) -> VReg {
+    let src_is_float = ctx.is_float_vreg(val);
+    let zero = ctx.alloc_vreg();
+    if src_is_float {
+        let fzero = ctx.alloc_vreg_float();
+        ctx.emit(IrOp::LoadImm(zero, 0));
+        ctx.emit(IrOp::IntToFloat(fzero, zero));
+        ctx.emit(IrOp::FCmp(val, fzero));
+    } else {
+        ctx.emit(IrOp::LoadImm(zero, 0));
+        ctx.emit(IrOp::Cmp(val, zero));
+    }
+    let dst = ctx.alloc_vreg();
+    let label_true = ctx.alloc_label();
+    let label_end = ctx.alloc_label();
+    ctx.emit(IrOp::BranchCond(Cond::Ne, label_true));
+    ctx.emit(IrOp::LoadImm(dst, 0));
+    ctx.emit(IrOp::Branch(label_end));
+    ctx.emit(IrOp::Label(label_true));
+    ctx.emit(IrOp::LoadImm(dst, 1));
+    ctx.emit(IrOp::Label(label_end));
+    dst
 }
 
 #[cfg(test)]
