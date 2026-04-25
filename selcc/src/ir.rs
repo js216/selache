@@ -182,6 +182,11 @@ pub enum IrOp {
     /// required because the ordinary `Load(dst, 0, slot)` path maps
     /// `slot` into the NEGATIVE-offset local-slot region below `I6`.
     LoadStackArg(VReg, u32),
+    /// dst = address of caller-pushed stack argument at index `k`.
+    /// Computes `I6 + k + 1` without dereferencing. Used to anchor a
+    /// `va_list` at the first variadic argument (which lives one slot
+    /// past the last named argument in the caller's pushed-args area).
+    StackArgAddr(VReg, u32),
 
     // ---- 64-bit integer operations (hi/lo register pairs) ----
     // Each 64-bit value occupies two consecutive vregs: (lo, hi).

@@ -113,6 +113,12 @@ struct LowerCtx {
     /// byte-by-byte copy into `*(DM(-struct_ret_slot, I6))` followed by
     /// `R0 = <that pointer>`.
     struct_ret_slot: Option<u32>,
+    /// Number of caller-stack slots occupied by *named* arguments in the
+    /// current variadic function. Set by the variadic prologue; consumed
+    /// by `__builtin_va_start_sel`, which yields the address of the first
+    /// variadic argument (`I6 + va_named_slot_count + 1`). `None` outside
+    /// variadic functions.
+    va_named_slot_count: Option<u32>,
 }
 
 /// Snapshot of the variable-name binding state at block-scope entry.
@@ -173,6 +179,7 @@ impl LowerCtx {
             switch_label_idx: 0,
             function_return_types: HashMap::new(),
             struct_ret_slot: None,
+            va_named_slot_count: None,
         }
     }
 
@@ -535,44 +542,38 @@ pub fn lower_function_with_known(
         }
     }
 
-    // Variadic function prologue: spill all argument registers (R0-R3) to
-    // contiguous stack slots so that va_start/va_arg can walk the parameter
-    // area with simple pointer arithmetic. The layout is:
-    //   slot 0 = arg 0 (R0), slot 1 = arg 1 (R1), ..., slot 3 = arg 3 (R3)
-    // Named parameters are mapped to their respective slots. Variadic args
-    // passed in registers (beyond the named params) are also captured.
+    // Variadic function prologue. The SHARC+ caller pushes *every*
+    // argument (including the named ones) onto the stack via post-modify
+    // `DM(I7, M7) = Rn` — the ARG_REGS path is bypassed entirely so that
+    // `va_arg` can walk a contiguous parameter area regardless of how
+    // many ARG_REGS the caller would normally use. Each named-arg slot
+    // therefore lives at `DM(I6 + i + 1)` for i = 0..named_count-1, with
+    // the first variadic arg one slot past that at
+    // `DM(I6 + named_count + 1)`.
+    //
+    // Bind every named parameter to a local frame slot whose initial
+    // value comes from a `LoadStackArg(i)`. The local-copy step is
+    // mandatory: the caller's pushed-arg region lies above I6 (positive
+    // offsets) and is unreachable through the negative-offset
+    // `DM(-N, I6)` form that the rest of the body uses for variable
+    // access. Record the named-slot count so `__builtin_va_start_sel`
+    // can lift the address of the first variadic arg.
     if func.is_variadic {
-        let num_reg_args = target::ARG_REGS.len() as u32;
-        let va_base = ctx.frame_size;
-        ctx.frame_size += num_reg_args;
-
-        // Spill all 4 argument registers to contiguous stack slots.
-        for reg_idx in 0..num_reg_args {
-            let tmp = ctx.alloc_vreg();
-            ctx.emit(IrOp::Copy(tmp, reg_idx as VReg));
-            ctx.emit(IrOp::Store(tmp, 0, (va_base + reg_idx) as i32));
-        }
-
-        // Bind named parameters to their slots in the contiguous area.
+        let mut named_slot_count: u32 = 0;
         for (i, (name, ty)) in func.params.iter().enumerate() {
             ctx.local_types.insert(name.clone(), ty.clone());
-            if i < num_reg_args as usize {
-                ctx.locals.insert(name.clone(), LocalStorage::Stack(va_base + i as u32));
-            } else {
-                // Named params beyond register count: on caller's stack.
-                // Copy to a local slot so address-of works.
-                let stack_offset = (i - num_reg_args as usize) as u32;
-                let slot_offset = ctx.alloc_stack_slot();
-                let param_vreg = ctx.alloc_vreg();
-                let is_float_param = ty.is_float();
-                if is_float_param {
-                    ctx.vreg_is_float.insert(param_vreg, true);
-                }
-                ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
-                ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
-                ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
+            let is_float_param = ty.is_float();
+            let slot_offset = ctx.alloc_stack_slot();
+            let param_vreg = ctx.alloc_vreg();
+            if is_float_param {
+                ctx.vreg_is_float.insert(param_vreg, true);
             }
+            ctx.emit(IrOp::LoadStackArg(param_vreg, i as u32));
+            ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
+            ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
+            named_slot_count += 1;
         }
+        ctx.va_named_slot_count = Some(named_slot_count);
     }
 
     // Bind parameters to virtual registers pre-loaded from the ABI
@@ -801,12 +802,18 @@ pub fn lower_function_with_known(
         ctx.emit(IrOp::Ret(None));
     }
 
+    // Variadic SHARC+ ABI passes *all* arguments on the caller's stack,
+    // so no parameter vregs need pinning to `ARG_REGS`. Reporting zero
+    // arg slots keeps `emit_asm`'s `num_params = min(arg_slots,
+    // ARG_REGS.len())` from forcing unrelated vregs onto R4/R8/R12 and
+    // colliding with regalloc.
+    let reported_arg_slots = if func.is_variadic { 0 } else { total_slots };
     Ok(LowerResult {
         ops: ctx.ops,
         strings: ctx.strings,
         wide_strings: ctx.wide_strings,
         static_locals: ctx.static_locals,
-        arg_slots: total_slots,
+        arg_slots: reported_arg_slots,
     })
 }
 
@@ -1348,6 +1355,25 @@ fn strip_to_pointer(ty: &Type) -> Option<&Type> {
 /// the tail of `arr[0]` (returning whatever was last stored there).
 fn pointee_type(ty: &Type) -> Option<&Type> {
     match ty.unqualified() {
+        Type::Pointer(inner) | Type::Array(inner, _) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Resolve typedefs against `ctx` and then ask for the pointee. Pointer
+/// arithmetic (`p + n`, `p++`, etc.) on a typedef-named pointer type
+/// (e.g. `va_list` -> `int *`) needs the unwrapped form to compute the
+/// correct stride; the bare `pointee_type` cannot see through a
+/// `Type::Typedef` because it has no resolution context.
+fn pointee_type_resolved<'a>(ty: &'a Type, ctx: &'a LowerCtx) -> Option<&'a Type> {
+    let mut cur = ty.unqualified();
+    while let Type::Typedef(name) = cur {
+        match ctx.resolve_typedef(name) {
+            Some(target) => cur = target.unqualified(),
+            None => return None,
+        }
+    }
+    match cur {
         Type::Pointer(inner) | Type::Array(inner, _) => Some(inner),
         _ => None,
     }
@@ -2193,6 +2219,22 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::Binary { op, lhs, rhs } => lower_binary(ctx, *op, lhs, rhs),
         Expr::Call { name, args } => {
+            // Recognised compiler builtins: lowered inline rather than
+            // emitted as real call instructions.
+            if name == "__builtin_va_start_sel" {
+                let named = ctx.va_named_slot_count.ok_or_else(|| Error::Compile {
+                    msg: "__builtin_va_start_sel called outside a variadic function"
+                        .into(),
+                })?;
+                if !args.is_empty() {
+                    return Err(Error::Compile {
+                        msg: "__builtin_va_start_sel takes no arguments".into(),
+                    });
+                }
+                let dst = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::StackArgAddr(dst, named));
+                return Ok(dst);
+            }
             // Reject implicit function declarations (C99 requirement).
             // Only checked when known_functions is populated (production builds).
             if !ctx.known_functions.is_empty()
@@ -3621,7 +3663,7 @@ fn maybe_scale_ptr_rhs(ctx: &mut LowerCtx, op: BinaryOp, target: &Expr,
 /// Returns 1 for non-pointer types.
 fn ptr_stride(ty: Option<&Type>, ctx: &LowerCtx) -> i64 {
     let Some(t) = ty else { return 1; };
-    let Some(pt) = pointee_type(t) else { return 1; };
+    let Some(pt) = pointee_type_resolved(t, ctx) else { return 1; };
     crate::types::size_bytes_ctx(pt, ctx).max(1) as i64
 }
 
@@ -5313,20 +5355,25 @@ mod tests {
     }
 
     #[test]
-    fn lower_variadic_spills_all_arg_regs() {
-        // A variadic function should spill all 4 argument registers to
-        // contiguous stack slots, even if there's only 1 named param.
+    fn lower_variadic_loads_named_args_from_caller_stack() {
+        // SHARC+ variadic ABI passes every argument (including the named
+        // ones) on the caller's stack, so the variadic prologue must
+        // load the named params from `LoadStackArg(i)` and copy them to
+        // local frame slots — not spill ARG_REGS that the caller never
+        // populated.
         let src = "int sum(int count, ...) { return count; }";
         let unit = parse::parse(src).unwrap();
         let func = &unit.functions[0];
         assert!(func.is_variadic);
         let ops = lower_function(func, &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
-        // Should have 3 Copy + Store pairs for spilling the 3 arg regs
-        // (R4, R8, R12). The 4th+ args are already on the stack.
-        let copy_count = ops.iter().filter(|op| matches!(op, IrOp::Copy(..))).count();
-        assert!(copy_count >= 3, "expected at least 3 Copy ops for arg reg spill, got {copy_count}");
+        let stack_arg_loads = ops.iter()
+            .filter(|op| matches!(op, IrOp::LoadStackArg(..)))
+            .count();
+        assert!(stack_arg_loads >= 1,
+            "expected at least 1 LoadStackArg for the named param, got {stack_arg_loads}");
         let store_count = ops.iter().filter(|op| matches!(op, IrOp::Store(..))).count();
-        assert!(store_count >= 3, "expected at least 3 Store ops for arg reg spill, got {store_count}");
+        assert!(store_count >= 1,
+            "expected at least 1 Store to materialise the named param locally, got {store_count}");
     }
 
     #[test]

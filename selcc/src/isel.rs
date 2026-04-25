@@ -1654,6 +1654,45 @@ pub fn select_with_name(
                 }
             }
 
+            IrOp::StackArgAddr(dst, k) => {
+                // Compute &caller_stack_arg[k] = I6 + k + 1 into `dst`.
+                // Same `I6 + k + 1` arithmetic as `LoadStackArg`, but
+                // produces the address rather than dereferencing it.
+                // Used by `__builtin_va_start_sel` to anchor a `va_list`
+                // at the first variadic argument, which lives just past
+                // the last named-arg slot in the caller's pushed-args
+                // region.
+                //
+                // Route through SCRATCH_I so `adjust_frame_offsets` does
+                // not rewrite the positive offset into a frame-spill
+                // negative.
+                let offset = (*k as i32) + 1;
+                instrs.push(MachInstr {
+                    instr: Instruction::URegMove {
+                        dest: target::ureg_i_pre(target::SCRATCH_I),
+                        src: target::ureg_i_pre(target::FRAME_PTR),
+                    },
+                    reloc: None,
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::Modify {
+                        i_reg: target::SCRATCH_I,
+                        value: offset,
+                        width: MemWidth::Nw,
+                        bitrev: false,
+                    },
+                    reloc: None,
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::UregTransfer {
+                        src_ureg: target::ureg_i_pre(target::SCRATCH_I),
+                        dst_ureg: *dst as u8,
+                        compute: None,
+                    },
+                    reloc: None,
+                });
+            }
+
             IrOp::LoadStackArg(dst, k) => {
                 // Caller-pushed stack argument `k` lives at DM(I6 + k + 1):
                 // the caller pushes args via post-modify `DM(I7, M7) = Rn`

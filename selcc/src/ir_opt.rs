@@ -812,6 +812,7 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::StackAlloc(d, _)
         | IrOp::FrameAddr(d, _)
         | IrOp::LoadStackArg(d, _)
+        | IrOp::StackArgAddr(d, _)
         | IrOp::LoadStructRetPtr(d) => Some(*d),
 
         IrOp::Cmp(..)
@@ -843,6 +844,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::StackSave(_)
         | IrOp::FrameAddr(..)
         | IrOp::LoadStackArg(..)
+        | IrOp::StackArgAddr(..)
         | IrOp::Nop => {
             Vec::new()
         }
