@@ -1930,7 +1930,17 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         // Compound literal: (type){init} — allocate stack storage and
         // return its address.
         Expr::Cast(ty, inner) if matches!(inner.as_ref(), Expr::InitList(_)) => {
+            // C99 6.7.8p22: an array of unknown size in a compound literal
+            // takes its size from the initializer list.
+            let init_len = match inner.as_ref() {
+                Expr::InitList(items) => items.len(),
+                _ => 0,
+            };
             let resolved_ty = resolve_type(ty, ctx);
+            let resolved_ty = match resolved_ty {
+                Type::Array(elem, None) => Type::Array(elem, Some(init_len)),
+                other => other,
+            };
             let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1) as u32;
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
@@ -4340,57 +4350,47 @@ fn strip_designator(expr: &Expr) -> &Expr {
 
 /// Lower a C99 compound literal: `(type){init-list}`.
 ///
-/// Allocates a temporary stack slot, initializes it from the init list,
-/// and returns the first word as a vreg.  For scalar types (int, float,
-/// pointer) the value is loaded back; for aggregates (struct, union,
-/// array) the slot acts as anonymous storage that can be addressed.
+/// Allocates a temporary stack slot, initializes it via the shared
+/// `lower_aggregate_init` path (honouring designators, zero-fill, and the
+/// deepest-slot-first layout aggregates require on a downward-growing
+/// stack), then returns an rvalue appropriate for the type: aggregates
+/// (array / struct / union) decay to the base address of the storage;
+/// scalars are loaded back into a vreg.
 fn lower_compound_literal(
     ctx: &mut LowerCtx,
     ty: &Type,
     items: &[Expr],
 ) -> Result<VReg> {
+    // C99 6.7.8p22: an array of unknown size in a compound literal takes
+    // its size from the initializer list.  Re-form the type as a sized
+    // array before we compute its word count, or the unsized form reports
+    // size 0 and we truncate storage to a single word.
     let resolved_ty = resolve_type(ty, ctx);
+    let resolved_ty = match resolved_ty {
+        Type::Array(elem, None) => Type::Array(elem, Some(items.len())),
+        other => other,
+    };
     let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1) as u32;
     let slot = ctx.frame_size;
     ctx.frame_size += num_words;
 
-    // Initialize fields from the init list.
-    for (i, item) in items.iter().enumerate() {
-        if i as u32 >= num_words {
-            break;
-        }
-        // Handle designated initializers: .field = value
-        let item_expr = match item {
-            Expr::DesignatedInit { field, value } => {
-                if let Some(fields) = resolve_struct_fields(&resolved_ty, ctx) {
-                    if let Some((byte_off, _)) = struct_field_offset(fields, field, ctx) {
-                        // `struct_field_offset` returns a byte offset;
-                        // stack slots are word-sized, so convert before
-                        // adding to the compound-literal base slot.
-                        let word_off = byte_off / 4;
-                        let val = lower_expr(ctx, value)?;
-                        ctx.emit(IrOp::Store(val, 0, (slot + word_off) as i32));
-                        continue;
-                    }
-                }
-                value.as_ref()
-            }
-            Expr::ArrayDesignator { index, value } => {
-                let idx = match index.as_ref() {
-                    Expr::IntLit(v, _) => *v as u32,
-                    _ => 0,
-                };
-                let val = lower_expr(ctx, value)?;
-                ctx.emit(IrOp::Store(val, 0, (slot + idx) as i32));
-                continue;
-            }
-            other => other,
-        };
-        let val = lower_expr(ctx, item_expr)?;
-        ctx.emit(IrOp::Store(val, 0, (slot + i as u32) as i32));
+    let is_aggregate = matches!(resolved_ty,
+        Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
+
+    lower_aggregate_init(ctx, items, &resolved_ty, slot, num_words, is_aggregate)?;
+
+    if is_aggregate {
+        // Array / struct / union compound literals decay (or are used as
+        // anonymous storage) via their base address.  For aggregates the
+        // init helper places element / field 0 at the deepest slot, so
+        // the correct base for indexing upward is `slot + num_words - 1`.
+        let base_slot = slot + num_words - 1;
+        let dst = ctx.alloc_vreg_ptr();
+        ctx.emit(IrOp::FrameAddr(dst, base_slot as i32));
+        return Ok(dst);
     }
 
-    // Return the value: load the first word.
+    // Scalar compound literal: return the loaded value.
     let dst = if resolved_ty.is_float() {
         ctx.alloc_vreg_float()
     } else {
