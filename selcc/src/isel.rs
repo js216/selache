@@ -1322,21 +1322,30 @@ pub fn select_with_name(
             IrOp::FDiv(dst, lhs, rhs) => {
                 // Inline single-precision float divide via RECIPS
                 // (reciprocal seed) plus two Newton-Raphson refinement
-                // iterations, then a final multiply by the numerator.
-                //
-                // The sequence is the textbook iterative divider for
-                // single-precision IEEE floats on a machine with a
-                // reciprocal-seed instruction:
+                // iterations, an initial-quotient multiply, and a
+                // Markstein residual-correction step that yields a
+                // correctly-rounded single-precision quotient.
                 //
                 //     y_0 = RECIPS(b)              // ~8-bit accuracy
                 //     y_1 = y_0 * (2.0 - b*y_0)    // ~16-bit
-                //     y_2 = y_1 * (2.0 - b*y_1)    // ~24-bit (full)
-                //     q   = a * y_2
+                //     y_2 = y_1 * (2.0 - b*y_1)    // ~22-24-bit
+                //     q_0 = a * y_2                // initial quotient
+                //     r   = a - b * q_0            // residual
+                //     q   = q_0 + r * y_2          // Markstein correction
                 //
-                // Two iterations are sufficient to fill a 24-bit IEEE
-                // single-precision mantissa from an 8-bit seed because
-                // Newton-Raphson for 1/x converges quadratically
-                // (doubles the number of good bits per iteration).
+                // Two Newton iterations from an 8-bit RECIPS seed do
+                // not reliably saturate the 24-bit mantissa: each step
+                // rounds back to single precision, and the worst-case
+                // error in y_2 is a few ulps of 1/b. For a boundary
+                // case like 100000.0 / 1000.0 the un-corrected product
+                // a*y_2 can fall just below 100.0 and TRUNC rounds it
+                // to 99 instead of the mathematically correct 100.
+                //
+                // The Markstein step computes the residual r = a - b*q_0
+                // (which captures the rounding error of a*y_2) and
+                // adds r*y_2 to fold it back in. Provided y_2 is
+                // accurate to within 1 ulp of 1/b, the corrected
+                // quotient is the IEEE-correctly-rounded a/b.
                 //
                 // This lowering intentionally does not handle the
                 // full set of IEEE edge cases (denormals, signed zero,
@@ -1411,11 +1420,47 @@ pub fn select_with_name(
                     },
                     reloc: None,
                 });
-                // F0 = F0 * F3  (final quotient = numerator * (1/denom)).
+                // F5 = F0  (save numerator a; the next FMul clobbers F0).
+                instrs.push(MachInstr::compute_pass(5, 0));
+                // F0 = F0 * F3  (initial quotient q_0 = a * y_2).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Mul(MulOp::FMul { rn: 0, rx: 0, ry: 3 }),
+                    },
+                    reloc: None,
+                });
+                // Markstein residual correction: r = a - b*q_0,
+                //                                q = q_0 + r * y_2.
+                // F4 = F1 * F0  (b * q_0).
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 1, ry: 0 }),
+                    },
+                    reloc: None,
+                });
+                // F4 = F5 - F4  (residual r = a - b*q_0).
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Falu(FaluOp::Sub { rn: 4, rx: 5, ry: 4 }),
+                    },
+                    reloc: None,
+                });
+                // F4 = F4 * F3  (r * y_2).
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 4, ry: 3 }),
+                    },
+                    reloc: None,
+                });
+                // F0 = F0 + F4  (corrected quotient).
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Falu(FaluOp::Add { rn: 0, rx: 0, ry: 4 }),
                     },
                     reloc: None,
                 });
