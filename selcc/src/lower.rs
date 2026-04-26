@@ -1779,6 +1779,23 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         Expr::IntLit(val, suffix) => Some(int_literal_type(*val, *suffix)),
         Expr::CharLit(_) => Some(Type::Int),
         Expr::FloatLit(_) => Some(Type::Float),
+        // C99 6.4.5: a narrow string literal has type `char[N+1]` where
+        // N is the byte length of the encoded sequence; the trailing
+        // NUL accounts for the +1. C99 6.5.3.4 then makes
+        // `sizeof("hello")` evaluate to the array byte size (6), not
+        // the pointer size that would result from array-to-pointer
+        // decay.
+        Expr::StringLit(s) => Some(Type::Array(
+            Box::new(Type::Char),
+            Some(s.len() + 1),
+        )),
+        // Wide string literal: `wchar_t[N+1]`. wchar_t is 32-bit on
+        // SHARC and we model it as `Int` here (matches the wide-string
+        // lowering elsewhere in this file).
+        Expr::WideStringLit(chars) => Some(Type::Array(
+            Box::new(Type::Int),
+            Some(chars.len() + 1),
+        )),
         Expr::Ident(name) => ctx.local_types.get(name).cloned()
             .or_else(|| ctx.globals.get(name).cloned()),
         Expr::Cast(ty, _) => Some(ty.clone()),
