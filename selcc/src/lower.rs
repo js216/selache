@@ -1379,6 +1379,24 @@ fn pointee_type_resolved<'a>(ty: &'a Type, ctx: &'a LowerCtx) -> Option<&'a Type
     }
 }
 
+/// Walk through any `Type::Typedef` indirections, returning a clone of the
+/// underlying canonical type. Used by `expr_type` so that downstream
+/// pattern matches on `Type::Pointer` / `Type::Array` see through a
+/// `typedef int (*P)[3]` and friends.
+fn resolve_type_chain(ty: &Type, ctx: &LowerCtx) -> Type {
+    let mut cur: Type = ty.clone();
+    loop {
+        let next = match cur.unqualified() {
+            Type::Typedef(name) => match ctx.resolve_typedef(name) {
+                Some(target) => target.clone(),
+                None => return cur,
+            },
+            _ => return cur,
+        };
+        cur = next;
+    }
+}
+
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
 /// These types are byte-packed in memory (four per 32-bit word) and
 /// require a dynamic shift+mask when read or written through a pointer
@@ -1757,11 +1775,18 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         }
         Expr::Deref(inner) => {
             let inner_ty = expr_type(inner, ctx)?;
-            strip_to_pointer(&inner_ty).cloned()
+            // Resolve typedef chains so `*p` on a `typedef int(*P)[3]; P p`
+            // reports an `int[3]` value type, not None. Without this the
+            // outer `[i]` cannot compute the `sizeof(int)` stride and
+            // emits a raw-index Add.
+            let resolved = resolve_type_chain(&inner_ty, ctx);
+            strip_to_pointer(&resolved).cloned()
         }
         Expr::Index(base, _) => {
             let base_ty = expr_type(base, ctx)?;
-            match base_ty.unqualified() {
+            // See Deref above for why typedef resolution is required.
+            let resolved = resolve_type_chain(&base_ty, ctx);
+            match resolved.unqualified() {
                 Type::Pointer(elem) | Type::Array(elem, _) => Some(*elem.clone()),
                 _ => None,
             }
@@ -1778,6 +1803,9 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         }
         Expr::Arrow(base, field) => {
             let base_ty = expr_type(base, ctx)?;
+            // Resolve typedef chains so `p->x` on `typedef struct S *SP; SP p`
+            // can find the pointee struct.
+            let base_ty = resolve_type_chain(&base_ty, ctx);
             if let Some(pointee) = strip_to_pointer(&base_ty) {
                 let fields = resolve_struct_fields(pointee, ctx)?;
                 if is_union_type(pointee) {
@@ -2474,7 +2502,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Deref(inner) => {
             let ptr_ty = expr_type(inner, ctx);
             let ptr = lower_expr(ctx, inner)?;
-            let pointee = ptr_ty.as_ref().and_then(pointee_type).cloned();
+            // Resolve typedefs so a pointer named via `typedef int (*P)[3]`
+            // still reports an array pointee here; otherwise the
+            // aggregate-decay branch below would miss and we'd emit a
+            // scalar Load that reads only the first element.
+            let pointee = ptr_ty
+                .as_ref()
+                .and_then(|t| pointee_type_resolved(t, ctx))
+                .cloned();
             // Byte-granularity read for char / unsigned char / bool.
             // A `char *` may aim at any byte in a packed 32-bit word,
             // so load the whole word and shift/mask the target byte
@@ -2519,7 +2554,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Index(base, idx) => {
             // C99 6.5.2.1: `base[idx]` scales the index by `sizeof(*base)`.
             let base_ty = expr_type(base, ctx);
-            let elem_ty = base_ty.as_ref().and_then(pointee_type).cloned();
+            // Resolve typedefs so e.g. `arr3_ptr p; p[i]` (where
+            // `arr3_ptr = int(*)[3]`) sees an array pointee and emits
+            // the aggregate-decay return below; otherwise the bare
+            // `pointee_type` would yield None on a `Type::Typedef`.
+            let elem_ty = base_ty
+                .as_ref()
+                .and_then(|t| pointee_type_resolved(t, ctx))
+                .cloned();
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
             let scaled = match elem_ty.as_ref() {
