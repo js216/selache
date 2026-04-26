@@ -1894,6 +1894,15 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         }
         Expr::PostInc(inner) | Expr::PostDec(inner)
         | Expr::PreInc(inner) | Expr::PreDec(inner) => expr_type(inner, ctx),
+        // C99 6.5.15: result type of `?:` follows the usual arithmetic
+        // conversion of the second/third operands. For aggregate
+        // (struct/union) operands the type must be the same struct on
+        // both sides; report that so callers (e.g. `lower_struct_expr_addr`)
+        // can detect aggregate ternaries and emit the multi-word copy
+        // path instead of truncating to a single VReg.
+        Expr::Ternary { then_expr, else_expr, .. } => {
+            expr_type(then_expr, ctx).or_else(|| expr_type(else_expr, ctx))
+        }
         _ => None,
     }
 }
@@ -4726,6 +4735,77 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Ident(_) | Expr::Member(..) | Expr::Arrow(..)
         | Expr::Deref(..) | Expr::Index(..) => {
             lower_lvalue_addr(ctx, expr)
+        }
+        // Ternary on aggregate operands (C99 6.5.15): `cond ? x : y`
+        // where x and y are structs. The scalar `lower_ternary` path
+        // would Copy a single VReg (only field 0) from one branch into
+        // the result, which silently truncates the aggregate to its
+        // first word. Materialise an explicit destination buffer and
+        // copy *all* words from the selected operand into it on each
+        // arm, mirroring the struct-assignment flow.
+        Expr::Ternary { cond, then_expr, else_expr } => {
+            let ty = expr_type(expr, ctx);
+            let is_struct = ty.as_ref().is_some_and(|t| is_struct_type(t, ctx));
+            if !is_struct {
+                // Fall through to the generic scalar path below.
+                let val = lower_expr(ctx, expr)?;
+                let slot = ctx.alloc_stack_slot();
+                ctx.emit(IrOp::Store(val, 0, slot as i32));
+                let addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(addr, slot as i32));
+                return Ok(addr);
+            }
+            let num_words = type_size_words(ty.as_ref().unwrap(), ctx).max(1);
+            // Reserve the destination buffer up front. Field 0 of an
+            // aggregate lives at the highest address (deepest frame
+            // slot) on SHARC's downward-growing stack; emit_struct_copy
+            // walks word w to byte offset w*4, so we point each
+            // per-arm `dst_addr` at the deepest slot of the
+            // reservation.
+            let slot = ctx.frame_size;
+            ctx.frame_size += num_words;
+            let storage_slot = slot + num_words - 1;
+
+            // Lower cond / Cmp / branch *before* materialising the
+            // destination address vreg. A vreg created here would have
+            // to stay live across the conditional Cmp+BranchCond and
+            // across both arms (which themselves call back into
+            // `lower_expr`, allocate vregs, and may evict caller-saved
+            // physical registers); the register allocator does not
+            // currently rematerialise frame addresses across that
+            // boundary, so the value gets clobbered in one arm.
+            // Instead, re-emit `FrameAddr` inside each arm and at the
+            // join point: FrameAddr is a pure function of the slot
+            // index, so the three vregs all denote the same address.
+            let cond_val = lower_expr(ctx, cond)?;
+            let zero = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(zero, 0));
+            ctx.emit(IrOp::Cmp(cond_val, zero));
+            let else_label = ctx.alloc_label();
+            let end_label = ctx.alloc_label();
+            ctx.emit(IrOp::BranchCond(Cond::Eq, else_label));
+
+            // Then arm: copy x's words into dst.
+            let then_addr = lower_struct_expr_addr(ctx, then_expr)?;
+            let dst_then = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_then, storage_slot as i32));
+            emit_struct_copy(ctx, dst_then, then_addr, num_words);
+            ctx.emit(IrOp::Branch(end_label));
+
+            // Else arm: copy y's words into dst.
+            ctx.emit(IrOp::Label(else_label));
+            let else_addr = lower_struct_expr_addr(ctx, else_expr)?;
+            let dst_else = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_else, storage_slot as i32));
+            emit_struct_copy(ctx, dst_else, else_addr, num_words);
+            ctx.emit(IrOp::Label(end_label));
+
+            // Materialise the address again at the join point so the
+            // caller (which expects a single VReg holding the buffer
+            // base) gets a fresh, unconditionally-defined value.
+            let dst_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+            Ok(dst_addr)
         }
         // Struct / union compound literal: `(struct foo){...}`.  The
         // lvalue-addr arm at `lower_lvalue_addr` already allocates frame
