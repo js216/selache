@@ -4250,7 +4250,18 @@ fn lower_aggregate_init(
                             .position(|(n, _)| n == field)
                             .unwrap_or(cursor as usize)
                             as u32;
-                        (byte_off / 4, value.as_ref(), fidx.saturating_add(1))
+                        // In a union every member starts at offset 0;
+                        // `struct_field_offset` walks the fields like a
+                        // struct, so for non-first members it returns the
+                        // sum of preceding sizes — wrong for a union.
+                        // Override with offset 0 so `.f = v` writes v at
+                        // the union's base word.
+                        let word_off = if is_union_type(&resolved_ty) {
+                            0
+                        } else {
+                            byte_off / 4
+                        };
+                        (word_off, value.as_ref(), fidx.saturating_add(1))
                     } else {
                         // Unknown field: fall back to cursor-based store.
                         (cursor.saturating_mul(elem_words), value.as_ref(),
