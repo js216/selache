@@ -4228,17 +4228,36 @@ fn lower_aggregate_init(
 
     // Cursor is the next element index (for arrays) or field index
     // (for structs).  Designators reset the cursor; positional items
-    // advance it.
+    // advance it.  The element-array path additionally supports brace
+    // elision (C99 6.7.8 p20-21): a positional item that targets a
+    // nested aggregate and is itself NOT a brace-enclosed init list
+    // consumes as many subsequent flat items as are needed to fill the
+    // inner aggregate, recursively.
+    let elem_is_aggregate = match resolved_ty.unqualified() {
+        Type::Array(elem_ty, _) => {
+            let resolved_elem = resolve_type(elem_ty, ctx);
+            matches!(
+                resolved_elem.unqualified(),
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+            )
+        }
+        _ => false,
+    };
+
     let mut cursor: u32 = 0;
-    for item in items {
-        let (word_off, inner_expr, next_cursor) = match item {
+    let mut i = 0usize;
+    while i < items.len() {
+        let item = &items[i];
+        // Handle designators first (they don't participate in brace
+        // elision — a designator names exactly one element / field).
+        let (word_off, inner_expr, next_cursor, consumed) = match item {
             Expr::ArrayDesignator { index, value } => {
                 let idx = match index.as_ref() {
                     Expr::IntLit(v, _) => *v as u32,
                     _ => cursor,
                 };
                 let w = idx.saturating_mul(elem_words);
-                (w, value.as_ref(), idx.saturating_add(1))
+                (w, value.as_ref(), idx.saturating_add(1), 1usize)
             }
             Expr::DesignatedInit { field, value } => {
                 if let Some(fields) = struct_fields.as_deref() {
@@ -4261,38 +4280,37 @@ fn lower_aggregate_init(
                         } else {
                             byte_off / 4
                         };
-                        (word_off, value.as_ref(), fidx.saturating_add(1))
+                        (word_off, value.as_ref(), fidx.saturating_add(1), 1usize)
                     } else {
                         // Unknown field: fall back to cursor-based store.
                         (cursor.saturating_mul(elem_words), value.as_ref(),
-                         cursor.saturating_add(1))
+                         cursor.saturating_add(1), 1usize)
                     }
                 } else {
                     (cursor.saturating_mul(elem_words), value.as_ref(),
-                     cursor.saturating_add(1))
+                     cursor.saturating_add(1), 1usize)
                 }
             }
             other => {
                 let w = cursor.saturating_mul(elem_words);
-                (w, other, cursor.saturating_add(1))
+                (w, other, cursor.saturating_add(1), 1usize)
             }
         };
 
         if word_off >= num_words {
             cursor = next_cursor;
+            i += consumed;
             continue;
         }
 
         // For aggregates the deepest slot holds word 0; element at word
         // offset `w` sits at `slot_base + num_words - 1 - w`.
         let elem_slot = slot_base + num_words - 1 - word_off;
-        // Nested aggregate element with a brace-enclosed initializer
-        // (e.g. `int m[2][3] = { {1,2,3}, {4,5,6} }` or an array of
-        // structs).  Recurse so the inner brace gets its own cursor /
-        // designator handling rather than collapsing to a single
-        // scalar store.
-        // Treat a compound literal `(T){...}` the same as a bare
-        // `{...}` initializer in this position (C99 6.5.2.5).
+
+        // Brace-enclosed nested initializer (or compound literal with
+        // braces): the brace explicitly delimits the inner aggregate, so
+        // recurse on just that sub-list.  C99 6.5.2.5 treats `(T){...}`
+        // identically to a bare `{...}` in this position.
         let nested_items = match inner_expr {
             Expr::InitList(items) => Some(items.as_slice()),
             Expr::Cast(_, boxed) => match boxed.as_ref() {
@@ -4305,11 +4323,10 @@ fn lower_aggregate_init(
             (nested_items, resolved_ty.unqualified())
         {
             let resolved_elem = resolve_type(elem_ty, ctx);
-            let elem_is_aggregate = matches!(
+            if matches!(
                 resolved_elem.unqualified(),
                 Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
-            );
-            if elem_is_aggregate {
+            ) {
                 let inner_words =
                     crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
                 let inner_base = elem_slot + 1 - inner_words;
@@ -4317,14 +4334,124 @@ fn lower_aggregate_init(
                     ctx, inner_items, elem_ty, inner_base, inner_words, true,
                 )?;
                 cursor = next_cursor;
+                i += consumed;
                 continue;
             }
         }
+
+        // Brace elision for positional items targeting a nested
+        // aggregate: collect the subsequent flat items needed to fill
+        // the inner aggregate and recurse.  Designators terminate the
+        // run because they belong to the outer aggregate's namespace.
+        // Only applies when this is a plain positional item (consumed
+        // == 1 and the item is not a designator and has no inner
+        // braces — the brace branch above would have caught it).
+        if elem_is_aggregate
+            && consumed == 1
+            && !matches!(
+                item,
+                Expr::ArrayDesignator { .. } | Expr::DesignatedInit { .. }
+            )
+        {
+            if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
+                let resolved_elem = resolve_type(elem_ty, ctx);
+                let inner_words =
+                    crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
+                let inner_base = elem_slot + 1 - inner_words;
+                // Gather subsequent flat (non-designator, non-brace)
+                // items: the inner aggregate's own recursive call will
+                // stop consuming once the inner aggregate is full and
+                // simply ignore extras.  We need a precise count of how
+                // many outer-list items belong to this inner element so
+                // the outer cursor advances correctly.  Walk a
+                // shadow-aggregate filler to compute that count.
+                let take = count_flat_items_for(&resolved_elem, &items[i..], ctx);
+                let slice = &items[i..i + take];
+                lower_aggregate_init(
+                    ctx, slice, elem_ty, inner_base, inner_words, true,
+                )?;
+                cursor = next_cursor;
+                i += take;
+                continue;
+            }
+        }
+
         let val = lower_expr(ctx, inner_expr)?;
         ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
         cursor = next_cursor;
+        i += consumed;
     }
     Ok(())
+}
+
+/// Count how many items from a flat init list belong to a single
+/// instance of `ty` under C99 brace-elision rules.  A brace-enclosed
+/// item (or `(T){...}` compound literal) always consumes exactly one
+/// outer slot; bare positional items recurse into nested aggregates,
+/// each consuming one leaf scalar slot.  Stops once the aggregate is
+/// full or items run out.  Designators inside the run terminate it
+/// (a designator re-targets an outer slot, ending brace elision for
+/// this inner aggregate).
+fn count_flat_items_for(ty: &Type, items: &[Expr], ctx: &mut LowerCtx) -> usize {
+    // Compute the number of leaf scalar slots in `ty`.
+    fn leaves(ty: &Type, ctx: &mut LowerCtx) -> usize {
+        let resolved = resolve_type(ty, ctx);
+        match resolved.unqualified() {
+            Type::Array(elem, n) => {
+                let per = leaves(elem, ctx);
+                let count = n.unwrap_or(1);
+                per.saturating_mul(count).max(1)
+            }
+            Type::Struct { .. } => {
+                if let Some(fields) = resolve_struct_fields(&resolved, ctx) {
+                    let fields: Vec<_> = fields.to_vec();
+                    fields.iter().map(|(_, ft)| leaves(ft, ctx)).sum::<usize>().max(1)
+                } else {
+                    1
+                }
+            }
+            Type::Union { .. } => 1,
+            _ => 1,
+        }
+    }
+    let need = leaves(ty, ctx);
+    let mut consumed = 0usize;
+    let mut filled = 0usize;
+    while consumed < items.len() && filled < need {
+        match &items[consumed] {
+            Expr::ArrayDesignator { .. } | Expr::DesignatedInit { .. } => break,
+            Expr::InitList(_) => {
+                // A brace-enclosed item fills one nested aggregate slot
+                // entirely; conservatively count it as one leaf's worth
+                // for the purpose of advancing through the inner type.
+                // For our use (rectangular nested arrays), this matches
+                // the brace-per-row idiom precisely.
+                consumed += 1;
+                // Advance by leaves of one inner element of the
+                // outermost array dimension if applicable.
+                let resolved = resolve_type(ty, ctx);
+                let step = match resolved.unqualified() {
+                    Type::Array(elem, _) => leaves(elem, ctx),
+                    _ => 1,
+                };
+                filled += step.max(1);
+            }
+            Expr::Cast(_, boxed) if matches!(boxed.as_ref(), Expr::InitList(_)) => {
+                consumed += 1;
+                let resolved = resolve_type(ty, ctx);
+                let step = match resolved.unqualified() {
+                    Type::Array(elem, _) => leaves(elem, ctx),
+                    _ => 1,
+                };
+                filled += step.max(1);
+            }
+            _ => {
+                consumed += 1;
+                filled += 1;
+            }
+        }
+    }
+    consumed.max(1)
 }
 
 /// Initialise a byte-packed char-element array from an aggregate init
