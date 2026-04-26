@@ -1734,6 +1734,46 @@ fn int_literal_type(val: i64, suffix: IntSuffix) -> Type {
 /// Infer the type of an expression from context (variable types, pointer
 /// dereference, struct member access). Returns `None` when the type cannot
 /// be determined.
+/// C99 6.5.2.1 p2: `E1[E2]` is identical to `(*((E1)+(E2)))`. Addition is
+/// commutative, so `2[arr]` is well-formed and equivalent to `arr[2]`.
+/// All downstream lowering paths assume the first operand of `Expr::Index`
+/// is the pointer / array operand (so its pointee type drives stride
+/// scaling and aggregate-decay rules). This helper inspects both operands
+/// and returns them in canonical `(pointer_or_array, integer)` order, so
+/// `2[arr]` lowers identically to `arr[2]` regardless of how the user
+/// wrote the subscript. When neither operand resolves to a pointer / array
+/// type (e.g. an unresolved typedef in dead code), the original order is
+/// preserved so existing callers that rely on the literal AST shape keep
+/// working.
+fn canonical_index_operands<'a>(
+    base: &'a Expr,
+    idx: &'a Expr,
+    ctx: &LowerCtx,
+) -> (&'a Expr, &'a Expr) {
+    let base_is_ptr = expr_type(base, ctx)
+        .as_ref()
+        .map(|t| {
+            let r = resolve_type_chain(t, ctx);
+            matches!(r.unqualified(), Type::Pointer(_) | Type::Array(_, _))
+        })
+        .unwrap_or(false);
+    if base_is_ptr {
+        return (base, idx);
+    }
+    let idx_is_ptr = expr_type(idx, ctx)
+        .as_ref()
+        .map(|t| {
+            let r = resolve_type_chain(t, ctx);
+            matches!(r.unqualified(), Type::Pointer(_) | Type::Array(_, _))
+        })
+        .unwrap_or(false);
+    if idx_is_ptr {
+        (idx, base)
+    } else {
+        (base, idx)
+    }
+}
+
 fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
     match expr {
         Expr::IntLit(val, suffix) => Some(int_literal_type(*val, *suffix)),
@@ -1782,7 +1822,10 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
             let resolved = resolve_type_chain(&inner_ty, ctx);
             strip_to_pointer(&resolved).cloned()
         }
-        Expr::Index(base, _) => {
+        Expr::Index(a, b) => {
+            // C99 6.5.2.1: subscript is commutative; `2[arr]` is equivalent
+            // to `arr[2]`. Find which operand is the pointer / array.
+            let (base, _) = canonical_index_operands(a, b, ctx);
             let base_ty = expr_type(base, ctx)?;
             // See Deref above for why typedef resolution is required.
             let resolved = resolve_type_chain(&base_ty, ctx);
@@ -1881,9 +1924,12 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // Address of *ptr is just ptr.
             lower_expr(ctx, inner)
         }
-        Expr::Index(base, idx) => {
+        Expr::Index(a, b) => {
             // C99 6.5.2.1: `base[idx]` is `*(base + idx)`, where the
             // addition scales the integer index by `sizeof(*base)`.
+            // Subscript is commutative (`2[arr]` == `arr[2]`); pick the
+            // pointer / array operand as the base.
+            let (base, idx) = canonical_index_operands(a, b, ctx);
             let base_ty = expr_type(base, ctx);
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
@@ -2464,8 +2510,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     }
                     ctx.emit(IrOp::Store(val, ptr, 0));
                 }
-                Expr::Index(base, idx) => {
+                Expr::Index(a, b) => {
                     // C99 6.5.2.1: scale the index by `sizeof(*base)`.
+                    // Subscript is commutative; pick the pointer / array
+                    // operand as the base so `2[arr] = v` works.
+                    let (base, idx) = canonical_index_operands(a, b, ctx);
                     let base_ty = expr_type(base, ctx);
                     let elem_ty_opt = base_ty.as_ref().and_then(pointee_type).cloned();
                     let base_addr = lower_expr(ctx, base)?;
@@ -2551,8 +2600,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // Use lower_lvalue_addr which handles Ident, Deref, Index, Member, Arrow.
             lower_lvalue_addr(ctx, inner)
         }
-        Expr::Index(base, idx) => {
+        Expr::Index(a, b) => {
             // C99 6.5.2.1: `base[idx]` scales the index by `sizeof(*base)`.
+            // Subscript is commutative (`2[arr]` == `arr[2]`); pick the
+            // pointer / array operand as the base.
+            let (base, idx) = canonical_index_operands(a, b, ctx);
             let base_ty = expr_type(base, ctx);
             // Resolve typedefs so e.g. `arr3_ptr p; p[i]` (where
             // `arr3_ptr = int(*)[3]`) sees an array pointee and emits
