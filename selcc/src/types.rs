@@ -668,7 +668,9 @@ impl Type {
     /// Whether this is an unsigned integer type.
     pub fn is_unsigned(&self) -> bool {
         match self.unqualified() {
-            Type::Unsigned(_) | Type::ULongLong => true,
+            // C99 6.2.5p2: _Bool can hold values 0 and 1; it is an
+            // unsigned integer type.
+            Type::Unsigned(_) | Type::ULongLong | Type::Bool => true,
             Type::Bitfield(inner, _) => inner.is_unsigned(),
             _ => false,
         }
