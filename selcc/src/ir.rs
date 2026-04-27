@@ -243,3 +243,379 @@ pub enum IrOp {
     /// Truncate a 64-bit value to 32 bits: dst = src_lo
     LongLongToInt(VReg, VReg),
 }
+
+/// Compress the live virtual-register set in `ir` into the tag-bit-safe
+/// u8 range 0..0x80, returning the renumbered op stream.
+///
+/// Background. `MachInstr` carries register operands as `u8` and uses
+/// bit 7 (0x80, `UREG_FIXED_TAG`) plus a low-nibble group code
+/// (0x10 = I-reg, 0x20 = M-reg) to distinguish a fixed register
+/// encoding (an I-register reload, the indirect-call frame-link push)
+/// from a raw vreg id awaiting allocation. Lowering allocates vregs
+/// from a u32 counter (`LowerCtx::next_vreg`) that grows monotonically
+/// for every fresh value: a function with enough simultaneously-live
+/// values (e.g. a three-level array index where every intermediate
+/// pointer arithmetic step occupies its own vreg) crosses 128 and the
+/// `*dst as u8` truncations in isel start producing ids whose bit 7 is
+/// set. The regalloc rewrite then sees `LoadImm { ureg: 144 }` (= 0x90,
+/// `UREG_FIXED_TAG | I0`), takes its tag fast-path, and emits
+/// `I0 = imm` -- silently miscompiling the function with stray writes
+/// into the index-register file.
+///
+/// This pass is the structural fix: it walks the IR, collects every
+/// vreg id actually referenced (plus the implicit `lo+1` mate of every
+/// 64-bit pair anchor so the 64-bit lo/hi adjacency survives the
+/// renumbering), and assigns each a fresh dense id in 0..0x80. Vregs
+/// in the parameter range (0..num_params) are kept identity-mapped so
+/// the ARG_REGS pinning installed by `regalloc::Allocator::new`
+/// continues to resolve correctly.
+///
+/// Pair anchors are detected from the 64-bit op shape: any IrOp whose
+/// IR variant name ends in `64` references one or more `lo` halves and
+/// implicitly uses `lo + 1` for the hi half. Those pair lo halves are
+/// allocated *first*, two contiguous slots at a time, so `map[lo] + 1
+/// == map[lo + 1]` after renumbering. Single-use vregs (32-bit
+/// scalars, pointers, addresses) consume one slot each afterward.
+pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Pair anchors: lo-half vregs of any 64-bit op. The hi half is
+    // implicit at `lo + 1` and may not appear elsewhere in the op
+    // stream, so we synthesise it into the used set below.
+    let mut anchors: BTreeSet<VReg> = BTreeSet::new();
+    // Every vreg explicitly mentioned in the op stream.
+    let mut used: BTreeSet<VReg> = BTreeSet::new();
+
+    let record_used = |v: VReg, used: &mut BTreeSet<VReg>| {
+        used.insert(v);
+    };
+    let record_anchor = |v: VReg,
+                         anchors: &mut BTreeSet<VReg>,
+                         used: &mut BTreeSet<VReg>| {
+        anchors.insert(v);
+        used.insert(v);
+        used.insert(v + 1);
+    };
+
+    for op in ir {
+        match op {
+            IrOp::LoadImm(d, _)
+            | IrOp::LoadGlobal(d, _)
+            | IrOp::ReadGlobal(d, _)
+            | IrOp::StoreGlobal(d, _)
+            | IrOp::LoadString(d, _)
+            | IrOp::LoadWideString(d, _)
+            | IrOp::StackSave(d)
+            | IrOp::StackRestore(d)
+            | IrOp::FrameAddr(d, _)
+            | IrOp::LoadStackArg(d, _)
+            | IrOp::StackArgAddr(d, _)
+            | IrOp::LoadStructRetPtr(d) => {
+                record_used(*d, &mut used);
+            }
+            IrOp::Copy(a, b)
+            | IrOp::Neg(a, b)
+            | IrOp::BitNot(a, b)
+            | IrOp::Cmp(a, b)
+            | IrOp::UCmp(a, b)
+            | IrOp::FNeg(a, b)
+            | IrOp::IntToFloat(a, b)
+            | IrOp::FloatToInt(a, b)
+            | IrOp::FCmp(a, b)
+            | IrOp::StackAlloc(a, b)
+            | IrOp::Load(a, b, _)
+            | IrOp::Store(a, b, _) => {
+                record_used(*a, &mut used);
+                record_used(*b, &mut used);
+            }
+            IrOp::Add(a, b, c)
+            | IrOp::Sub(a, b, c)
+            | IrOp::Mul(a, b, c)
+            | IrOp::Div(a, b, c)
+            | IrOp::UDiv(a, b, c)
+            | IrOp::Mod(a, b, c)
+            | IrOp::UMod(a, b, c)
+            | IrOp::BitAnd(a, b, c)
+            | IrOp::BitOr(a, b, c)
+            | IrOp::BitXor(a, b, c)
+            | IrOp::Shl(a, b, c)
+            | IrOp::Shr(a, b, c)
+            | IrOp::Lshr(a, b, c)
+            | IrOp::FAdd(a, b, c)
+            | IrOp::FSub(a, b, c)
+            | IrOp::FMul(a, b, c)
+            | IrOp::FDiv(a, b, c) => {
+                record_used(*a, &mut used);
+                record_used(*b, &mut used);
+                record_used(*c, &mut used);
+            }
+            IrOp::Ret(opt) => {
+                if let Some(v) = opt {
+                    record_used(*v, &mut used);
+                }
+            }
+            IrOp::Call(d, _, args) => {
+                record_used(*d, &mut used);
+                for a in args {
+                    record_used(*a, &mut used);
+                }
+            }
+            IrOp::CallIndirect(d, addr, args) => {
+                record_used(*d, &mut used);
+                record_used(*addr, &mut used);
+                for a in args {
+                    record_used(*a, &mut used);
+                }
+            }
+            IrOp::CallStruct { name: _, args, dst_addr, .. } => {
+                record_used(*dst_addr, &mut used);
+                for a in args {
+                    record_used(*a, &mut used);
+                }
+            }
+            IrOp::CallIndirectStruct { addr, args, dst_addr, .. } => {
+                record_used(*addr, &mut used);
+                record_used(*dst_addr, &mut used);
+                for a in args {
+                    record_used(*a, &mut used);
+                }
+            }
+            IrOp::RetStruct { src_addr, dst_addr, .. } => {
+                record_used(*src_addr, &mut used);
+                if let Some(v) = dst_addr {
+                    record_used(*v, &mut used);
+                }
+            }
+            IrOp::Branch(_)
+            | IrOp::BranchCond(_, _)
+            | IrOp::Label(_)
+            | IrOp::HardwareLoop { .. }
+            | IrOp::Nop => {}
+
+            // ---- 64-bit ops: lo halves are pair anchors. -------
+            IrOp::LoadImm64(lo, _) => record_anchor(*lo, &mut anchors, &mut used),
+            IrOp::Copy64(a, b)
+            | IrOp::Neg64(a, b)
+            | IrOp::BitNot64(a, b)
+            | IrOp::Cmp64(a, b)
+            | IrOp::UCmp64(a, b) => {
+                record_anchor(*a, &mut anchors, &mut used);
+                record_anchor(*b, &mut anchors, &mut used);
+            }
+            IrOp::Add64(a, b, c)
+            | IrOp::Sub64(a, b, c)
+            | IrOp::Mul64(a, b, c)
+            | IrOp::Div64(a, b, c)
+            | IrOp::UDiv64(a, b, c)
+            | IrOp::Mod64(a, b, c)
+            | IrOp::UMod64(a, b, c)
+            | IrOp::BitAnd64(a, b, c)
+            | IrOp::BitOr64(a, b, c)
+            | IrOp::BitXor64(a, b, c) => {
+                record_anchor(*a, &mut anchors, &mut used);
+                record_anchor(*b, &mut anchors, &mut used);
+                record_anchor(*c, &mut anchors, &mut used);
+            }
+            // Shift count is a 32-bit single, not a 64-bit pair.
+            IrOp::Shl64(a, b, c)
+            | IrOp::Shr64(a, b, c)
+            | IrOp::UShr64(a, b, c) => {
+                record_anchor(*a, &mut anchors, &mut used);
+                record_anchor(*b, &mut anchors, &mut used);
+                record_used(*c, &mut used);
+            }
+            // base is a 32-bit address, dst/src is the 64-bit pair.
+            IrOp::Load64(dst, base, _) => {
+                record_anchor(*dst, &mut anchors, &mut used);
+                record_used(*base, &mut used);
+            }
+            IrOp::Store64(src, base, _) => {
+                record_anchor(*src, &mut anchors, &mut used);
+                record_used(*base, &mut used);
+            }
+            IrOp::ReadGlobal64(dst, _) | IrOp::WriteGlobal64(dst, _) => {
+                record_anchor(*dst, &mut anchors, &mut used);
+            }
+            IrOp::IntToLongLong(dst, src)
+            | IrOp::SExtToLongLong(dst, src) => {
+                record_anchor(*dst, &mut anchors, &mut used);
+                record_used(*src, &mut used);
+            }
+            IrOp::LongLongToInt(dst, src) => {
+                record_used(*dst, &mut used);
+                record_anchor(*src, &mut anchors, &mut used);
+            }
+        }
+    }
+
+    // Build the renumbering map. Parameter slots (0..num_params) keep
+    // identity so the ARG_REGS pinning in regalloc still resolves.
+    // The remaining ids are first allocated in pair-aligned doubles
+    // for every anchor, then in singles for every non-anchor id.
+    let mut map: BTreeMap<VReg, VReg> = BTreeMap::new();
+    let mut next: VReg = num_params;
+    // Identity-map the parameter slots that actually appear.
+    for v in &used {
+        if *v < num_params {
+            map.insert(*v, *v);
+        }
+    }
+    // Bump `next` past any parameter-pair anchor whose hi half lands
+    // inside or at the boundary of the parameter range; the identity
+    // mapping above already reserved both halves.
+    while next < num_params {
+        next += 1;
+    }
+    // Anchors first: two consecutive slots each. Skip anchors that
+    // are already identity-mapped (parameter pair lo halves).
+    for &a in &anchors {
+        if map.contains_key(&a) {
+            // Parameter anchor: hi half is also identity-mapped above
+            // because both ids fall below num_params. If only the lo
+            // half is below num_params and the hi half is not, the
+            // implicit hi-half mapping would still be identity since
+            // `a + 1 == num_params` in that boundary case is in
+            // `used` and will get its own slot below.
+            continue;
+        }
+        // Skip the anchor's hi-half if it was independently mapped
+        // already (rare: only when an op uses `a + 1` as a 32-bit
+        // single elsewhere). The pair allocation below assumes the
+        // hi half has not been bound yet.
+        if map.contains_key(&(a + 1)) {
+            // Defensive: the hi half was already bound to something
+            // else, so we cannot give the pair contiguous slots.
+            // Bail out by mapping the lo half normally; this loses
+            // 64-bit pair adjacency but keeps the renumbering total.
+            map.insert(a, next);
+            next += 1;
+            continue;
+        }
+        map.insert(a, next);
+        map.insert(a + 1, next + 1);
+        next += 2;
+    }
+    // Singles: every used vreg not yet mapped.
+    for &v in &used {
+        if map.contains_key(&v) {
+            continue;
+        }
+        map.insert(v, next);
+        next += 1;
+    }
+
+    // Hard cap: 0x80 keeps every renumbered id below the
+    // UREG_FIXED_TAG bit, so no truncated `as u8` collides with the
+    // tagged-fixed-encoding range that the regalloc rewrite uses.
+    assert!(
+        next <= 0x80,
+        "renumber_vregs: function uses {next} vregs after compression, \
+         exceeds the 0x80 tag-bit-safe cap"
+    );
+
+    // Apply mapping. `apply` is a single-vreg lookup; vregs missing
+    // from the map (only possible if the analysis above missed a
+    // variant) are left untouched -- but `assert!` below the renumber
+    // catches any such omission early.
+    let apply = |v: VReg| -> VReg { *map.get(&v).unwrap_or(&v) };
+
+    ir.iter().map(|op| match op {
+        IrOp::LoadImm(d, x) => IrOp::LoadImm(apply(*d), *x),
+        IrOp::Copy(a, b) => IrOp::Copy(apply(*a), apply(*b)),
+        IrOp::Add(a, b, c) => IrOp::Add(apply(*a), apply(*b), apply(*c)),
+        IrOp::Sub(a, b, c) => IrOp::Sub(apply(*a), apply(*b), apply(*c)),
+        IrOp::Mul(a, b, c) => IrOp::Mul(apply(*a), apply(*b), apply(*c)),
+        IrOp::Div(a, b, c) => IrOp::Div(apply(*a), apply(*b), apply(*c)),
+        IrOp::UDiv(a, b, c) => IrOp::UDiv(apply(*a), apply(*b), apply(*c)),
+        IrOp::Mod(a, b, c) => IrOp::Mod(apply(*a), apply(*b), apply(*c)),
+        IrOp::UMod(a, b, c) => IrOp::UMod(apply(*a), apply(*b), apply(*c)),
+        IrOp::BitAnd(a, b, c) => IrOp::BitAnd(apply(*a), apply(*b), apply(*c)),
+        IrOp::BitOr(a, b, c) => IrOp::BitOr(apply(*a), apply(*b), apply(*c)),
+        IrOp::BitXor(a, b, c) => IrOp::BitXor(apply(*a), apply(*b), apply(*c)),
+        IrOp::Shl(a, b, c) => IrOp::Shl(apply(*a), apply(*b), apply(*c)),
+        IrOp::Shr(a, b, c) => IrOp::Shr(apply(*a), apply(*b), apply(*c)),
+        IrOp::Lshr(a, b, c) => IrOp::Lshr(apply(*a), apply(*b), apply(*c)),
+        IrOp::Neg(a, b) => IrOp::Neg(apply(*a), apply(*b)),
+        IrOp::BitNot(a, b) => IrOp::BitNot(apply(*a), apply(*b)),
+        IrOp::Cmp(a, b) => IrOp::Cmp(apply(*a), apply(*b)),
+        IrOp::UCmp(a, b) => IrOp::UCmp(apply(*a), apply(*b)),
+        IrOp::Ret(opt) => IrOp::Ret(opt.map(apply)),
+        IrOp::LoadStructRetPtr(d) => IrOp::LoadStructRetPtr(apply(*d)),
+        IrOp::Call(d, n, args) => IrOp::Call(
+            apply(*d), n.clone(), args.iter().map(|a| apply(*a)).collect()),
+        IrOp::CallIndirect(d, addr, args) => IrOp::CallIndirect(
+            apply(*d), apply(*addr),
+            args.iter().map(|a| apply(*a)).collect()),
+        IrOp::CallStruct { name, args, dst_addr, num_words } => IrOp::CallStruct {
+            name: name.clone(),
+            args: args.iter().map(|a| apply(*a)).collect(),
+            dst_addr: apply(*dst_addr),
+            num_words: *num_words,
+        },
+        IrOp::CallIndirectStruct { addr, args, dst_addr, num_words } => IrOp::CallIndirectStruct {
+            addr: apply(*addr),
+            args: args.iter().map(|a| apply(*a)).collect(),
+            dst_addr: apply(*dst_addr),
+            num_words: *num_words,
+        },
+        IrOp::RetStruct { src_addr, dst_addr, num_words } => IrOp::RetStruct {
+            src_addr: apply(*src_addr),
+            dst_addr: dst_addr.map(apply),
+            num_words: *num_words,
+        },
+        IrOp::Branch(l) => IrOp::Branch(*l),
+        IrOp::BranchCond(c, l) => IrOp::BranchCond(*c, *l),
+        IrOp::Label(l) => IrOp::Label(*l),
+        IrOp::Load(d, b, off) => IrOp::Load(apply(*d), apply(*b), *off),
+        IrOp::Store(s, b, off) => IrOp::Store(apply(*s), apply(*b), *off),
+        IrOp::LoadGlobal(d, n) => IrOp::LoadGlobal(apply(*d), n.clone()),
+        IrOp::ReadGlobal(d, n) => IrOp::ReadGlobal(apply(*d), n.clone()),
+        IrOp::StoreGlobal(s, n) => IrOp::StoreGlobal(apply(*s), n.clone()),
+        IrOp::ReadGlobal64(d, n) => IrOp::ReadGlobal64(apply(*d), n.clone()),
+        IrOp::WriteGlobal64(s, n) => IrOp::WriteGlobal64(apply(*s), n.clone()),
+        IrOp::LoadString(d, idx) => IrOp::LoadString(apply(*d), *idx),
+        IrOp::LoadWideString(d, idx) => IrOp::LoadWideString(apply(*d), *idx),
+        IrOp::FAdd(a, b, c) => IrOp::FAdd(apply(*a), apply(*b), apply(*c)),
+        IrOp::FSub(a, b, c) => IrOp::FSub(apply(*a), apply(*b), apply(*c)),
+        IrOp::FMul(a, b, c) => IrOp::FMul(apply(*a), apply(*b), apply(*c)),
+        IrOp::FDiv(a, b, c) => IrOp::FDiv(apply(*a), apply(*b), apply(*c)),
+        IrOp::FNeg(a, b) => IrOp::FNeg(apply(*a), apply(*b)),
+        IrOp::IntToFloat(a, b) => IrOp::IntToFloat(apply(*a), apply(*b)),
+        IrOp::FloatToInt(a, b) => IrOp::FloatToInt(apply(*a), apply(*b)),
+        IrOp::FCmp(a, b) => IrOp::FCmp(apply(*a), apply(*b)),
+        IrOp::HardwareLoop { count, end_label } => IrOp::HardwareLoop {
+            count: *count, end_label: *end_label,
+        },
+        IrOp::StackSave(d) => IrOp::StackSave(apply(*d)),
+        IrOp::StackRestore(d) => IrOp::StackRestore(apply(*d)),
+        IrOp::StackAlloc(a, b) => IrOp::StackAlloc(apply(*a), apply(*b)),
+        IrOp::Nop => IrOp::Nop,
+        IrOp::FrameAddr(d, off) => IrOp::FrameAddr(apply(*d), *off),
+        IrOp::LoadStackArg(d, k) => IrOp::LoadStackArg(apply(*d), *k),
+        IrOp::StackArgAddr(d, k) => IrOp::StackArgAddr(apply(*d), *k),
+        IrOp::LoadImm64(d, x) => IrOp::LoadImm64(apply(*d), *x),
+        IrOp::Copy64(a, b) => IrOp::Copy64(apply(*a), apply(*b)),
+        IrOp::Add64(a, b, c) => IrOp::Add64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Sub64(a, b, c) => IrOp::Sub64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Mul64(a, b, c) => IrOp::Mul64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Div64(a, b, c) => IrOp::Div64(apply(*a), apply(*b), apply(*c)),
+        IrOp::UDiv64(a, b, c) => IrOp::UDiv64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Mod64(a, b, c) => IrOp::Mod64(apply(*a), apply(*b), apply(*c)),
+        IrOp::UMod64(a, b, c) => IrOp::UMod64(apply(*a), apply(*b), apply(*c)),
+        IrOp::BitAnd64(a, b, c) => IrOp::BitAnd64(apply(*a), apply(*b), apply(*c)),
+        IrOp::BitOr64(a, b, c) => IrOp::BitOr64(apply(*a), apply(*b), apply(*c)),
+        IrOp::BitXor64(a, b, c) => IrOp::BitXor64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Shl64(a, b, c) => IrOp::Shl64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Shr64(a, b, c) => IrOp::Shr64(apply(*a), apply(*b), apply(*c)),
+        IrOp::UShr64(a, b, c) => IrOp::UShr64(apply(*a), apply(*b), apply(*c)),
+        IrOp::Neg64(a, b) => IrOp::Neg64(apply(*a), apply(*b)),
+        IrOp::BitNot64(a, b) => IrOp::BitNot64(apply(*a), apply(*b)),
+        IrOp::Cmp64(a, b) => IrOp::Cmp64(apply(*a), apply(*b)),
+        IrOp::UCmp64(a, b) => IrOp::UCmp64(apply(*a), apply(*b)),
+        IrOp::Load64(d, b, off) => IrOp::Load64(apply(*d), apply(*b), *off),
+        IrOp::Store64(s, b, off) => IrOp::Store64(apply(*s), apply(*b), *off),
+        IrOp::IntToLongLong(d, s) => IrOp::IntToLongLong(apply(*d), apply(*s)),
+        IrOp::SExtToLongLong(d, s) => IrOp::SExtToLongLong(apply(*d), apply(*s)),
+        IrOp::LongLongToInt(d, s) => IrOp::LongLongToInt(apply(*d), apply(*s)),
+    }).collect()
+}

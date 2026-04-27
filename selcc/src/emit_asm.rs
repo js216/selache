@@ -1053,9 +1053,6 @@ fn emit_function_instrs(
         | crate::ir::IrOp::CallIndirectStruct { .. }
     ));
 
-    let isel_result = isel::select_with_name(
-        &ir, &func.name, unit.variadic_callees, unit.variadic_named_counts);
-
     // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
     // by-value parameters consume multiple ABI slots (one 32-bit word
     // each), so `params.len()` understates the count and leaves
@@ -1064,6 +1061,23 @@ fn emit_function_instrs(
     // every field past the first ABI slot of a multi-word struct.
     let num_params = (lower_result.arg_slots as usize)
         .min(target::ARG_REGS.len()) as u8;
+
+    // Renumber IR virtual registers into a tag-bit-safe u8 range
+    // *before* instruction selection truncates `VReg` (u32) to `u8`
+    // for the mach-instruction stream. The ureg fields in `MachInstr`
+    // overload bit 7 (0x80) as `UREG_FIXED_TAG` plus a low-nibble
+    // group code (0x10 = I-reg, 0x20 = M-reg) to distinguish a fixed
+    // register encoding from a raw vreg id awaiting allocation. Once
+    // the lowering vreg counter passes 128 the truncated id has
+    // bit 7 set and may collide with that tagged form, after which
+    // the regalloc rewrite in `regalloc::allocate` mistakes the vreg
+    // for an I-register and `LoadImm { ureg }` prints `I0 = imm`
+    // instead of allocating a data register. Renumbering compresses
+    // the live vreg set into 0..0x80, eliminating the collision.
+    let ir = crate::ir::renumber_vregs(&ir, num_params as u32);
+
+    let isel_result = isel::select_with_name(
+        &ir, &func.name, unit.variadic_callees, unit.variadic_named_counts);
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} num_params={} ===", func.name, num_params);
         eprintln!("=== {} IR/isel ===", func.name);
