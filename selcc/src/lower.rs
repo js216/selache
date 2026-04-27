@@ -2233,7 +2233,19 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::ReadGlobal64(dst, name.clone()));
                     return Ok(dst);
                 }
-                let dst = ctx.alloc_vreg();
+                // A pointer-typed global is loaded so its value can serve
+                // as the base of a subsequent indirect Load/Store; isel
+                // treats vreg 0 as the frame-relative sentinel, so the
+                // first body instruction in a no-arg function would alias
+                // the loaded pointer onto the frame and read a stack slot
+                // instead of dereferencing through the pointer.
+                let is_global_ptr = ctx.globals.get(name)
+                    .is_some_and(|t| pointee_type_resolved(t, ctx).is_some());
+                let dst = if is_global_ptr {
+                    ctx.alloc_vreg_ptr()
+                } else {
+                    ctx.alloc_vreg()
+                };
                 ctx.emit(IrOp::ReadGlobal(dst, name.clone()));
                 Ok(dst)
             } else if let Some(&val) = ctx.enum_constants.get(name) {
