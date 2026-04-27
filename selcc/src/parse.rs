@@ -1198,6 +1198,17 @@ impl<'a> Parser<'a> {
             self.advance()?;
         }
         let decl_base_ty = self.parse_type()?;
+        // C99 6.2.1: an `enum { ... }` nested inside a struct member's
+        // type-specifier still injects its enumerators into the
+        // enclosing scope. `parse_type` accumulates those constants in
+        // `pending_block_enum_consts`; drain them here so they bind in
+        // the current block scope alongside the variable being declared.
+        let leading_enum_decl = if !self.pending_block_enum_consts.is_empty() {
+            let consts = std::mem::take(&mut self.pending_block_enum_consts);
+            Some(Stmt::EnumDecl(consts))
+        } else {
+            None
+        };
         let base_ty = self.parse_pointer_type(decl_base_ty.clone());
         let base_ty = if is_volatile && !base_ty.is_volatile() {
             Type::Volatile(Box::new(base_ty))
@@ -1220,13 +1231,17 @@ impl<'a> Parser<'a> {
             match &base_ty {
                 Type::Struct { name: Some(_), fields }
                 | Type::Union { name: Some(_), fields } if !fields.is_empty() => {
-                    return Ok(Stmt::VarDecl {
+                    let var_decl = Stmt::VarDecl {
                         name: String::new(),
                         ty: base_ty,
                         init: None,
                         is_static: false,
                         vla_dim: None,
-                    });
+                    };
+                    if let Some(enum_decl) = leading_enum_decl {
+                        return Ok(Stmt::DeclGroup(vec![enum_decl, var_decl]));
+                    }
+                    return Ok(var_decl);
                 }
                 _ => {
                     // `enum { X = v, ... };` with no declarator: if the
@@ -1235,11 +1250,8 @@ impl<'a> Parser<'a> {
                     // to the lowering as a scope-bound declaration so
                     // they can be rolled back when the enclosing block
                     // ends (C99 6.2.1).
-                    if !self.pending_block_enum_consts.is_empty() {
-                        let consts = std::mem::take(
-                            &mut self.pending_block_enum_consts,
-                        );
-                        return Ok(Stmt::EnumDecl(consts));
+                    if let Some(enum_decl) = leading_enum_decl {
+                        return Ok(enum_decl);
                     }
                     return Ok(Stmt::Block(Vec::new()));
                 }
@@ -1263,7 +1275,11 @@ impl<'a> Parser<'a> {
                 None
             };
             self.expect(&Token::Semicolon)?;
-            return Ok(Stmt::VarDecl { name, ty: final_ty, init, is_static, vla_dim: None });
+            let var_decl = Stmt::VarDecl { name, ty: final_ty, init, is_static, vla_dim: None };
+            if let Some(enum_decl) = leading_enum_decl {
+                return Ok(Stmt::DeclGroup(vec![enum_decl, var_decl]));
+            }
+            return Ok(var_decl);
         }
 
         // Parse first declarator.
@@ -1328,6 +1344,13 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(&Token::Semicolon)?;
+
+        if let Some(enum_decl) = leading_enum_decl {
+            let mut combined = Vec::with_capacity(stmts.len() + 1);
+            combined.push(enum_decl);
+            combined.extend(stmts);
+            return Ok(Stmt::DeclGroup(combined));
+        }
 
         if stmts.len() == 1 {
             Ok(stmts.into_iter().next().expect("checked len"))
