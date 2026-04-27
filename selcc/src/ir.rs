@@ -466,6 +466,19 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
     while next < num_params {
         next += 1;
     }
+    // Reserve vreg 0 for the isel `base==0` frame-relative sentinel in
+    // `IrOp::Load`/`IrOp::Store`. The frontend emits a literal `0` in
+    // the base position to mean "frame-relative access", so vreg 0 must
+    // map to itself and must never be reassigned to a real value. When
+    // the function has no parameters, the dense numbering would
+    // otherwise start at 0 and reuse that id for the first non-pair
+    // vreg, defeating the `alloc_vreg_ptr` guarantee that pointer bases
+    // are non-zero. Pinning 0 -> 0 here and bumping `next` past 0
+    // preserves the invariant after compression.
+    map.entry(0).or_insert(0);
+    if next == 0 {
+        next = 1;
+    }
     // Anchors first: two consecutive slots each. Skip anchors that
     // are already identity-mapped (parameter pair lo halves).
     for &a in &anchors {
