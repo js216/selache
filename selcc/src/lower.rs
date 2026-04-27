@@ -1942,13 +1942,21 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         Ok(dst)
                     }
                     LocalStorage::Static(ref sym) => {
-                        let dst = ctx.alloc_vreg();
+                        // See note on globals below: the address vreg
+                        // must not be VReg 0 since isel uses 0 as the
+                        // frame-relative load/store sentinel.
+                        let dst = ctx.alloc_vreg_ptr();
                         ctx.emit(IrOp::LoadGlobal(dst, sym.clone()));
                         Ok(dst)
                     }
                 }
             } else if ctx.globals.contains_key(name) {
-                let dst = ctx.alloc_vreg();
+                // The vreg holding a global's address is used as the
+                // base of an indirect Load/Store. isel treats `base == 0`
+                // as the frame-relative sentinel, so the address vreg
+                // must never be VReg 0 (which can happen in a no-arg
+                // function where vreg counting starts at 0).
+                let dst = ctx.alloc_vreg_ptr();
                 ctx.emit(IrOp::LoadGlobal(dst, name.clone()));
                 Ok(dst)
             } else {
@@ -2210,7 +2218,11 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let is_global_array = ctx.globals.get(name)
                     .is_some_and(|t| matches!(t, Type::Array(..)));
                 if is_global_array {
-                    let dst = ctx.alloc_vreg();
+                    // Global-array decay produces a pointer used as the
+                    // base of an indirect Load/Store; isel treats vreg 0
+                    // as the frame-relative sentinel, so reserve a
+                    // non-zero vreg for the address.
+                    let dst = ctx.alloc_vreg_ptr();
                     ctx.emit(IrOp::LoadGlobal(dst, name.clone()));
                     return Ok(dst);
                 }

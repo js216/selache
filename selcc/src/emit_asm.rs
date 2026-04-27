@@ -347,7 +347,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             continue;
         }
         if let Some(init) = &global.init {
-            match build_init_words(init, crate::types::size_bytes_ctx(&global.ty, &unit_tctx), &unit_tctx) {
+            match build_init_words(init, crate::types::size_bytes_ctx(&global.ty, &unit_tctx), &unit_tctx, Some(&global.ty)) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: global.name.clone(),
                     values,
@@ -366,7 +366,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
     for sl in &all_static_locals {
         if let Some(init) = &sl.init {
-            match build_init_words(init, crate::types::size_bytes_ctx(&sl.ty, &unit_tctx), &unit_tctx) {
+            match build_init_words(init, crate::types::size_bytes_ctx(&sl.ty, &unit_tctx), &unit_tctx, Some(&sl.ty)) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: sl.symbol.clone(),
                     values,
@@ -585,12 +585,59 @@ fn collect_init_symbol_refs(
     }
 }
 
+/// Resolve a struct/union type through the tag table to its field list.
+/// Strips Const/Volatile/Typedef wrappers. Returns None if the type is
+/// not an aggregate or its tag is undeclared.
+fn resolve_struct_fields<'a>(
+    ty: &'a crate::types::Type,
+    tctx: &'a dyn crate::types::TypeCtx,
+) -> Option<&'a [(String, crate::types::Type)]> {
+    use crate::types::Type;
+    match ty {
+        Type::Const(inner) | Type::Volatile(inner) => resolve_struct_fields(inner, tctx),
+        Type::Typedef(name) => tctx.resolve_typedef(name).and_then(|t| resolve_struct_fields(t, tctx)),
+        Type::Struct { name, fields } | Type::Union { name, fields } => {
+            if !fields.is_empty() {
+                Some(fields.as_slice())
+            } else if let Some(n) = name {
+                tctx.resolve_tag(n)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Strip type wrappers (typedef/const/volatile) to a canonical form.
+fn strip_type<'a>(
+    ty: &'a crate::types::Type,
+    tctx: &'a dyn crate::types::TypeCtx,
+) -> &'a crate::types::Type {
+    use crate::types::Type;
+    match ty {
+        Type::Const(inner) | Type::Volatile(inner) => strip_type(inner, tctx),
+        Type::Typedef(name) => match tctx.resolve_typedef(name) {
+            Some(t) => strip_type(t, tctx),
+            None => ty,
+        },
+        _ => ty,
+    }
+}
+
 /// Evaluate a const-initializer expression to a flat list of 32-bit words.
+///
+/// `ty`, when supplied, drives designated-initializer resolution: struct
+/// `.field = v` writes at the field's word offset, array `[i] = v` writes
+/// at element `i` scaled by the element size, and positional items after
+/// a designator continue from the next slot.
 fn build_init_words(
     init: &Expr,
     size_bytes: u32,
     tctx: &dyn crate::types::TypeCtx,
+    ty: Option<&crate::types::Type>,
 ) -> Result<Vec<InitWord>> {
+    use crate::types::Type;
     match init {
         Expr::StringLit(s) => {
             // Pack four bytes per word, little-endian, to match the
@@ -612,31 +659,118 @@ fn build_init_words(
             // when the caller knows the type; otherwise grows to fit.
             let declared_words = (size_bytes.div_ceil(4)).max(1) as usize;
             let mut v: Vec<InitWord> = vec![InitWord::Num(0); declared_words];
-            let mut cursor: usize = 0;
             let ensure = |v: &mut Vec<InitWord>, idx: usize| {
                 if idx >= v.len() {
                     v.resize(idx + 1, InitWord::Num(0));
                 }
             };
+
+            // Determine the layout policy from the destination type.
+            // For structs, each positional/designated step maps to a
+            // field's word offset. For arrays, each step maps to an
+            // element of the element type. For anything else, fall
+            // back to flat word slots.
+            let stripped = ty.map(|t| strip_type(t, tctx));
+            let struct_fields = stripped.and_then(|t| match t {
+                Type::Struct { .. } | Type::Union { .. } => resolve_struct_fields(t, tctx),
+                _ => None,
+            });
+            let array_elem: Option<&Type> = stripped.and_then(|t| match t {
+                Type::Array(elem, _) => Some(elem.as_ref()),
+                _ => None,
+            });
+
+            // Field-name -> (word_offset, element_type) for struct dispatch.
+            let mut field_map: Vec<(String, usize, &Type)> = Vec::new();
+            if let Some(fields) = struct_fields {
+                for (fname, fty) in fields {
+                    let (byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, fname, tctx)
+                        .ok_or_else(|| Error::Compile { msg: format!(
+                            "internal: field {fname} not found in own struct"
+                        ) })?;
+                    if byte_off % 4 != 0 {
+                        return Err(Error::Compile { msg: format!(
+                            "field {fname} at byte offset {byte_off} is not word-aligned; \
+                             sub-word struct fields in global initializers are not supported"
+                        ) });
+                    }
+                    field_map.push((fname.clone(), (byte_off / 4) as usize, fty));
+                }
+            }
+
+            // Cursor in struct-field index (when struct), array element
+            // index (when array), or word index (flat fallback).
+            let mut field_cursor: usize = 0;
+
             for item in items {
-                let (idx, inner) = match item {
+                match item {
+                    Expr::DesignatedInit { field, value } => {
+                        // Struct field designator. Locate the field by name.
+                        let (fidx, woff, fty) = field_map.iter().enumerate()
+                            .find(|(_, (n, _, _))| n == field)
+                            .map(|(i, (_, w, t))| (i, *w, *t))
+                            .ok_or_else(|| Error::Compile { msg: format!(
+                                "designated initializer .{field} has no matching struct field \
+                                 (type info missing or field undefined)"
+                            ) })?;
+                        // Recursively build the value's words and place
+                        // them at the field's word offset.
+                        let fsize = crate::types::size_bytes_ctx(fty, tctx);
+                        let sub = build_init_words(value, fsize, tctx, Some(fty))?;
+                        for (k, w) in sub.into_iter().enumerate() {
+                            ensure(&mut v, woff + k);
+                            v[woff + k] = w;
+                        }
+                        field_cursor = fidx + 1;
+                    }
                     Expr::ArrayDesignator { index, value } => {
                         let i = eval_const_expr(index, tctx)? as usize;
-                        (i, value.as_ref())
+                        let elem_size = array_elem
+                            .map(|t| crate::types::size_bytes_ctx(t, tctx))
+                            .unwrap_or(4);
+                        let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
+                        let woff = i * elem_words;
+                        let sub = build_init_words(value, elem_size, tctx, array_elem)?;
+                        for (k, w) in sub.into_iter().enumerate() {
+                            ensure(&mut v, woff + k);
+                            v[woff + k] = w;
+                        }
+                        field_cursor = i + 1;
                     }
-                    Expr::DesignatedInit { value, .. } => {
-                        // Struct field offsets for global init are not
-                        // resolved here (const-eval has no field layout
-                        // context); write at cursor and carry on.  Tests
-                        // exercising struct-field-designated globals
-                        // would need an extended type-ctx.
-                        (cursor, value.as_ref())
+                    other => {
+                        // Positional. Place at field/element cursor.
+                        if !field_map.is_empty() {
+                            if field_cursor >= field_map.len() {
+                                return Err(Error::Compile {
+                                    msg: "too many positional initializers for struct".to_string(),
+                                });
+                            }
+                            let (_, woff, fty) = &field_map[field_cursor];
+                            let fsize = crate::types::size_bytes_ctx(fty, tctx);
+                            let sub = build_init_words(other, fsize, tctx, Some(*fty))?;
+                            let woff = *woff;
+                            for (k, w) in sub.into_iter().enumerate() {
+                                ensure(&mut v, woff + k);
+                                v[woff + k] = w;
+                            }
+                            field_cursor += 1;
+                        } else if let Some(elem) = array_elem {
+                            let elem_size = crate::types::size_bytes_ctx(elem, tctx);
+                            let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
+                            let woff = field_cursor * elem_words;
+                            let sub = build_init_words(other, elem_size, tctx, Some(elem))?;
+                            for (k, w) in sub.into_iter().enumerate() {
+                                ensure(&mut v, woff + k);
+                                v[woff + k] = w;
+                            }
+                            field_cursor += 1;
+                        } else {
+                            ensure(&mut v, field_cursor);
+                            v[field_cursor] = eval_init_word(other, tctx)?;
+                            field_cursor += 1;
+                        }
                     }
-                    other => (cursor, other),
-                };
-                ensure(&mut v, idx);
-                v[idx] = eval_init_word(inner, tctx)?;
-                cursor = idx + 1;
+                }
             }
             Ok(v)
         }
