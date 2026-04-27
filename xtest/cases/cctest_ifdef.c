@@ -1,0 +1,24 @@
+#include <float.h>
+#include <iso646.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define CCTEST_IFDEF_MARKER
+
+/* @expect 0x30 */
+int cctest_ifdef(void)
+{
+   int r = 0;
+#ifdef CCTEST_IFDEF_MARKER
+   r += 0x10;
+#endif
+#ifndef CCTEST_NONEXISTENT
+   r += 0x20;
+#endif
+   return r; /* 0x30 */
+}
