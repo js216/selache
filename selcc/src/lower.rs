@@ -1798,7 +1798,18 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         )),
         Expr::Ident(name) => ctx.local_types.get(name).cloned()
             .or_else(|| ctx.globals.get(name).cloned()),
-        Expr::Cast(ty, _) => Some(ty.clone()),
+        Expr::Cast(ty, inner) => {
+            // C99 6.7.8p22: a compound literal whose declared type is an
+            // array of unknown size takes its size from the initializer
+            // list. Without this, `sizeof((int[]){1,2,3})` would query
+            // size of `Array(Int, None)`, which is 0.
+            if let (Type::Array(elem, None), Expr::InitList(items)) =
+                (ty, inner.as_ref())
+            {
+                return Some(Type::Array(elem.clone(), Some(items.len())));
+            }
+            Some(ty.clone())
+        }
         Expr::Unary { operand, .. } => {
             // Apply integer promotion on the operand type.
             expr_type(operand, ctx).map(|t| t.integer_promoted())
