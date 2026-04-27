@@ -988,7 +988,19 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 // does not use member-offset arithmetic) keep their
                 // historical `slot_offset` base so their two-word layout
                 // is unaffected.
-                let is_aggregate = matches!(ty,
+                // Look through `const` / `volatile` qualifiers: a
+                // `const struct { ... } s = {...};` local is still an
+                // aggregate, and the brace-list initializer must walk
+                // the deepest-slot-first layout so member loads
+                // (`s.a` / `s.b` / ...) hit the words the stores
+                // wrote.  Without `unqualified()` the `Type::Const`
+                // wrapper hides the `Struct` / `Array` / `Union` tag,
+                // the match falls through to the scalar fallback
+                // path, and each init-list item is stored at
+                // `slot_base + i` while member-access lowering still
+                // computes addresses from the deepest slot — so the
+                // subsequent loads read uninitialised stack words.
+                let is_aggregate = matches!(ty.unqualified(),
                     Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
                 let storage_slot = if is_aggregate {
                     slot_offset + num_words - 1
