@@ -2023,17 +2023,77 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::IntLit(v, _) => Some(*v),
         Expr::CharLit(v) => Some(*v),
-        Expr::Unary { op: UnaryOp::Neg, operand } => try_const_eval(operand).map(|v| -v),
+        Expr::Unary { op, operand } => {
+            let v = try_const_eval(operand)?;
+            match op {
+                UnaryOp::Neg => Some(-v),
+                UnaryOp::BitNot => Some(!v),
+                UnaryOp::LogNot => Some(if v == 0 { 1 } else { 0 }),
+            }
+        }
         Expr::Binary { op, lhs, rhs } => {
+            // Short-circuit operators: evaluate rhs only when needed so
+            // that an unfoldable rhs does not poison a determined result
+            // (e.g. `1 || x` is 1 even if x is non-constant).
+            match op {
+                BinaryOp::LogAnd => {
+                    let l = try_const_eval(lhs)?;
+                    if l == 0 {
+                        return Some(0);
+                    }
+                    let r = try_const_eval(rhs)?;
+                    return Some(if r != 0 { 1 } else { 0 });
+                }
+                BinaryOp::LogOr => {
+                    let l = try_const_eval(lhs)?;
+                    if l != 0 {
+                        return Some(1);
+                    }
+                    let r = try_const_eval(rhs)?;
+                    return Some(if r != 0 { 1 } else { 0 });
+                }
+                _ => {}
+            }
             let l = try_const_eval(lhs)?;
             let r = try_const_eval(rhs)?;
             match op {
                 BinaryOp::Add => Some(l + r),
                 BinaryOp::Sub => Some(l - r),
                 BinaryOp::Mul => Some(l * r),
+                BinaryOp::Div => {
+                    if r == 0 {
+                        None
+                    } else {
+                        Some(l / r)
+                    }
+                }
+                BinaryOp::Mod => {
+                    if r == 0 {
+                        None
+                    } else {
+                        Some(l % r)
+                    }
+                }
+                BinaryOp::BitAnd => Some(l & r),
+                BinaryOp::BitOr => Some(l | r),
+                BinaryOp::BitXor => Some(l ^ r),
                 BinaryOp::Shl => Some(l << r),
                 BinaryOp::Shr => Some(l >> r),
-                _ => None,
+                BinaryOp::Eq => Some(if l == r { 1 } else { 0 }),
+                BinaryOp::Ne => Some(if l != r { 1 } else { 0 }),
+                BinaryOp::Lt => Some(if l < r { 1 } else { 0 }),
+                BinaryOp::Gt => Some(if l > r { 1 } else { 0 }),
+                BinaryOp::Le => Some(if l <= r { 1 } else { 0 }),
+                BinaryOp::Ge => Some(if l >= r { 1 } else { 0 }),
+                BinaryOp::LogAnd | BinaryOp::LogOr => unreachable!(),
+            }
+        }
+        Expr::Ternary { cond, then_expr, else_expr } => {
+            let c = try_const_eval(cond)?;
+            if c != 0 {
+                try_const_eval(then_expr)
+            } else {
+                try_const_eval(else_expr)
             }
         }
         Expr::Sizeof(arg) => match arg.as_ref() {
