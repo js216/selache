@@ -79,16 +79,35 @@ fn parse_section_name(raw: &str) -> (String, bool) {
     (s.to_string(), false)
 }
 
-/// Parse a `.VAR` body string like `_name = 0x12345678` or just `_name`.
-/// Returns `(name, optional_init_value)`.
-fn parse_var_body(raw: &str) -> (String, Option<u32>) {
+/// Initializer value for a `.VAR` directive.
+///
+/// `Num` is a literal numeric constant that is laid down in-place.
+/// `Sym` is a reference to another symbol (typically a function or a
+/// global variable address) and is materialised by reserving four
+/// zero bytes plus an `R_SHARC_ADDR32` relocation that the linker
+/// patches with the absolute address of `name`. This is what makes
+/// file-scope arrays of function pointers (and pointer-typed globals
+/// initialised by an address) work end-to-end.
+enum VarInit {
+    Num(u32),
+    Sym(String),
+}
+
+/// Parse a `.VAR` body string like `_name = 0x12345678`, `_name = sym`,
+/// or just `_name`. Returns `(name, optional_init_value)`.
+fn parse_var_body(raw: &str) -> (String, Option<VarInit>) {
     let s = raw.trim().trim_end_matches(';').trim();
 
     if let Some((lhs, rhs)) = s.split_once('=') {
         let name = lhs.trim().to_string();
         let val_str = rhs.trim();
-        let val = parse_u32_literal(val_str);
-        (name, val)
+        if let Some(num) = parse_u32_literal(val_str) {
+            (name, Some(VarInit::Num(num)))
+        } else if !val_str.is_empty() {
+            (name, Some(VarInit::Sym(val_str.to_string())))
+        } else {
+            (name, None)
+        }
     } else {
         (s.to_string(), None)
     }
@@ -368,18 +387,25 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     // body and is still forced to 48-bit.
     let mut no_compress_label: Option<String> = None;
     let mut end_label_seen: bool = false;
+    // Relocations produced by `.VAR sym = other_symbol;` directives.
+    // Folded into the main relocation table at the end of pass 2 so
+    // the linker patches symbol addresses into data words for
+    // file-scope arrays of function pointers and pointer-typed
+    // globals initialised with an address.
+    let mut var_relocs: Vec<PendingReloc> = Vec::new();
 
     // Pass 1: encode instructions, build label map, track unresolved refs
     for line in &lines {
-        process_directives(
-            line,
-            &mut sections,
-            &mut globals,
-            &mut externs,
-            &mut aliases,
-            &mut current_section_idx,
+        let mut state = DirectiveState {
+            sections: &mut sections,
+            globals: &mut globals,
+            externs: &mut externs,
+            aliases: &mut aliases,
+            current_section_idx: &mut current_section_idx,
+            var_relocs: &mut var_relocs,
             visa,
-        );
+        };
+        process_directives(line, &mut state);
 
         if let Some(label) = &line.label {
             let idx = current_or_default(
@@ -584,18 +610,55 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     // Resolve .SET aliases into section symbol tables.
     resolve_aliases(&mut sections, &aliases);
 
+    // Fold in relocations harvested from `.VAR sym = other_symbol;`
+    // directives. Each one targets either a label defined elsewhere
+    // in this file (recorded as a local symbol so the linker resolves
+    // it locally) or an external symbol (added to the externs list
+    // so the linker resolves it at link time).
+    {
+        let label_map = build_label_map(&sections);
+        for vr in &var_relocs {
+            match label_map.get(&vr.symbol) {
+                Some(&(sec_idx, word_offset)) => {
+                    if !local_refs.iter().any(|(n, _, _)| n == &vr.symbol) {
+                        local_refs.push((vr.symbol.clone(), sec_idx, word_offset));
+                    }
+                }
+                None => {
+                    if !externs.contains(&vr.symbol) {
+                        externs.push(vr.symbol.clone());
+                    }
+                }
+            }
+        }
+    }
+    relocs.extend(var_relocs);
+
     Ok(emit_elf_bytes(&sections, &globals, &externs, &local_refs, &relocs))
+}
+
+/// Mutable state threaded through directive processing. Bundling the
+/// references into one struct keeps `process_directives` to a small
+/// argument count and makes the data flow obvious: pass 1 mutates
+/// `sections`, `globals`, `externs`, `aliases`, and `var_relocs`
+/// while advancing `current_section_idx`.
+struct DirectiveState<'a> {
+    sections: &'a mut Vec<(String, SectionData)>,
+    globals: &'a mut Vec<String>,
+    externs: &'a mut Vec<String>,
+    aliases: &'a mut HashMap<String, String>,
+    current_section_idx: &'a mut Option<usize>,
+    /// Link-time relocations produced by `.VAR sym = other_symbol;`
+    /// directives, folded into the final relocation table after
+    /// pass 2 alongside the instruction-level relocations.
+    var_relocs: &'a mut Vec<PendingReloc>,
+    visa: bool,
 }
 
 /// Process directive and section-state effects from a parsed line.
 fn process_directives(
     line: &ParsedLine,
-    sections: &mut Vec<(String, SectionData)>,
-    globals: &mut Vec<String>,
-    externs: &mut Vec<String>,
-    aliases: &mut HashMap<String, String>,
-    current_section_idx: &mut Option<usize>,
-    visa: bool,
+    state: &mut DirectiveState<'_>,
 ) {
     let directive = match &line.directive {
         Some(d) => d,
@@ -605,44 +668,69 @@ fn process_directives(
     match directive {
         Directive::Section(raw_name) => {
             let (name, is_pm) = parse_section_name(raw_name);
-            let idx = ensure_section(sections, &name, is_pm, visa);
-            *current_section_idx = Some(idx);
+            let idx = ensure_section(state.sections, &name, is_pm, state.visa);
+            *state.current_section_idx = Some(idx);
         }
         Directive::Global(name) => {
-            if !globals.contains(name) {
-                globals.push(name.clone());
+            if !state.globals.contains(name) {
+                state.globals.push(name.clone());
             }
         }
         Directive::Extern(name) => {
-            if !externs.contains(name) {
-                externs.push(name.clone());
+            if !state.externs.contains(name) {
+                state.externs.push(name.clone());
             }
         }
         Directive::Var(raw_body) => {
             let idx = current_or_default(
-                sections, current_section_idx, ".data", false, visa,
+                state.sections, state.current_section_idx, ".data", false, state.visa,
             );
             let (var_name, init_val) = parse_var_body(raw_body);
-            let sec = &mut sections[idx].1;
+            let sec = &mut state.sections[idx].1;
             // DM data sections use byte offsets in symbol values so
             // the linker (which treats BW sections as byte-addressed)
             // places each variable at the correct byte boundary.
             let byte_off = sec.code.len() as u32;
-            sec.symbols.push((var_name, byte_off));
+            // A bare `.VAR` (no name on the lhs) means a continuation
+            // word that extends the most recently named array; in
+            // that case we do not register a new symbol.
+            if !var_name.is_empty() {
+                sec.symbols.push((var_name, byte_off));
+            }
 
-            if let Some(val) = init_val {
-                sec.code.extend_from_slice(&val.to_le_bytes());
+            match init_val {
+                Some(VarInit::Num(val)) => {
+                    sec.code.extend_from_slice(&val.to_le_bytes());
+                }
+                Some(VarInit::Sym(target)) => {
+                    // Reserve a 32-bit slot of zeros and emit a
+                    // link-time `R_SHARC_ADDR32` against the named
+                    // symbol so the linker patches the absolute
+                    // runtime address of `target` into the data word.
+                    // This is the path that handles file-scope arrays
+                    // of function pointers and `void *p = &g;`-shaped
+                    // pointer globals.
+                    sec.code.extend_from_slice(&0u32.to_le_bytes());
+                    state.var_relocs.push(PendingReloc {
+                        section_idx: idx,
+                        byte_offset: byte_off,
+                        symbol: target,
+                        rela_type: selelf::elf::R_SHARC_ADDR32 as u8,
+                        addend: 0,
+                    });
+                }
+                None => {}
             }
         }
         Directive::Byte(data) => {
             let idx = current_or_default(
-                sections, current_section_idx, ".text", true, visa,
+                state.sections, state.current_section_idx, ".text", true, state.visa,
             );
-            sections[idx].1.code.extend_from_slice(data);
+            state.sections[idx].1.code.extend_from_slice(data);
         }
         Directive::Align(boundary) => {
-            if let Some(idx) = *current_section_idx {
-                let sec = &mut sections[idx].1;
+            if let Some(idx) = *state.current_section_idx {
+                let sec = &mut state.sections[idx].1;
                 let unit = if sec.is_pm { 6 } else { 4 };
                 let current_words = sec.code.len() / unit;
                 let b = *boundary as usize;
@@ -657,7 +745,7 @@ fn process_directives(
             }
         }
         Directive::Set(name, value) => {
-            aliases.insert(name.clone(), value.clone());
+            state.aliases.insert(name.clone(), value.clone());
         }
     }
 }
@@ -1130,21 +1218,37 @@ mod tests {
     fn test_parse_var_body_with_init() {
         let (name, val) = parse_var_body("_data = 0x12345678;");
         assert_eq!(name, "_data");
-        assert_eq!(val, Some(0x12345678));
+        match val {
+            Some(VarInit::Num(n)) => assert_eq!(n, 0x12345678),
+            other => panic!("expected Num, got {:?}", other.is_some()),
+        }
     }
 
     #[test]
     fn test_parse_var_body_no_init() {
         let (name, val) = parse_var_body("_data;");
         assert_eq!(name, "_data");
-        assert_eq!(val, None);
+        assert!(val.is_none());
     }
 
     #[test]
     fn test_parse_var_body_decimal() {
         let (name, val) = parse_var_body("_count = 42;");
         assert_eq!(name, "_count");
-        assert_eq!(val, Some(42));
+        match val {
+            Some(VarInit::Num(n)) => assert_eq!(n, 42),
+            other => panic!("expected Num, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_parse_var_body_symbolic() {
+        let (name, val) = parse_var_body("_table = my_func.;");
+        assert_eq!(name, "_table");
+        match val {
+            Some(VarInit::Sym(s)) => assert_eq!(s, "my_func."),
+            other => panic!("expected Sym, got {:?}", other.is_some()),
+        }
     }
 
     /// Read a 48-bit big-endian instruction word from 6 bytes.

@@ -219,6 +219,25 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     let by_name: HashMap<&str, &CompiledFunction> =
         compiled.iter().map(|c| (c.name.as_str(), c)).collect();
     let mut worklist: Vec<String> = reachable.iter().cloned().collect();
+    // Seed the worklist with every function whose address is taken in a
+    // file-scope initialiser (e.g. `int (*tbl[])(void) = { f, g, h };`).
+    // Those references live in data-section relocations rather than in
+    // any code path, so the code-only walk below would otherwise drop
+    // the static functions and the linker would fail to resolve their
+    // R_SHARC_ADDR32 fixups against the data words.
+    let mut seed_init_refs = |init: &Expr| {
+        collect_init_symbol_refs(init, &fn_names, &mut reachable, &mut worklist);
+    };
+    for global in &unit.globals {
+        if let Some(init) = &global.init {
+            seed_init_refs(init);
+        }
+    }
+    for sl in &all_static_locals {
+        if let Some(init) = &sl.init {
+            seed_init_refs(init);
+        }
+    }
     while let Some(name) = worklist.pop() {
         let Some(cf) = by_name.get(name.as_str()) else { continue };
         for mi in &cf.instrs {
@@ -339,7 +358,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                     let words = crate::types::size_bytes_ctx(&global.ty, &unit_tctx).div_ceil(4).max(1);
                     data_entries.push(DataEntry {
                         name: global.name.clone(),
-                        values: vec![0u32; words as usize],
+                        values: vec![InitWord::Num(0); words as usize],
                     });
                 }
             }
@@ -357,7 +376,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                     let words = crate::types::size_bytes_ctx(&sl.ty, &unit_tctx).div_ceil(4).max(1);
                     data_entries.push(DataEntry {
                         name: sl.symbol.clone(),
-                        values: vec![0u32; words as usize],
+                        values: vec![InitWord::Num(0); words as usize],
                     });
                 }
             }
@@ -409,7 +428,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let sym = with_abi_suffix(name);
             let _ = writeln!(out, ".GLOBAL {sym};");
             let words = sz.div_ceil(4).max(1);
-            let zero = vec![0u32; words as usize];
+            let zero = vec![InitWord::Num(0); words as usize];
             emit_var_bytes(&mut out, &sym, &zero);
         }
         out.push_str(".ENDSEG;\n\n");
@@ -435,7 +454,8 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let _ = writeln!(out, ".GLOBAL {name};");
             let mut bytes: Vec<u8> = s.as_bytes().to_vec();
             bytes.push(0);
-            let words = pack_bytes_le(&bytes);
+            let words: Vec<InitWord> =
+                pack_bytes_le(&bytes).into_iter().map(InitWord::Num).collect();
             emit_var_bytes(&mut out, &name, &words);
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
@@ -443,6 +463,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let _ = writeln!(out, ".GLOBAL {name};");
             let mut words: Vec<u32> = ws.clone();
             words.push(0);
+            let words: Vec<InitWord> = words.into_iter().map(InitWord::Num).collect();
             emit_var_bytes(&mut out, &name, &words);
         }
         out.push_str(".ENDSEG;\n");
@@ -483,16 +504,33 @@ fn with_abi_suffix(name: &str) -> String {
     }
 }
 
+/// One word of a global initialiser: either a literal value laid down
+/// in place, or a reference to another symbol that the linker patches
+/// with the symbol's runtime address (R_SHARC_ADDR32). The latter is
+/// what makes file-scope arrays of function pointers and pointer-typed
+/// globals initialised by an address work.
+#[derive(Clone, Debug)]
+enum InitWord {
+    Num(u32),
+    Sym(String),
+}
+
 /// Emit a `.VAR name = v0, v1, ...;` initializer line. Using `.VAR`
 /// keeps each logical word at 4 bytes regardless of char-size, which
 /// matches what the previous byte-level emitter produced.
-fn emit_var_bytes(out: &mut String, sym: &str, values: &[u32]) {
+fn emit_var_bytes(out: &mut String, sym: &str, values: &[InitWord]) {
+    let render = |w: &InitWord| -> String {
+        match w {
+            InitWord::Num(v) => format!("0x{v:08X}"),
+            InitWord::Sym(name) => with_abi_suffix(name),
+        }
+    };
     if values.is_empty() {
         let _ = writeln!(out, ".VAR {sym};");
         return;
     }
     if values.len() == 1 {
-        let _ = writeln!(out, ".VAR {sym} = 0x{:08X};", values[0]);
+        let _ = writeln!(out, ".VAR {sym} = {};", render(&values[0]));
         return;
     }
     // Multiple words: emit one .VAR per value with a sequential helper
@@ -500,19 +538,59 @@ fn emit_var_bytes(out: &mut String, sym: &str, values: &[u32]) {
     // selas does not support `.VAR name[] = {...}`, so for multi-word
     // initialisers we just emit the first word under the real name and
     // follow with anonymous continuation words.
-    let _ = writeln!(out, ".VAR {sym} = 0x{:08X};", values[0]);
+    let _ = writeln!(out, ".VAR {sym} = {};", render(&values[0]));
     for v in &values[1..] {
-        let _ = writeln!(out, ".VAR = 0x{v:08X};");
+        let _ = writeln!(out, ".VAR = {};", render(v));
     }
 }
 
 struct DataEntry {
     name: String,
-    values: Vec<u32>,
+    values: Vec<InitWord>,
+}
+
+/// Walk a global initializer expression, recording every function-name
+/// reference (bare identifier or `&fn` address-of) that names a
+/// known TU-defined function. Used to seed DCE so a `static` function
+/// reached only via a file-scope address-taken initialiser is not
+/// dropped before the data-section relocation against it is emitted.
+fn collect_init_symbol_refs(
+    expr: &Expr,
+    fn_names: &HashSet<String>,
+    reachable: &mut HashSet<String>,
+    worklist: &mut Vec<String>,
+) {
+    match expr {
+        Expr::Ident(name) => {
+            if fn_names.contains(name) && reachable.insert(name.clone()) {
+                worklist.push(name.clone());
+            }
+        }
+        Expr::AddrOf(inner) => {
+            collect_init_symbol_refs(inner, fn_names, reachable, worklist);
+        }
+        Expr::Cast(_, inner) => {
+            collect_init_symbol_refs(inner, fn_names, reachable, worklist);
+        }
+        Expr::InitList(items) => {
+            for item in items {
+                collect_init_symbol_refs(item, fn_names, reachable, worklist);
+            }
+        }
+        Expr::ArrayDesignator { value, .. }
+        | Expr::DesignatedInit { value, .. } => {
+            collect_init_symbol_refs(value, fn_names, reachable, worklist);
+        }
+        _ => {}
+    }
 }
 
 /// Evaluate a const-initializer expression to a flat list of 32-bit words.
-fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeCtx) -> Result<Vec<u32>> {
+fn build_init_words(
+    init: &Expr,
+    size_bytes: u32,
+    tctx: &dyn crate::types::TypeCtx,
+) -> Result<Vec<InitWord>> {
     match init {
         Expr::StringLit(s) => {
             // Pack four bytes per word, little-endian, to match the
@@ -524,7 +602,7 @@ fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeC
             // zero-fill tail elements match the declaration.
             let declared = size_bytes.max(bytes.len() as u32) as usize;
             bytes.resize(declared, 0);
-            Ok(pack_bytes_le(&bytes))
+            Ok(pack_bytes_le(&bytes).into_iter().map(InitWord::Num).collect())
         }
         Expr::InitList(items) => {
             // Honour designated initializers (`[n] = v`, `.field = v`).
@@ -533,11 +611,11 @@ fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeC
             // designator's index + 1.  Sized at `size_bytes / 4` words
             // when the caller knows the type; otherwise grows to fit.
             let declared_words = (size_bytes.div_ceil(4)).max(1) as usize;
-            let mut v: Vec<u32> = vec![0u32; declared_words];
+            let mut v: Vec<InitWord> = vec![InitWord::Num(0); declared_words];
             let mut cursor: usize = 0;
-            let ensure = |v: &mut Vec<u32>, idx: usize| {
+            let ensure = |v: &mut Vec<InitWord>, idx: usize| {
                 if idx >= v.len() {
-                    v.resize(idx + 1, 0);
+                    v.resize(idx + 1, InitWord::Num(0));
                 }
             };
             for item in items {
@@ -557,17 +635,39 @@ fn build_init_words(init: &Expr, size_bytes: u32, tctx: &dyn crate::types::TypeC
                     other => (cursor, other),
                 };
                 ensure(&mut v, idx);
-                v[idx] = eval_const_expr(inner, tctx)? as u32;
+                v[idx] = eval_init_word(inner, tctx)?;
                 cursor = idx + 1;
             }
             Ok(v)
         }
         other => {
             let words = size_bytes.div_ceil(4).max(1);
-            let mut v = vec![0u32; words as usize];
-            v[0] = eval_const_expr(other, tctx)? as u32;
+            let mut v: Vec<InitWord> = vec![InitWord::Num(0); words as usize];
+            v[0] = eval_init_word(other, tctx)?;
             Ok(v)
         }
+    }
+}
+
+/// Evaluate a single initializer slot. If the expression is the
+/// address of (or bare reference to) a named function or global, emit
+/// a symbolic init word so the linker patches in the symbol's runtime
+/// address; otherwise fall back to numeric const-evaluation. The bare-
+/// identifier case covers the C99 6.3.2.1p4 function-designator-to-
+/// pointer decay used in initialisers like
+///     int (*tbl[])(void) = { f, g, h };
+fn eval_init_word(
+    expr: &Expr,
+    tctx: &dyn crate::types::TypeCtx,
+) -> Result<InitWord> {
+    match expr {
+        Expr::Ident(name) => Ok(InitWord::Sym(name.clone())),
+        Expr::AddrOf(inner) => match inner.as_ref() {
+            Expr::Ident(name) => Ok(InitWord::Sym(name.clone())),
+            _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
+        },
+        Expr::Cast(_, inner) => eval_init_word(inner, tctx),
+        _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
     }
 }
 
