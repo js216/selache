@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_lut.c --- cctest case const_lut
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x258 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ static const struct {
     {3, 300}
 };
 
-/* @expect 0x258 */
-int cctest_const_lut(void)
+int test_main(void)
 {
    return g_lut[0].val + g_lut[1].val +
           g_lut[2].val; /* 100+200+300 = 600 = 0x258 */

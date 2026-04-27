@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_partial_init.c --- cctest case partial_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -26,8 +32,7 @@ struct partial5 {
    int e;
 };
 
-/* @expect 0x0A */
-int cctest_partial_init(void)
+int test_main(void)
 {
    struct partial5 s = {.a = 10};
    return s.a + s.b + s.c + s.d + s.e; /* 10+0+0+0+0 = 10 = 0x0A */

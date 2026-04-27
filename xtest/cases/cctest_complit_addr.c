@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complit_addr.c --- cctest case complit_addr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@
    return rgb.r + rgb.g + rgb.b; /* 31+63+15 = 109 = 0x6D */
 }
 
-/* @expect 0x42 */
-int cctest_complit_addr(void)
+int test_main(void)
 {
    int *p = &(int){0x42};
    return *p; /* 0x42 */

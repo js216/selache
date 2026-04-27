@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_deep_loops.c --- cctest case deep_loops
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0C */
-int cctest_deep_loops(void)
+int test_main(void)
 {
    int count = 0;
    for (int i = 0; i < 2; i++)

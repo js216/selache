@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multi_return_path.c --- cctest case multi_return_path
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@
    return (s.b == -1) ? 0x55 : 0xAA;
 }
 
-/* @expect 0x55 */
-int cctest_multi_return_path(void)
+int test_main(void)
 {
    int x = 3;
    if (x == 1)

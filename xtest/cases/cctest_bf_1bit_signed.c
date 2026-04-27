@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bf_1bit_signed.c --- cctest case bf_1bit_signed
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_bf_1bit_signed(void)
+int test_main(void)
 {
    struct {
       signed int b : 1;

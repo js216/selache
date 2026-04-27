@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_binary_tree.c --- cctest case binary_tree
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -21,8 +27,7 @@ static int tree_sum(struct tnode *n)
    return n->val + tree_sum(n->left) + tree_sum(n->right);
 }
 
-/* @expect 0x0A */
-int cctest_binary_tree(void)
+int test_main(void)
 {
    struct tnode a, b, c, d;
    d.val   = 4;

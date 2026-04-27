@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_token_paste.c --- cctest case token_paste
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define PASTE(a, b) a##b
 
-/* @expect 0x42 */
-int cctest_token_paste(void)
+int test_main(void)
 {
    int xy = 0x42;
    return PASTE(x, y); /* 0x42 */

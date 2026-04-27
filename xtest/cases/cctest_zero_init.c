@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_zero_init.c --- cctest case zero_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,7 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0 */
-int cctest_zero_init(void)
+int test_main(void)
 {
    int arr[5] = {0};

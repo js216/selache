@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_past_end.c --- cctest case past_end
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 4 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 4 */
-int cctest_past_end(void)
+int test_main(void)
 {
    int arr[4];
    int *end  = &arr[4]; /* valid for comparison */

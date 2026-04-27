@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_double_negation.c --- cctest case double_negation
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x03 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x03 */
-int cctest_double_negation(void)
+int test_main(void)
 {
    int r = 0;
    if (!!42 == 1)

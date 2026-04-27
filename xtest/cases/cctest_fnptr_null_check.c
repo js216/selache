@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr_null_check.c --- cctest case fnptr_null_check
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int helper_add(int x, int y)
    return x + y;
 }
 
-/* @expect 0x30 */
-int cctest_fnptr_null_check(void)
+int test_main(void)
 {
    int (*fp)(int, int)      = helper_add;
    int (*null_fp)(int, int) = 0;

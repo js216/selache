@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_complit.c --- cctest case const_complit
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@
    return (wide == -5) ? 0x55 : 0xAA;
 }
 
-/* @expect 0x55 */
-int cctest_const_complit(void)
+int test_main(void)
 {
    const int *p = (const int[]){10, 20, 30};
    return (p[0] + p[1] + p[2] == 60) ? 0x55 : 0xAA;

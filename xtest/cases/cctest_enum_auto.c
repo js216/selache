@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_enum_auto.c --- cctest case enum_auto
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x06 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,7 +16,6 @@
 
 enum seq { SEQ_A = 5, SEQ_B = SEQ_A + 3, SEQ_C = SEQ_B * 2 };
 
-/* @expect 0x06 */
-int cctest_enum_auto(void)
+int test_main(void)
 {
    enum seq { A, B, C, D };

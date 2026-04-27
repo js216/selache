@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_rw.c --- cctest case global_rw
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 int cctest_gvar = 0;
 
-/* @expect 0x42 */
-int cctest_global_rw(void)
+int test_main(void)
 {
    cctest_gvar = 0x42;
    return cctest_gvar; /* 0x42 */

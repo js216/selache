@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_elif_no_else.c --- cctest case elif_no_else
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define ELIF_VAL 3
 
-/* @expect 0x30 */
-int cctest_elif_no_else(void)
+int test_main(void)
 {
    int r = 0xFF;
 #if ELIF_VAL == 1

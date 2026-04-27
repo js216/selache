@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_uint8_wrap.c --- cctest case uint8_wrap
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x2C */
-int cctest_uint8_wrap(void)
+int test_main(void)
 {
    uint8_t a = 200;
    uint8_t b = 100;

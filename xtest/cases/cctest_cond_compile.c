@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_cond_compile.c --- cctest case cond_compile
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x20 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define CCTEST_COND_VAL 2
 
-/* @expect 0x20 */
-int cctest_cond_compile(void)
+int test_main(void)
 {
 #if CCTEST_COND_VAL == 1
    return 0x10;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bf_unsigned_wrap.c --- cctest case bf_unsigned_wrap
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x07 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
    return (int)sizeof(enum e); /* sizeof(int) = 4 */
 }
 
-/* @expect 0x07 */
-int cctest_bf_unsigned_wrap(void)
+int test_main(void)
 {
    struct {
       unsigned int v : 3;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sizeof_exprs.c --- cctest case sizeof_exprs
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@
    return x + y + z; /* 15 + 40 + 1 = 56 = 0x38 */
 }
 
-/* @expect 0x0A */
-int cctest_sizeof_exprs(void)
+int test_main(void)
 {
    int x = 0;
    int a = (int)sizeof(x + 1);           /* sizeof(int) = 4 */

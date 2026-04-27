@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_neg_arr_idx.c --- cctest case neg_arr_idx
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x42 */
-int cctest_neg_arr_idx(void)
+int test_main(void)
 {
    int arr[5] = {0x10, 0x20, 0x42, 0x60, 0x80};
    int *p     = &arr[4];

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_escapes2.c --- cctest case escapes2
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x72 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x72 */
-int cctest_escapes2(void)
+int test_main(void)
 {
    char a = '\a';                /* 7  (BEL)  */
    char b = '\b';                /* 8  (BS)   */

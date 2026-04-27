@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_for_two_init.c --- cctest case for_two_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x32 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x32 */
-int cctest_for_two_init(void)
+int test_main(void)
 {
    int sum = 0;
    for (int i = 0, j = 10; i < 5; i++, j--)

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_comma.c --- cctest case nested_comma
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 5 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 5 */
-int cctest_nested_comma(void)
+int test_main(void)
 {
    int a = 1, b = 2;
    return (a++, b++, a + b); /* a=2, b=3 → 5 */

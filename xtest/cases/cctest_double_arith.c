@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_double_arith.c --- cctest case double_arith
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_double_arith(void)
+int test_main(void)
 {
    double a = 3.5;
    double b = 2.0;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_callback_ctx.c --- cctest case callback_ctx
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ static int ctx_callback(void *ctx, int val)
    return *acc;
 }
 
-/* @expect 0x3C */
-int cctest_callback_ctx(void)
+int test_main(void)
 {
    int total = 0;
    ctx_callback(&total, 10);

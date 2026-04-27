@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_byte_copy.c --- cctest case byte_copy
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ static void byte_copy(char *dst, const char *src, int n)
       dst[i] = src[i];
 }
 
-/* @expect 0x55 */
-int cctest_byte_copy(void)
+int test_main(void)
 {
    int src = 0x12345678;
    int dst = 0;

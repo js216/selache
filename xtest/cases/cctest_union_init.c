@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_union_init.c --- cctest case union_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x4C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ union u_init {
    float f;
 };
 
-/* @expect 0x4C */
-int cctest_union_init(void)
+int test_main(void)
 {
    union u_init a = {0x42};       /* first member: i = 0x42 */
    union u_init b = {.f = 10.0f}; /* designated: f = 10.0 */

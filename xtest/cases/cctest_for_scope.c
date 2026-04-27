@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_for_scope.c --- cctest case for_scope
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x63 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x63 */
-int cctest_for_scope(void)
+int test_main(void)
 {
    int i = 99;
    for (int i = 0; i < 5; i++)

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_void_return.c --- cctest case void_return
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xA5 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -16,8 +22,7 @@ static void void_setter(int *p, int val)
    return; /* trailing bare return */
 }
 
-/* @expect 0xA5 */
-int cctest_void_return(void)
+int test_main(void)
 {
    int x = 99;
    void_setter(&x, -1); /* early return, x unchanged */

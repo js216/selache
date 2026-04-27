@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_desig_nested_arr.c --- cctest case desig_nested_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1E */
-int cctest_desig_nested_arr(void)
+int test_main(void)
 {
    struct pt {
       int x;

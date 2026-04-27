@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_indirect_macro.c --- cctest case indirect_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@
 #define IND_B      20
 #define IND_SEL(x) IND_##x
 
-/* @expect 0x1E */
-int cctest_indirect_macro(void)
+int test_main(void)
 {
    return IND_SEL(A) + IND_SEL(B); /* IND_A + IND_B = 10+20 = 30 = 0x1E */
 }

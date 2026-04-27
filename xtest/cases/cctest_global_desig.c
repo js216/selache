@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_desig.c --- cctest case global_desig
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ static struct {
    int c;
 } g_desig_struct = {.c = 30, .a = 10};
 
-/* @expect 0x28 */
-int cctest_global_desig(void)
+int test_main(void)
 {
    return g_desig_struct.a + g_desig_struct.b + g_desig_struct.c;
    /* 10 + 0 + 30 = 40 = 0x28 */

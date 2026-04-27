@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bitfield16.c --- cctest case bitfield16
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xDF */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@
    return (bf.val < 0) ? 0xAA : 0xBB; /* 0xAA */
 }
 
-/* @expect 0xDF */
-int cctest_bitfield16(void)
+int test_main(void)
 {
    struct {
       unsigned int lo : 16;

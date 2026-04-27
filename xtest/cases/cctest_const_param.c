@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_param.c --- cctest case const_param
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int const_param(const int x)
    return x + 1; /* cannot modify x */
 }
 
-/* @expect 0x42 */
-int cctest_const_param(void)
+int test_main(void)
 {
    int a = 0x41;
    return const_param(a); /* 0x42 */

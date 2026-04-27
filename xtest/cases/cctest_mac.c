@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mac.c --- cctest case mac
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1E */
-int cctest_mac(void)
+int test_main(void)
 {
    int acc = 0;
    int i;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complit_arg.c --- cctest case complit_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -24,8 +30,7 @@ static int pair_sum(const int *p)
    return p[0] + p[1];
 }
 
-/* @expect 0x1E */
-int cctest_complit_arg(void)
+int test_main(void)
 {
    return pair_sum((const int[]){10, 20});
 }

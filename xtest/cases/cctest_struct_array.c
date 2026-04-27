@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_array.c --- cctest case struct_array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct item {
    int val;
 };
 
-/* @expect 0x3C */
-int cctest_struct_array(void)
+int test_main(void)
 {
    struct item items[3];
    items[0].val = 10;

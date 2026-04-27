@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_deep_expr.c --- cctest case deep_expr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 4 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int factorial(int n)
    return n * factorial(n - 1);
 }
 
-/* @expect 4 */
-int cctest_deep_expr(void)
+int test_main(void)
 {
    return factorial(4) / 8 + factorial(1);
 }

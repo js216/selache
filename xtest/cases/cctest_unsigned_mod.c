@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_unsigned_mod.c --- cctest case unsigned_mod
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 2 */
-int cctest_unsigned_mod(void)
+int test_main(void)
 {
    unsigned int a = 17, b = 5;
    return (int)(a % b); /* 2 */

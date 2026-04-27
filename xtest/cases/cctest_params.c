@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_params.c --- cctest case params
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x4E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int params_helper(int a, int b)
    return a * b + 1;
 }
 
-/* @expect 0x4E */
-int cctest_params(void)
+int test_main(void)
 {
    return params_helper(7, 11);
 }

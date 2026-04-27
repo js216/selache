@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arr_of_ptr.c --- cctest case arr_of_ptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@
    return (int)((bf.hi >> 8) + (bf.lo & 0xFF)); /* 0xAB + 0x34 = 0xDF */
 }
 
-/* @expect 0x3C */
-int cctest_arr_of_ptr(void)
+int test_main(void)
 {
    int a = 10, b = 20, c = 30;
    int *ptrs[3];

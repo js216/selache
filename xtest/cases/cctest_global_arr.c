@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_arr.c --- cctest case global_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x40 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 int cctest_garr[] = {0x10, 0x20, 0x30};
 
-/* @expect 0x40 */
-int cctest_global_arr(void)
+int test_main(void)
 {
    return cctest_garr[0] + cctest_garr[2]; /* 0x40 */
 }

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_no_alias.c --- cctest case struct_no_alias
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x6D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct s2 {
    int b;
 };
 
-/* @expect 0x6D */
-int cctest_struct_no_alias(void)
+int test_main(void)
 {
    struct s2 x;
    x.a         = 10;

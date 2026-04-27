@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stringify_special.c --- cctest case stringify_special
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x68 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -22,8 +28,7 @@ struct s2 {
 
 #define STR_SPECIAL(x) #x
 
-/* @expect 0x68 */
-int cctest_stringify_special(void)
+int test_main(void)
 {
    const char *s1 = STR_SPECIAL(a + b);  /* "a+b" */
    const char *s2 = STR_SPECIAL(x == y); /* "x==y" */

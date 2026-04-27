@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sizeof_deref_null.c --- cctest case sizeof_deref_null
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 4 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@
    return bf.a * bf.d + bf.b + bf.c; /* 35 + 10 + 3 = 48 = 0x30 */
 }
 
-/* @expect 4 */
-int cctest_sizeof_deref_null(void)
+int test_main(void)
 {
    int *p = 0;
    return (int)sizeof(*p); /* sizeof(int) = 4, *p is NOT evaluated */

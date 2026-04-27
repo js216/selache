@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_narrow_trunc.c --- cctest case narrow_trunc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x5678 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x5678 */
-int cctest_narrow_trunc(void)
+int test_main(void)
 {
    int x   = 0x12345678;
    short s = (short)x;

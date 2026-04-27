@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stdc_version.c --- cctest case stdc_version
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x99 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x99 */
-int cctest_stdc_version(void)
+int test_main(void)
 {
 #ifdef __STDC_VERSION__
    long v = __STDC_VERSION__;

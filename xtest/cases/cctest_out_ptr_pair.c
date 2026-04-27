@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_out_ptr_pair.c --- cctest case out_ptr_pair
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static void divmod(int a, int b, int *q, int *r)
    *r = a % b;
 }
 
-/* @expect 0x55 */
-int cctest_out_ptr_pair(void)
+int test_main(void)
 {
    int q, r;
    divmod(17, 5, &q, &r);

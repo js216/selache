@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_predef_macro.c --- cctest case predef_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@
 #define PASTE_XA(a, b)  PASTE2_XA(a, b)
 int PASTE_XA(cctest_line_paste_, __LINE__) = 0x11;
 
-/* @expect 1 */
-int cctest_predef_macro(void)
+int test_main(void)
 {
    int line = __LINE__;
    return (line > 0) ? 1 : 0; /* 1 */

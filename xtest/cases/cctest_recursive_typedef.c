@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_recursive_typedef.c --- cctest case recursive_typedef
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ struct rtd_node {
    rtd_node_t *next;
 };
 
-/* @expect 0x1E */
-int cctest_recursive_typedef(void)
+int test_main(void)
 {
    rtd_node_t a, b;
    a.val  = 10;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ull_max.c --- cctest case ull_max
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xFF */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xFF */
-int cctest_ull_max(void)
+int test_main(void)
 {
    unsigned long long max   = ~0ULL;
    unsigned long long check = 0xFFFFFFFFFFFFFFFFULL;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arr_struct_desig.c --- cctest case arr_struct_desig
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x21 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct arr_di {
    int val;
 };
 
-/* @expect 0x21 */
-int cctest_arr_struct_desig(void)
+int test_main(void)
 {
    struct arr_di arr[3] = {
        [1] = {.id = 1, .val = 0x20}

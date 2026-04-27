@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fib_fnptr.c --- cctest case fib_fnptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x15 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ static int fib_rec(int n)
    return fib_fp(n - 1) + fib_fp(n - 2);
 }
 
-/* @expect 0x15 */
-int cctest_fib_fnptr(void)
+int test_main(void)
 {
    fib_fp = fib_rec;
    return fib_fp(8); /* fib(8) = 21 = 0x15 */

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_sub.c --- cctest case ptr_sub
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_ptr_sub(void)
+int test_main(void)
 {
    int arr[5];
    int *p1 = &arr[1];

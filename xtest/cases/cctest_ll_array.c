@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ll_array.c --- cctest case ll_array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_ll_array(void)
+int test_main(void)
 {
    long long arr[3];
    arr[0] = 1LL << 33;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_for_ever.c --- cctest case for_ever
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@
    return bf.a + bf.b + bf.c + bf.d; /* 7+5+3+1 = 16 = 0x10 */
 }
 
-/* @expect 7 */
-int cctest_for_ever(void)
+int test_main(void)
 {
    int i = 0;
    for (;;) {

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_do_while_macro.c --- cctest case do_while_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x73 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@
       (b)    = _t;                                                             \
    } while (0)
 
-/* @expect 0x73 */
-int cctest_do_while_macro(void)
+int test_main(void)
 {
    int x = 3, y = 7;
    SWAP_INTS(x, y);

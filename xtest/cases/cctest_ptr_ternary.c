@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_ternary.c --- cctest case ptr_ternary
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x28 */
-int cctest_ptr_ternary(void)
+int test_main(void)
 {
    int arr[5] = {10, 20, 30, 40, 50};
    int idx    = 3;

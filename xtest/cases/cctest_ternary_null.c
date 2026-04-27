@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ternary_null.c --- cctest case ternary_null
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x2A */
-int cctest_ternary_null(void)
+int test_main(void)
 {
    int x    = 42;
    int *p   = &x;

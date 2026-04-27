@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_void_fn.c --- cctest case void_fn
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x77 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static void set_val(int *p, int v)
    *p = v;
 }
 
-/* @expect 0x77 */
-int cctest_void_fn(void)
+int test_main(void)
 {
    int x = 0;
    set_val(&x, 0x77);

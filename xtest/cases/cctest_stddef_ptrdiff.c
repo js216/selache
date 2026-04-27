@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stddef_ptrdiff.c --- cctest case stddef_ptrdiff
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_stddef_ptrdiff(void)
+int test_main(void)
 {
    int arr[5];
    ptrdiff_t d = &arr[4] - &arr[1];

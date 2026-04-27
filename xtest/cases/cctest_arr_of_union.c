@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arr_of_union.c --- cctest case arr_of_union
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ union ival {
    float f;
 };
 
-/* @expect 0x3C */
-int cctest_arr_of_union(void)
+int test_main(void)
 {
    union ival arr[3];
    arr[0].i = 10;

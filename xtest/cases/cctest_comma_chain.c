@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_comma_chain.c --- cctest case comma_chain
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x14 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
    return (int)sizeof(union u); /* sizeof(double)=4 with -double-size-32 */
 }
 
-/* @expect 0x14 */
-int cctest_comma_chain(void)
+int test_main(void)
 {
    int x = 10;
    int y = (x += 5, x += 5, x);

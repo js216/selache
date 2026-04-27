@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_chain_copy.c --- cctest case struct_chain_copy
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct s2 {
    int b;
 };
 
-/* @expect 0x42 */
-int cctest_struct_chain_copy(void)
+int test_main(void)
 {
    struct s2 a, b, c;
    c.a = 0x42;

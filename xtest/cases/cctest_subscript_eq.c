@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_subscript_eq.c --- cctest case subscript_eq
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_subscript_eq(void)
+int test_main(void)
 {
    int arr[4];
    arr[0] = 0x10;

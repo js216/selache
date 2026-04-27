@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_row_major.c --- cctest case row_major
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@
    return (s.v == 0) ? 0x07 : 0x00;
 }
 
-/* @expect 0x55 */
-int cctest_row_major(void)
+int test_main(void)
 {
    int a[2][3] = {
        {1, 2, 3},

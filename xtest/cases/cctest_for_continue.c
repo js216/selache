@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_for_continue.c --- cctest case for_continue
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 9 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 9 */
-int cctest_for_continue(void)
+int test_main(void)
 {
    int s = 0;
    for (int i = 0; i < 6; i++) {

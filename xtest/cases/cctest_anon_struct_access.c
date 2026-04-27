@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_anon_struct_access.c --- cctest case anon_struct_access
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -20,8 +26,7 @@ struct outer {
    int b;
 };
 
-/* @expect 0x1E */
-int cctest_anon_struct_access(void)
+int test_main(void)
 {
    struct outer {
       int tag;

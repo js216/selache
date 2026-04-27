@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ring_buffer.c --- cctest case ring_buffer
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x12 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x12 */
-int cctest_ring_buffer(void)
+int test_main(void)
 {
    int buf[4]        = {0, 0, 0, 0};
    unsigned int head = 0;

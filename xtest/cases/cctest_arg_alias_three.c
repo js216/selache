@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arg_alias_three.c --- cctest case arg_alias_three
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int three_params_helper(int a, int b, int c)
    return a * b + c;
 }
 
-/* @expect 0x1A */
-int cctest_arg_alias_three(void)
+int test_main(void)
 {
    return three_params_helper(4, 5, 6); /* 4*5+6 = 26 */
 }

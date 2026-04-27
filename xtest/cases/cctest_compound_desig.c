@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_compound_desig.c --- cctest case compound_desig
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static int dlit_sum(struct dlit s)
    return s.x + s.y + s.z;
 }
 
-/* @expect 0x28 */
-int cctest_compound_desig(void)
+int test_main(void)
 {
    return dlit_sum((struct dlit){.z = 30, .x = 10}); /* 10+0+30 = 40 = 0x28 */
 }

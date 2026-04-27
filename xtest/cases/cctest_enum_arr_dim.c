@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_enum_arr_dim.c --- cctest case enum_arr_dim
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 enum arr_sz { SZ_A = 3, SZ_TOTAL = 3 };
 
-/* @expect 0x3C */
-int cctest_enum_arr_dim(void)
+int test_main(void)
 {
    int arr[SZ_TOTAL];
    for (int i = 0; i < SZ_TOTAL; i++)

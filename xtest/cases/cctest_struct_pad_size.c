@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_pad_size.c --- cctest case struct_pad_size
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_struct_pad_size(void)
+int test_main(void)
 {
    struct padded {
       char a;

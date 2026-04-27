@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ext_linkage.c --- cctest case ext_linkage
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x37 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 int cctest_ext_linkage_var = 0x37;
 
-/* @expect 0x37 */
-int cctest_ext_linkage(void)
+int test_main(void)
 {
    return cctest_ext_linkage_var;
 }

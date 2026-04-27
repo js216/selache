@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_desig_2d.c --- cctest case desig_2d
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0A */
-int cctest_desig_2d(void)
+int test_main(void)
 {
    int m[3][3] = {
        [0] = {1, 2, 3},

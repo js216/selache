@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_goto_fwd.c --- cctest case goto_fwd
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x42 */
-int cctest_goto_fwd(void)
+int test_main(void)
 {
    int r = 0;
    int x = 1;

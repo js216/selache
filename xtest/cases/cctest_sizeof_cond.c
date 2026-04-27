@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sizeof_cond.c --- cctest case sizeof_cond
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 4 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 4 */
-int cctest_sizeof_cond(void)
+int test_main(void)
 {
    int a  = 0;
    long b = 0;

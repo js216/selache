@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_null_ptr.c --- cctest case null_ptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_null_ptr(void)
+int test_main(void)
 {
    int *p = 0;
    int r  = 0;

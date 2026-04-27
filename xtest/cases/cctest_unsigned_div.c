@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_unsigned_div.c --- cctest case unsigned_div
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x80 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x80 */
-int cctest_unsigned_div(void)
+int test_main(void)
 {
    unsigned int a = 0x80000000u; /* 2147483648 */
    unsigned int b = 0x10000u;    /* 65536 */

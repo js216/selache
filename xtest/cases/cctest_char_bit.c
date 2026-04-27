@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_char_bit.c --- cctest case char_bit
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 8 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 8 */
-int cctest_char_bit(void)
+int test_main(void)
 {
    return CHAR_BIT; /* 8 */
 }

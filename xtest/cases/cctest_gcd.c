@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_gcd.c --- cctest case gcd
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x06 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int gcd(int a, int b)
    return a;
 }
 
-/* @expect 0x06 */
-int cctest_gcd(void)
+int test_main(void)
 {
    return gcd(48, 18); /* 6 */
 }

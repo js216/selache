@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_empty_loop.c --- cctest case empty_loop
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0 */
-int cctest_empty_loop(void)
+int test_main(void)
 {
    int n = 5;
    while (--n > 0)

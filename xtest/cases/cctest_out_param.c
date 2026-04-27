@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_out_param.c --- cctest case out_param
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x73 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static void swap_out(int *a, int *b)
    *b    = t;
 }
 
-/* @expect 0x73 */
-int cctest_out_param(void)
+int test_main(void)
 {
    int x = 3, y = 7;
    swap_out(&x, &y);

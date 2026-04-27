@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_offsetof_nested.c --- cctest case offsetof_nested
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ struct off_nested {
    int c;
 };
 
-/* @expect 0x0C */
-int cctest_offsetof_nested(void)
+int test_main(void)
 {
    return (int)offsetof(struct off_nested,
                         c); /* a(4) + b.x(4) + b.y(4) = 12 = 0x0C */

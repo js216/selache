@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_struct.c --- cctest case nested_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ struct outer {
    int b;
 };
 
-/* @expect 0x0F */
-int cctest_nested_struct(void)
+int test_main(void)
 {
    struct outer o;
    o.a.val = 5;

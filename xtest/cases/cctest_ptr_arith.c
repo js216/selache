@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_arith.c --- cctest case ptr_arith
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x30 */
-int cctest_ptr_arith(void)
+int test_main(void)
 {
    int arr[3];
    arr[0] = 0x10;

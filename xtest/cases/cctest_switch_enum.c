@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_switch_enum.c --- cctest case switch_enum
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 enum dir { UP, DOWN, LEFT, RIGHT };
 
-/* @expect 3 */
-int cctest_switch_enum(void)
+int test_main(void)
 {
    enum dir d = LEFT;
    switch (d) {

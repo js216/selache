@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multiret.c --- cctest case multiret
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x6A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -21,8 +27,7 @@ static int multiret(int x)
    return x;
 }
 
-/* @expect 0x6A */
-int cctest_multiret(void)
+int test_main(void)
 {
    return multiret(-5) + multiret(0) + multiret(200); /* 5+1+100=106 = 0x6A */
 }

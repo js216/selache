@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_tentative_def.c --- cctest case tentative_def
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x66 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
 int cctest_tentative_var;
 int cctest_tentative_var;
 
-/* @expect 0x66 */
-int cctest_tentative_def(void)
+int test_main(void)
 {
    cctest_tentative_var = 0x66;
    return cctest_tentative_var; /* 0x66 */

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_case_const_expr.c --- cctest case case_const_expr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 enum case_vals { CV_BASE = 10 };
 
-/* @expect 3 */
-int cctest_case_const_expr(void)
+int test_main(void)
 {
    int x = 12;
    switch (x) {

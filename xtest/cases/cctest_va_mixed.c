@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_va_mixed.c --- cctest case va_mixed
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static int va_mixed(int count, ...)
    return iarg + farg + iarg2;
 }
 
-/* @expect 0x3C */
-int cctest_va_mixed(void)
+int test_main(void)
 {
    return va_mixed(3, 10, 20.0, 30); /* 10+20+30 = 60 = 0x3C */
 }

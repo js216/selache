@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_logical_nonbool.c --- cctest case logical_nonbool
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0F */
-int cctest_logical_nonbool(void)
+int test_main(void)
 {
    int r = 0;
    if (42 && 99)

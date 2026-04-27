@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_const_struct.c --- cctest case global_const_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ static const struct {
    int z;
 } g_const_pt = {3, 4, 5};
 
-/* @expect 0x0C */
-int cctest_global_const_struct(void)
+int test_main(void)
 {
    return g_const_pt.x + g_const_pt.y + g_const_pt.z; /* 12 */
 }

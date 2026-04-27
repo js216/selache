@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_trunc_pos_neg.c --- cctest case trunc_pos_neg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x03 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x03 */
-int cctest_trunc_pos_neg(void)
+int test_main(void)
 {
    int a = (int)(3.7f);  /* 3 */
    int b = (int)(-2.7f); /* -2 */

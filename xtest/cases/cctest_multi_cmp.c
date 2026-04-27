@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multi_cmp.c --- cctest case multi_cmp
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_multi_cmp(void)
+int test_main(void)
 {
    int a = 5, b = 10, c = 15;
    int r = 0;

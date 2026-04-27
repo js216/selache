@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_va_struct.c --- cctest case va_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -22,8 +28,7 @@ static int va_struct_sum(int count, ...)
    return s.a + s.b;
 }
 
-/* @expect 0x1E */
-int cctest_va_struct(void)
+int test_main(void)
 {
    struct va_st s;
    s.a = 10;

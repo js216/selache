@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_local_typedef.c --- cctest case local_typedef
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1E */
-int cctest_local_typedef(void)
+int test_main(void)
 {
    typedef int myint;
    myint a = 10, b = 20;

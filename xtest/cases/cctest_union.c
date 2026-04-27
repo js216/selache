@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_union.c --- cctest case union
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ union intfloat {
    float f;
 };
 
-/* @expect 0x0A */
-int cctest_union(void)
+int test_main(void)
 {
    union intfloat u;
    u.i = 0x41200000; /* 10.0f IEEE-754 */

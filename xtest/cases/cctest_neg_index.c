@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_neg_index.c --- cctest case neg_index
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x14 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x14 */
-int cctest_neg_index(void)
+int test_main(void)
 {
    int arr[5];
    arr[0] = 10;

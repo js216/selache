@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_static_visibility.c --- cctest case static_visibility
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int _tu_private(void)
    return 42;
 }
 
-/* @expect 0x2A */
-int cctest_static_visibility(void)
+int test_main(void)
 {
    return _tu_private();
 }

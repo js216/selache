@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_neg_div.c --- cctest case neg_div
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x31 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x31 */
-int cctest_neg_div(void)
+int test_main(void)
 {
    int a = -7, b = 2;
    int q = a / b;           /* -3 (toward zero, not -4) */

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_assign_while.c --- cctest case assign_while
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0F */
-int cctest_assign_while(void)
+int test_main(void)
 {
    int arr[5];
    arr[0]  = 3;

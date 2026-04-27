@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_assign_expr.c --- cctest case struct_assign_expr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct sa2 {
    int y;
 };
 
-/* @expect 0x1E */
-int cctest_struct_assign_expr(void)
+int test_main(void)
 {
    struct sa2 a, b;
    a.x = 10;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_volatile.c --- cctest case const_volatile
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x33 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x33 */
-int cctest_const_volatile(void)
+int test_main(void)
 {
    volatile int x        = 0x33;
    const volatile int *p = &x;

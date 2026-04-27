@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_switch_enum_val.c --- cctest case switch_enum_val
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x03 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ struct rgb {
    int b;
 };
 
-/* @expect 0x03 */
-int cctest_switch_enum_val(void)
+int test_main(void)
 {
    enum rgb { R, G, B };
    enum rgb c = G;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ternary_lval.c --- cctest case ternary_lval
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x64 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x64 */
-int cctest_ternary_lval(void)
+int test_main(void)
 {
    int a = 1, b = 2;
    int sel          = 0;

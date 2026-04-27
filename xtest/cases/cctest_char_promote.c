@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_char_promote.c --- cctest case char_promote
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x50 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x50 */
-int cctest_char_promote(void)
+int test_main(void)
 {
    signed char a = -50;
    signed char b = -30;

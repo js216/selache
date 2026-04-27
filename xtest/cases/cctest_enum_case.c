@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_enum_case.c --- cctest case enum_case
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,7 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0A */
-int cctest_enum_case(void)
+int test_main(void)
 {
    enum { VAL_A = 10, VAL_B = 20, VAL_C = 30 };

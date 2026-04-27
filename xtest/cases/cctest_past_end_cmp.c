@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_past_end_cmp.c --- cctest case past_end_cmp
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x05 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x05 */
-int cctest_past_end_cmp(void)
+int test_main(void)
 {
    int arr[5];
    int *end  = &arr[5]; /* one past end: valid for comparison */

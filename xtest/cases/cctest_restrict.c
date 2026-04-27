@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_restrict.c --- cctest case restrict
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ static void restricted_copy(int *restrict dst, const int *restrict src, int n)
       dst[i] = src[i];
 }
 
-/* @expect 6 */
-int cctest_restrict(void)
+int test_main(void)
 {
    int a[3];
    a[0] = 1;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_plain_char.c --- cctest case plain_char
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xFF */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xFF */
-int cctest_plain_char(void)
+int test_main(void)
 {
    char c = (char)0xFF;
    /* If char is unsigned: c == 255, (int)c == 255 → 0xFF

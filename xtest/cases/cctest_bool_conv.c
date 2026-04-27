@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bool_conv.c --- cctest case bool_conv
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0F */
-int cctest_bool_conv(void)
+int test_main(void)
 {
    _Bool a = 42;    /* nonzero → 1 */
    _Bool b = 0;     /* zero → 0    */

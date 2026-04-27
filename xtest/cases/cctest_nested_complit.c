@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_complit.c --- cctest case nested_complit
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ struct ncouter {
    int c;
 };
 
-/* @expect 0x1E */
-int cctest_nested_complit(void)
+int test_main(void)
 {
    struct ncouter o = {
        .in = (struct ns_inner){5, 10},

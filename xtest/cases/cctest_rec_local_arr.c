@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_rec_local_arr.c --- cctest case rec_local_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int rec_arr_sum(int depth)
    return buf[0] + rec_arr_sum(depth - 1);
 }
 
-/* @expect 0x0C */
-int cctest_rec_local_arr(void)
+int test_main(void)
 {
    return rec_arr_sum(4); /* 4+3+2+(1+2) = 12 = 0x0C */
 }

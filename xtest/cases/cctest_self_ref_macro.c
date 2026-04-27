@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_self_ref_macro.c --- cctest case self_ref_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define SELFVAL 10
 
-/* @expect 0x0A */
-int cctest_self_ref_macro(void)
+int test_main(void)
 {
    return SELFVAL; /* 10 = 0x0A */
 }

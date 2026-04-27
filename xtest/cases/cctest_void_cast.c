@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_void_cast.c --- cctest case void_cast
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ static int side_effect_fn(int *p)
    return 99;
 }
 
-/* @expect 1 */
-int cctest_void_cast(void)
+int test_main(void)
 {
    int x = 0;
    (void)side_effect_fn(&x); /* discard return, keep side effect */

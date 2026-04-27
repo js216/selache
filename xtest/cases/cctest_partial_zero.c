@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_partial_zero.c --- cctest case partial_zero
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0 */
-int cctest_partial_zero(void)
+int test_main(void)
 {
    struct {
       int a;

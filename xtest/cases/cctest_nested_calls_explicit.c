@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_calls_explicit.c --- cctest case nested_calls_explicit
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x19 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int helper_mul(int a, int b)
    return a * b;
 }
 
-/* @expect 0x19 */
-int cctest_nested_calls_explicit(void)
+int test_main(void)
 {
    int a = helper_mul(3, 3); /* 9 */
    int b = helper_mul(4, 4); /* 16 */

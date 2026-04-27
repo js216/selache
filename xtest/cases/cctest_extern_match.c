@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_extern_match.c --- cctest case extern_match
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x77 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 int g_extern_match = 0x77;
 
-/* @expect 0x77 */
-int cctest_extern_match(void)
+int test_main(void)
 {
    extern int g_extern_match;
    return g_extern_match;

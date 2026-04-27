@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_dangling_else2.c --- cctest case dangling_else2
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x02 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x02 */
-int cctest_dangling_else2(void)
+int test_main(void)
 {
    int r = 0;
    if (1)

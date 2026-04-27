@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sparse_switch.c --- cctest case sparse_switch
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static int sparse_switch(int x)
    }
 }
 
-/* @expect 0x0A */
-int cctest_sparse_switch(void)
+int test_main(void)
 {
    return sparse_switch(0) + sparse_switch(100) + sparse_switch(1000) +
           sparse_switch(9999);

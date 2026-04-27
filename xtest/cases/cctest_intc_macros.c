@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_intc_macros.c --- cctest case intc_macros
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@
 #define UINT32_C(x) (x##U)
 #define UINT64_C(x) (x##ULL)
 #endif
-/* @expect 7 */
-int cctest_intc_macros(void)
+int test_main(void)
 {
    int r     = 0;
    int32_t a = INT32_C(42);

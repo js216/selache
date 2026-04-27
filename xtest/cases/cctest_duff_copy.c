@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_duff_copy.c --- cctest case duff_copy
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x24 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x24 */
-int cctest_duff_copy(void)
+int test_main(void)
 {
    int src[8] = {1, 2, 3, 4, 5, 6, 7, 8};
    int dst[8] = {0};

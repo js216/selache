@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mod_sign.c --- cctest case mod_sign
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_mod_sign(void)
+int test_main(void)
 {
    int r = 0;
    if (17 % 5 == 2)

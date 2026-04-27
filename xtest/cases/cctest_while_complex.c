@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_while_complex.c --- cctest case while_complex
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x32 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x32 */
-int cctest_while_complex(void)
+int test_main(void)
 {
    int i = 0, j = 10, sum = 0;
    while (i < 5 && j > 5) {

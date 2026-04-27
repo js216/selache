@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_unsigned_shift.c --- cctest case unsigned_shift
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 8 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 8 */
-int cctest_unsigned_shift(void)
+int test_main(void)
 {
    unsigned int x = 0x80000000;
    return (int)(x >> 28); /* 8 */

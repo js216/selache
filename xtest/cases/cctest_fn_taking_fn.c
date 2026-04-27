@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fn_taking_fn.c --- cctest case fn_taking_fn
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x19 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ static int triple_it(int x)
    return x * 3;
 }
 
-/* @expect 0x19 */
-int cctest_fn_taking_fn(void)
+int test_main(void)
 {
    int a = apply_fn(double_it, 5); /* 10 */
    int b = apply_fn(triple_it, 5); /* 15 */

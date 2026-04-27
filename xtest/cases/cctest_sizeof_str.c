@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sizeof_str.c --- cctest case sizeof_str
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 6 */
-int cctest_sizeof_str(void)
+int test_main(void)
 {
    return (int)sizeof("hello"); /* 6 (5 chars + NUL) */
 }

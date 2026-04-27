@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr_dispatch.c --- cctest case fnptr_dispatch
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -23,8 +29,7 @@ static int fn_thirty(void)
    return 30;
 }
 
-/* @expect 0x3C */
-int cctest_fnptr_dispatch(void)
+int test_main(void)
 {
    int (*fns[3])(void) = {fn_ten, fn_twenty, fn_thirty};
    int sum             = 0;

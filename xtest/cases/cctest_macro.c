@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_macro.c --- cctest case macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x17 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define SQUARE(x) ((x) * (x))
 
-/* @expect 0x17 */
-int cctest_macro(void)
+int test_main(void)
 {
    return MAX(3, 7) + SQUARE(4); /* 7+16=23 = 0x17 */
 }

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_cast_trunc.c --- cctest case cast_trunc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x34 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x34 */
-int cctest_cast_trunc(void)
+int test_main(void)
 {
    int x           = 0x1234;
    unsigned char c = (unsigned char)x;

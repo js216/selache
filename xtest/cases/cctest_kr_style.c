@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_kr_style.c --- cctest case kr_style
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -23,8 +29,7 @@ int b;
    return a + b;
 }
 
-/* @expect 0x30 */
-int cctest_kr_style(void)
+int test_main(void)
 {
    return kr_add(0x10, 0x20); /* 0x30 */
 }

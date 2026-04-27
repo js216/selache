@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_inline.c --- cctest case inline
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x31 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static inline int sq(int x)
    return x * x;
 }
 
-/* @expect 0x31 */
-int cctest_inline(void)
+int test_main(void)
 {
    return sq(7); /* 49 = 0x31 */
 }

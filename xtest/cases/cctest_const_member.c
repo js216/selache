@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_member.c --- cctest case const_member
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@
    /* 0 + 15 + 31 = 46 = 0x2E */
 }
 
-/* @expect 0x30 */
-int cctest_const_member(void)
+int test_main(void)
 {
    struct {
       const int x;

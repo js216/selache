@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ternary_arg.c --- cctest case ternary_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int helper_add(int x, int y)
    return x + y;
 }
 
-/* @expect 0x28 */
-int cctest_ternary_arg(void)
+int test_main(void)
 {
    int x = 2;
    return helper_add(x > 1 ? 10 : 5, x > 3 ? 20 : 30);

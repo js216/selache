@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_pp_struct.c --- cctest case pp_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@ struct ppn {
    int val;
 };
 
-/* @expect 0x42 */
-int cctest_pp_struct(void)
+int test_main(void)
 {
    struct ppn s;
    s.val           = 0x42;

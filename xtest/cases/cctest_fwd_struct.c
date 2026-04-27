@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fwd_struct.c --- cctest case fwd_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x44 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -26,8 +32,7 @@ static int fwd_val(struct fwd_node *p)
    return p->val;
 }
 
-/* @expect 0x44 */
-int cctest_fwd_struct(void)
+int test_main(void)
 {
    struct fwd_node n;
    n.val  = 0x44;

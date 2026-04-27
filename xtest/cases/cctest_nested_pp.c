@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_pp.c --- cctest case nested_pp
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x22 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
 #define NEST_OUTER 1
 #define NEST_INNER 2
 
-/* @expect 0x22 */
-int cctest_nested_pp(void)
+int test_main(void)
 {
 #ifdef NEST_OUTER
 #if NEST_INNER == 2

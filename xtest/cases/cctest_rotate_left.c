@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_rotate_left.c --- cctest case rotate_left
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
    return (sizeof(u) == sizeof(int)) ? 0x55 : 0xAA;
 }
 
-/* @expect 0x55 */
-int cctest_rotate_left(void)
+int test_main(void)
 {
    unsigned int x       = 0x12345678u;
    int n                = 8;

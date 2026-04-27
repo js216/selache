@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_ptr_inc.c --- cctest case struct_ptr_inc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct item {
    int val;
 };
 
-/* @expect 0x3C */
-int cctest_struct_ptr_inc(void)
+int test_main(void)
 {
    struct item arr[3];
    arr[0].id      = 1;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complex_cond.c --- cctest case complex_cond
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@
    return (int)s.flags + s.value + s.extra; /* 10+16+32 = 58 = 0x3A */
 }
 
-/* @expect 0x0F */
-int cctest_complex_cond(void)
+int test_main(void)
 {
    int a = 0, b = 0, c = 0;
    int x = 5;

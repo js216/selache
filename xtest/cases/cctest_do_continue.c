@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_do_continue.c --- cctest case do_continue
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0C */
-int cctest_do_continue(void)
+int test_main(void)
 {
    int i = 0, s = 0;
    do {

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mixed_decl.c --- cctest case mixed_decl
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0B */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0B */
-int cctest_mixed_decl(void)
+int test_main(void)
 {
    int a = 5;
    int r = 0;

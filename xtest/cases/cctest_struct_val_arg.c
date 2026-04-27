@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_val_arg.c --- cctest case struct_val_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static void modify_struct(struct s2 s, int *out)
    *out = s.a;
 }
 
-/* @expect 0x55 */
-int cctest_struct_val_arg(void)
+int test_main(void)
 {
    struct s2 orig;
    orig.a = 10;

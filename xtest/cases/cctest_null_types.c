@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_null_types.c --- cctest case null_types
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ struct off_test {
    int c;
 };
 
-/* @expect 0x0F */
-int cctest_null_types(void)
+int test_main(void)
 {
    int r               = 0;
    int *pi             = NULL;

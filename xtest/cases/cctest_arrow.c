@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arrow.c --- cctest case arrow
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct arrow_s {
    int y;
 };
 
-/* @expect 0x30 */
-int cctest_arrow(void)
+int test_main(void)
 {
    struct arrow_s s;
    s.x               = 0x10;

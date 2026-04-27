@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_opaque_handle.c --- cctest case opaque_handle
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ struct opaque_s {
    opaque_t *next;
 };
 
-/* @expect 0x1E */
-int cctest_opaque_handle(void)
+int test_main(void)
 {
    opaque_t a, b;
    a.val  = 10;

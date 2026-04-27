@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_fnptr.c --- cctest case struct_fnptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x35 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ struct dispatch {
    int b;
 };
 
-/* @expect 0x35 */
-int cctest_struct_fnptr(void)
+int test_main(void)
 {
    struct dispatch d;
    d.op = helper_add;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_array_param.c --- cctest case array_param
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -16,8 +22,7 @@ static int sum_arr(int *a, int n)
    return s;
 }
 
-/* @expect 0x0A */
-int cctest_array_param(void)
+int test_main(void)
 {
    int a[4];
    a[0] = 1;

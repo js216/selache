@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_popcount.c --- cctest case popcount
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x10 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
    return s.a + s.b + s.c; /* 30 = 0x1E */
 }
 
-/* @expect 0x10 */
-int cctest_popcount(void)
+int test_main(void)
 {
    unsigned int x = 0xFFFF0000u; /* 16 one-bits */
    int count      = 0;

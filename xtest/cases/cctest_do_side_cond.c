@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_do_side_cond.c --- cctest case do_side_cond
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0A */
-int cctest_do_side_cond(void)
+int test_main(void)
 {
    int i = 0, sum = 0;
    do {

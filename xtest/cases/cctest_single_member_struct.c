@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_single_member_struct.c --- cctest case single_member_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x42 */
-int cctest_single_member_struct(void)
+int test_main(void)
 {
    struct {
       int x;

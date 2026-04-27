@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_char_array.c --- cctest case char_array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xCA */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xCA */
-int cctest_char_array(void)
+int test_main(void)
 {
    char s[] = "abcd";
    return s[0] + s[3] + (int)sizeof(s); /* 'a'+'d'+5 = 97+100+5 = 202 = 0xCA */

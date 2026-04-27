@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ll_cmp.c --- cctest case ll_cmp
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1F */
-int cctest_ll_cmp(void)
+int test_main(void)
 {
    long long a = 1LL << 40;
    long long b = (1LL << 40) + 1;

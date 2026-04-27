@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_fnptr_init.c --- cctest case struct_fnptr_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ struct op_entry {
    int b;
 };
 
-/* @expect 0x30 */
-int cctest_struct_fnptr_init(void)
+int test_main(void)
 {
    struct op_entry e = {helper_add, 0x10, 0x20};
    return e.fn(e.a, e.b); /* 0x30 */

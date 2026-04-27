@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complex_ptr_decl.c --- cctest case complex_ptr_decl
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int *cpd_fn1(void)
    return &cpd_val;
 }
 
-/* @expect 0x42 */
-int cctest_complex_ptr_decl(void)
+int test_main(void)
 {
    int *(*arr[1])(void); /* array of 1 ptr to fn returning int* */
    arr[0] = cpd_fn1;

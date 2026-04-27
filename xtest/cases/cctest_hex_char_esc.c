@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_hex_char_esc.c --- cctest case hex_char_esc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x41 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x41 */
-int cctest_hex_char_esc(void)
+int test_main(void)
 {
    char c = '\x41'; /* 'A' */
    return (int)c;

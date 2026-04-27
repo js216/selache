@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_enum_loop.c --- cctest case enum_loop
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x19 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 enum limits { LIM_START = 3, LIM_END = 7 };
 
-/* @expect 0x19 */
-int cctest_enum_loop(void)
+int test_main(void)
 {
    int sum = 0;
    for (int i = LIM_START; i <= LIM_END; i++)

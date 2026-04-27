@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_list_reverse.c --- cctest case list_reverse
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x03 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct node {
    struct node *next;
 };
 
-/* @expect 0x03 */
-int cctest_list_reverse(void)
+int test_main(void)
 {
    struct node {
       int val;

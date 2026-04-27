@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_braced_2d.c --- cctest case braced_2d
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int fwd_static(int x)
    return x + 1;
 }
 
-/* @expect 0x0F */
-int cctest_braced_2d(void)
+int test_main(void)
 {
    int m[2][3] = {
        {1, 2, 3},

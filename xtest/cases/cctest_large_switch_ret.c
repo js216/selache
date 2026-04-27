@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_large_switch_ret.c --- cctest case large_switch_ret
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xAA */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -31,8 +37,7 @@ static int color_val(int c)
    }
 }
 
-/* @expect 0xAA */
-int cctest_large_switch_ret(void)
+int test_main(void)
 {
    return color_val(6) + color_val(9); /* 70+100 = 170 = 0xAA */
 }

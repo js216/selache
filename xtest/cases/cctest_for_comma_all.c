@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_for_comma_all.c --- cctest case for_comma_all
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1E */
-int cctest_for_comma_all(void)
+int test_main(void)
 {
    int a, b, sum = 0;
    for (a = 0, b = 10; a < 3, b > 7; a++, b--)

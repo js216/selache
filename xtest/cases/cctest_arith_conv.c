@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arith_conv.c --- cctest case arith_conv
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xAA */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xAA */
-int cctest_arith_conv(void)
+int test_main(void)
 {
    int s          = -1;
    unsigned int u = 1;

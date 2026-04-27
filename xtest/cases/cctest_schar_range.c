@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_schar_range.c --- cctest case schar_range
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_schar_range(void)
+int test_main(void)
 {
    signed char c = -128;
    signed char d = 127;

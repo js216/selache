@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_2d_param.c --- cctest case 2d_param
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ static int sum_2d(int (*m)[3], int rows)
    return s;
 }
 
-/* @expect 0x2D */
-int cctest_2d_param(void)
+int test_main(void)
 {
    int m[3][3] = {
        {1, 2, 3},

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multi_ret_struct.c --- cctest case multi_ret_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x19 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -31,8 +37,7 @@ static struct mr_result mr_classify(int x)
    return r;
 }
 
-/* @expect 0x19 */
-int cctest_multi_ret_struct(void)
+int test_main(void)
 {
    struct mr_result a = mr_classify(-5);
    struct mr_result b = mr_classify(0);

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_float_neg.c --- cctest case float_neg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_float_neg(void)
+int test_main(void)
 {
    float a = 3.0f;
    float b = -a;

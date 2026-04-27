@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_typedef.c --- cctest case typedef
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 typedef int score_t;
 
-/* @expect 0x1E */
-int cctest_typedef(void)
+int test_main(void)
 {
    score_t a = 10, b = 20;
    return a + b; /* 30 = 0x1E */

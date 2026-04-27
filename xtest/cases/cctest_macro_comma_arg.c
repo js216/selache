@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_macro_comma_arg.c --- cctest case macro_comma_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@
 
 #define FIRST_ARG(x) (x)
 
-/* @expect 3 */
-int cctest_macro_comma_arg(void)
+int test_main(void)
 {
    /* The argument (1, 2, 3) is a single macro arg due to outer parens */
    return FIRST_ARG((1, 2, 3)); /* comma operator: result is 3 */

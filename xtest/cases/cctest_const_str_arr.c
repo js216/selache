@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_str_arr.c --- cctest case const_str_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x04 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x04 */
-int cctest_const_str_arr(void)
+int test_main(void)
 {
    const char *const names[] = {"ab", "cd", "ef", "gh"};
    int count                 = 0;

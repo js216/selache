@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sign_cast_bits.c --- cctest case sign_cast_bits
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ struct s2 {
    int b;
 };
 
-/* @expect 3 */
-int cctest_sign_cast_bits(void)
+int test_main(void)
 {
    int s          = -1;
    unsigned int u = (unsigned int)s;

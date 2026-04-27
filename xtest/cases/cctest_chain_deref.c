@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_chain_deref.c --- cctest case chain_deref
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct chain {
    struct chain *next;
 };
 
-/* @expect 0x1E */
-int cctest_chain_deref(void)
+int test_main(void)
 {
    struct chain c, b, a;
    c.val  = 30;

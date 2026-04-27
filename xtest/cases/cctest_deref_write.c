@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_deref_write.c --- cctest case deref_write
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x12C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x12C */
-int cctest_deref_write(void)
+int test_main(void)
 {
    int a = 100, b = 200;
    int *p = &a;

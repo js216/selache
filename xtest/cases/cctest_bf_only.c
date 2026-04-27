@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bf_only.c --- cctest case bf_only
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x6D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ struct rgb {
    int b;
 };
 
-/* @expect 0x6D */
-int cctest_bf_only(void)
+int test_main(void)
 {
    struct {
       unsigned int r : 5;

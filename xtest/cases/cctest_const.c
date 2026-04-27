@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const.c --- cctest case const
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x2A */
-int cctest_const(void)
+int test_main(void)
 {
    const int x  = 42;
    const int *p = &x;

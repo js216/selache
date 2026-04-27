@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_all_compound.c --- cctest case all_compound
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 9 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 9 */
-int cctest_all_compound(void)
+int test_main(void)
 {
    int x = 100;
    x /= 5;    /* 20 */

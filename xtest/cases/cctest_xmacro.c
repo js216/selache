@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_xmacro.c --- cctest case xmacro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ enum xcolor { XCOLORS };
 
 #undef X
 
-/* @expect 7 */
-int cctest_xmacro(void)
+int test_main(void)
 {
    return XC_RED + XC_GREEN + XC_BLUE; /* 1+2+4 = 7 */
 }

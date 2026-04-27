@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_loop_copy.c --- cctest case struct_loop_copy
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct s2 {
    int b;
 };
 
-/* @expect 0x0A */
-int cctest_struct_loop_copy(void)
+int test_main(void)
 {
    struct s2 arr[5];
    for (int i = 0; i < 5; i++) {

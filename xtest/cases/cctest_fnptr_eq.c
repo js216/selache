@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr_eq.c --- cctest case fnptr_eq
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int helper_mul(int a, int b)
    return a * b;
 }
 
-/* @expect 0x55 */
-int cctest_fnptr_eq(void)
+int test_main(void)
 {
    int (*f)(int, int) = helper_add;
    int (*g)(int, int) = helper_add;

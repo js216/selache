@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complit_struct_arg.c --- cctest case complit_struct_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int cl_sum(struct cl_pair p)
    return p.a + p.b;
 }
 
-/* @expect 0x1E */
-int cctest_complit_struct_arg(void)
+int test_main(void)
 {
    return cl_sum((struct cl_pair){10, 20});
 }

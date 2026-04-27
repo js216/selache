@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_break_continue.c --- cctest case break_continue
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 8 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 8 */
-int cctest_break_continue(void)
+int test_main(void)
 {
    int sum = 0;
    for (int i = 0; i < 5; i++) {

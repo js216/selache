@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_early_return.c --- cctest case early_return
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -20,8 +26,7 @@ static int early_return_helper(int x)
    return helper_add(x, 1);
 }
 
-/* @expect 6 */
-int cctest_early_return(void)
+int test_main(void)
 {
    return early_return_helper(5);
 }

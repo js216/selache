@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_ret_use.c --- cctest case struct_ret_use
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static struct ret_pair2 make_ret_pair2(int a, int b)
    return r;
 }
 
-/* @expect 0x1E */
-int cctest_struct_ret_use(void)
+int test_main(void)
 {
    struct ret_pair2 p = make_ret_pair2(10, 20);
    return p.a + p.b;

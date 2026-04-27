@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_local_struct.c --- cctest case local_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x30 */
-int cctest_local_struct(void)
+int test_main(void)
 {
    struct local_s {
       int a;

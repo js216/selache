@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_arr_member.c --- cctest case struct_arr_member
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct with_arr {
    int data[4];
 };
 
-/* @expect 0x3D */
-int cctest_struct_arr_member(void)
+int test_main(void)
 {
    struct with_arr s;
    s.id      = 1;

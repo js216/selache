@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_elems.c --- cctest case const_elems
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x32 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -16,8 +22,7 @@ static int sum_constq(const int *p, int n)
    return s;
 }
 
-/* @expect 0x32 */
-int cctest_const_elems(void)
+int test_main(void)
 {
    const int arr[] = {5, 10, 15, 20};
    return sum_constq(arr, 4); /* 50 = 0x32 */

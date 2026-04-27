@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arg_alias_2call.c --- cctest case arg_alias_2call
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x13 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int helper_mul(int a, int b)
    return a * b;
 }
 
-/* @expect 0x13 */
-int cctest_arg_alias_2call(void)
+int test_main(void)
 {
    return helper_add(helper_mul(3, 5), 4); /* 15 + 4 = 19 */
 }

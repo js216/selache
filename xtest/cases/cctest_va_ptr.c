@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_va_ptr.c --- cctest case va_ptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -21,8 +27,7 @@ static int va_ptr_sum(int count, ...)
    return s;
 }
 
-/* @expect 0x3C */
-int cctest_va_ptr(void)
+int test_main(void)
 {
    int a = 10, b = 20, c = 30;
    return va_ptr_sum(3, &a, &b, &c); /* 60 = 0x3C */

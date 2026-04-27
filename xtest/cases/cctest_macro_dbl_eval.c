@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_macro_dbl_eval.c --- cctest case macro_dbl_eval
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x11 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define DBL_MAX_M(a, b) ((a) > (b) ? (a) : (b))
 
-/* @expect 0x11 */
-int cctest_macro_dbl_eval(void)
+int test_main(void)
 {
    int x = 5, y = 3;
    int r =

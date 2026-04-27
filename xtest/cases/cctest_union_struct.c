@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_union_struct.c --- cctest case union_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ union outer_u {
    int raw[2];
 };
 
-/* @expect 0x30 */
-int cctest_union_struct(void)
+int test_main(void)
 {
    union outer_u u;
    u.s.a = 0x10;

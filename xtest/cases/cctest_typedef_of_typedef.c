@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_typedef_of_typedef.c --- cctest case typedef_of_typedef
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x04 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
    return Q2 + R2 - P2; /* 4+10-3 = 11 */
 }
 
-/* @expect 0x04 */
-int cctest_typedef_of_typedef(void)
+int test_main(void)
 {
    typedef int myint;
    typedef myint myint2;

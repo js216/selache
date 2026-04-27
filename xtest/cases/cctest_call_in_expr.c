@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_call_in_expr.c --- cctest case call_in_expr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -22,8 +28,7 @@ static int co_fn2(void)
    return 20;
 }
 
-/* @expect 0x1E */
-int cctest_call_in_expr(void)
+int test_main(void)
 {
    g_call_order = 0;
    int r        = co_fn1() + co_fn2();

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_enum_fn.c --- cctest case enum_fn
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static enum fruit next_fruit(enum fruit f)
    }
 }
 
-/* @expect 2 */
-int cctest_enum_fn(void)
+int test_main(void)
 {
    enum fruit f = APPLE;
    f            = next_fruit(f); /* BANANA = 1 */

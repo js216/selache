@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr.c --- cctest case fnptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int helper_add(int x, int y)
 
 typedef int (*binop_fn)(int, int);
 
-/* @expect 0x30 */
-int cctest_fnptr(void)
+int test_main(void)
 {
    binop_fn fp = helper_add;
    return fp(0x10, 0x20); /* 0x30 */

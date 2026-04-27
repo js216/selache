@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_arr_only.c --- cctest case struct_arr_only
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 9 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct arr_only {
    int b[2];
 };
 
-/* @expect 9 */
-int cctest_struct_arr_only(void)
+int test_main(void)
 {
    struct arr_only s = {
        {1, 2, 3},

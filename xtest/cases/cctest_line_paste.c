@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_line_paste.c --- cctest case line_paste
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ int PASTE_XA(cctest_line_paste_, __LINE__) = 0x11;
 int PASTE_XA(cctest_line_paste_, __LINE__) = 0x22;
 int PASTE_XA(cctest_line_paste_, __LINE__) = 0x55;
 
-/* @expect 0x55 */
-int cctest_line_paste(void)
+int test_main(void)
 {
    /* Reference each paste-produced symbol to prove they are
       distinct; the returned value comes from the last one. */

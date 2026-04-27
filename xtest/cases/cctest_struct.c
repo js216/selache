@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct.c --- cctest case struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct point {
    int y;
 };
 
-/* @expect 0x1E */
-int cctest_struct(void)
+int test_main(void)
 {
    struct point p;
    p.x = 10;

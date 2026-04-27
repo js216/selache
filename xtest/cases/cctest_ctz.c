@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ctz.c --- cctest case ctz
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x04 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x04 */
-int cctest_ctz(void)
+int test_main(void)
 {
    unsigned int x = 0x30; /* 0b00110000 */
    int ctz        = 0;

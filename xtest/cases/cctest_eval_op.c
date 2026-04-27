@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_eval_op.c --- cctest case eval_op
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x11 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static int eval_op(int op, int a, int b)
    }
 }
 
-/* @expect 0x11 */
-int cctest_eval_op(void)
+int test_main(void)
 {
    int r = eval_op('+', 3, 4); /* 7 */
    r     = eval_op('*', r, 2); /* 14 */

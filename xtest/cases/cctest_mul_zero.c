@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mul_zero.c --- cctest case mul_zero
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -20,8 +26,7 @@
    return (u.raw == 0x56781234u) ? 0x55 : 0xAA;
 }
 
-/* @expect 0 */
-int cctest_mul_zero(void)
+int test_main(void)
 {
    volatile int x = 42;
    return x * 0;

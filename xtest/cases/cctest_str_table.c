@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_str_table.c --- cctest case str_table
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x12A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x12A */
-int cctest_str_table(void)
+int test_main(void)
 {
    const char *names[] = {"alpha", "beta", "gamma"};
    return names[0][0] + names[1][0] + names[2][0];

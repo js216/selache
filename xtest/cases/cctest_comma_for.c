@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_comma_for.c --- cctest case comma_for
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0A */
-int cctest_comma_for(void)
+int test_main(void)
 {
    int i, j;
    for (i = 0, j = 10; i < 5; i++, j--) {

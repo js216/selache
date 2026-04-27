@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_tail_acc.c --- cctest case tail_acc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x15 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -20,8 +26,7 @@ static int acc_sum(const struct acc_node *p, int acc)
    return acc_sum(p->next, acc + p->val);
 }
 
-/* @expect 0x15 */
-int cctest_tail_acc(void)
+int test_main(void)
 {
    struct acc_node c = {3, 0};
    struct acc_node b = {5, &c};

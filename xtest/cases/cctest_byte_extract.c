@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_byte_extract.c --- cctest case byte_extract
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x56 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x56 */
-int cctest_byte_extract(void)
+int test_main(void)
 {
    unsigned int x = 0x12345678u;
    int b0         = (x >> 0) & 0xFF;  /* 0x78 */

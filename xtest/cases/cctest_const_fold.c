@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_fold.c --- cctest case const_fold
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x50 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x50 */
-int cctest_const_fold(void)
+int test_main(void)
 {
    const int a = 2 + 3;     /* 5 */
    const int b = a * 4;     /* 20 */

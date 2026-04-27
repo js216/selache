@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr_cast.c --- cctest case fnptr_cast
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int fncast_target(int x)
    return x + 1;
 }
 
-/* @expect 0x42 */
-int cctest_fnptr_cast(void)
+int test_main(void)
 {
    int (*fp)(int)   = fncast_target;
    void (*vp)(void) = (void (*)(void))fp; /* cast to different fnptr */

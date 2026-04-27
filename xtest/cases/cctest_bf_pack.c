@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bf_pack.c --- cctest case bf_pack
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x10 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x10 */
-int cctest_bf_pack(void)
+int test_main(void)
 {
    struct {
       unsigned int a : 3;

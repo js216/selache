@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_three_params.c --- cctest case three_params
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0B */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int three_params_helper(int a, int b, int c)
    return a * b + c;
 }
 
-/* @expect 0x0B */
-int cctest_three_params(void)
+int test_main(void)
 {
    return three_params_helper(2, 3, 5);
 }

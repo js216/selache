@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_union_sizeof.c --- cctest case union_sizeof
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 4 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ union sztest {
    short s;
 };
 
-/* @expect 4 */
-int cctest_union_sizeof(void)
+int test_main(void)
 {
    return (int)sizeof(union sztest); /* 4 (sizeof int) */
 }

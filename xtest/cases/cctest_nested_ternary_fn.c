@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_ternary_fn.c --- cctest case nested_ternary_fn
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int helper_mul(int a, int b)
    return a * b;
 }
 
-/* @expect 0x0C */
-int cctest_nested_ternary_fn(void)
+int test_main(void)
 {
    int x = 2;
    return (x == 1)   ? helper_add(1, 2)

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stack_param.c --- cctest case stack_param
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int four_args(int a, int b, int c, int d)
    return a + b + c + d;
 }
 
-/* @expect 0x0A */
-int cctest_stack_param(void)
+int test_main(void)
 {
    return four_args(1, 2, 3, 4); /* 10 = 0xA */
 }

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_dispatch_table.c --- cctest case dispatch_table
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -33,8 +39,7 @@ static const struct cmd_entry cmd_table[] = {
     {"sub", cmd_sub   },
 };
 
-/* @expect 0x1A */
-int cctest_dispatch_table(void)
+int test_main(void)
 {
    int r = 0;
    r += cmd_table[0].fn(3, 4);  /* add: 7 */

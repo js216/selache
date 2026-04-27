@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_big_switch.c --- cctest case big_switch
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x17 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ static int big_switch(int x)
    }
 }
 
-/* @expect 0x17 */
-int cctest_big_switch(void)
+int test_main(void)
 {
    return big_switch(7); /* 0x17 */
 }

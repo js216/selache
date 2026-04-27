@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ll_add_sub.c --- cctest case ll_add_sub
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_ll_add_sub(void)
+int test_main(void)
 {
    long long a = 0x100000000LL;
    long long b = 0x200000000LL;

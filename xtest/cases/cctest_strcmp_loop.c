@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_strcmp_loop.c --- cctest case strcmp_loop
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_strcmp_loop(void)
+int test_main(void)
 {
    const char *a = "hello";
    const char *b = "hello";

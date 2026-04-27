@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sort.c --- cctest case sort
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x35 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x35 */
-int cctest_sort(void)
+int test_main(void)
 {
    int a = 5, b = 3;
    if (a > b) {

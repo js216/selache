@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_variadic_macro.c --- cctest case variadic_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int va_sum2_helper(int b, int c)
    return b + c;
 }
 
-/* @expect 0x1E */
-int cctest_variadic_macro(void)
+int test_main(void)
 {
    return VA_SUM3(10, 8, 12); /* 10 + 8 + 12 = 30 */
 }

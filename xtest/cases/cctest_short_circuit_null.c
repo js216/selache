@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_short_circuit_null.c --- cctest case short_circuit_null
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x01 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x01 */
-int cctest_short_circuit_null(void)
+int test_main(void)
 {
    int *p = 0;
    int r  = (p != 0) && (*p == 42);

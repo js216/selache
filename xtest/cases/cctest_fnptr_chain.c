@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr_chain.c --- cctest case fnptr_chain
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int dbl1(int x)
    return x * 2;
 }
 
-/* @expect 0x0D */
-int cctest_fnptr_chain(void)
+int test_main(void)
 {
    int (*ops[2])(int);
    ops[0] = inc1;

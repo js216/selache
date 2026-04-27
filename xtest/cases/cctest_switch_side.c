@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_switch_side.c --- cctest case switch_side
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x12 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@
    return (int)(s.flags & 0xFF); /* 0x0A */
 }
 
-/* @expect 0x12 */
-int cctest_switch_side(void)
+int test_main(void)
 {
    int x = 1;
    switch (x++) {

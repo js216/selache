@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sign_cast_preserve.c --- cctest case sign_cast_preserve
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct s2 {
    int b;
 };
 
-/* @expect 0x55 */
-int cctest_sign_cast_preserve(void)
+int test_main(void)
 {
    int s          = -1;
    unsigned int u = (unsigned int)s;

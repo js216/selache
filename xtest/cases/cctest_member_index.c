@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_member_index.c --- cctest case member_index
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x28 */
-int cctest_member_index(void)
+int test_main(void)
 {
    struct {
       int idx;

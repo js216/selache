@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multi_fallthrough.c --- cctest case multi_fallthrough
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0F */
-int cctest_multi_fallthrough(void)
+int test_main(void)
 {
    int x = 1, r = 0;
    switch (x) {

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_uchar_wrap.c --- cctest case uchar_wrap
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xFF */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xFF */
-int cctest_uchar_wrap(void)
+int test_main(void)
 {
    unsigned char c = (unsigned char)(-1);
    return (int)c; /* 255 = 0xFF */

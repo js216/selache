@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_typedef_fn.c --- cctest case typedef_fn
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x33 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int helper_add(int x, int y)
 
 typedef int fn_type(int, int);
 
-/* @expect 0x33 */
-int cctest_typedef_fn(void)
+int test_main(void)
 {
    fn_type *fp = helper_add; /* pointer to function type */
    return fp(0x11, 0x22);    /* 0x33 */

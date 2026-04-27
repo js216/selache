@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_va_func.c --- cctest case va_func
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x64 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ static int va_sum(int count, ...)
    return s;
 }
 
-/* @expect 0x64 */
-int cctest_va_func(void)
+int test_main(void)
 {
    return va_sum(4, 10, 20, 30, 40); /* 100 = 0x64 */
 }

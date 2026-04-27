@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_iso646.c --- cctest case iso646
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x3F */
-int cctest_iso646(void)
+int test_main(void)
 {
    int a = 0xFF, b = 0x0F;
    int r = 0;

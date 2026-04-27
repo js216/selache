@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_name_space.c --- cctest case name_space
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@ struct ns_tag {
    int val;
 };
 
-/* @expect 0x0F */
-int cctest_name_space(void)
+int test_main(void)
 {
    int ns_tag = 5;  /* ordinary name space */
    struct ns_tag s; /* tag name space */

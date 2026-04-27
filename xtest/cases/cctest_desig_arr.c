@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_desig_arr.c --- cctest case desig_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct arrwrap {
    int n;
 };
 
-/* @expect 0x0A */
-int cctest_desig_arr(void)
+int test_main(void)
 {
    struct arrwrap s = {
        .a = {1, 2, 3},

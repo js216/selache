@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multiline_macro.c --- cctest case multiline_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define MULTI_LINE_MACRO(a, b) ((a) + (b))
 
-/* @expect 0x30 */
-int cctest_multiline_macro(void)
+int test_main(void)
 {
    return MULTI_LINE_MACRO(0x10, 0x20); /* 0x30 */
 }

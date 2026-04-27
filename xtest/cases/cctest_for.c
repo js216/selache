@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_for.c --- cctest case for
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x78 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x78 */
-int cctest_for(void)
+int test_main(void)
 {
    int p = 1, i;
    for (i = 1; i <= 5; i = i + 1)

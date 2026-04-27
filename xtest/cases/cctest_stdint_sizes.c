@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stdint_sizes.c --- cctest case stdint_sizes
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x3F */
-int cctest_stdint_sizes(void)
+int test_main(void)
 {
    int r = 0;
    if (sizeof(int8_t) == 1)

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_div_trunc_zero.c --- cctest case div_trunc_zero
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x07 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x07 */
-int cctest_div_trunc_zero(void)
+int test_main(void)
 {
    int r = 0;
    if (7 / 2 == 3)

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ull_bitops.c --- cctest case ull_bitops
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_ull_bitops(void)
+int test_main(void)
 {
    unsigned long long a = 0xFFFF0000FFFF0000ULL;
    unsigned long long b = 0x0000FFFF0000FFFFULL;

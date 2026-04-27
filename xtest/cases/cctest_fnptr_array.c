@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fnptr_array.c --- cctest case fnptr_array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -23,8 +29,7 @@ static int fn_c(void)
    return 3;
 }
 
-/* @expect 6 */
-int cctest_fnptr_array(void)
+int test_main(void)
 {
    int (*fns[3])(void);
    fns[0] = fn_a;

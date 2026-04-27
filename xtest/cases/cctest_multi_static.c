@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multi_static.c --- cctest case multi_static
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -20,8 +26,7 @@ static int dual_static(int which)
    return count_b;
 }
 
-/* @expect 1 */
-int cctest_multi_static(void)
+int test_main(void)
 {
    int a1 = dual_static(0);
    int a2 = dual_static(0);

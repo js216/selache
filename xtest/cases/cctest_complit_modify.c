@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complit_modify.c --- cctest case complit_modify
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x63 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x63 */
-int cctest_complit_modify(void)
+int test_main(void)
 {
    int *p = (int[]){10, 20, 30};
    p[1]   = 99;

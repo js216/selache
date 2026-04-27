@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_goto_break.c --- cctest case goto_break
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x17 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x17 */
-int cctest_goto_break(void)
+int test_main(void)
 {
    int r = 0;
    int i, j;

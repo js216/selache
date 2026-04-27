@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ternary_void.c --- cctest case ternary_void
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static int g_ternary_void;
 
-/* @expect 0x0A */
-int cctest_ternary_void(void)
+int test_main(void)
 {
    int x          = 1;
    g_ternary_void = 0;

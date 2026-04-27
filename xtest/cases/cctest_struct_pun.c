@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_pun.c --- cctest case struct_pun
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0A */
-int cctest_struct_pun(void)
+int test_main(void)
 {
    struct {
       unsigned int flags;

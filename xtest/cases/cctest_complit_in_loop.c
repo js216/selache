@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_complit_in_loop.c --- cctest case complit_in_loop
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0F */
-int cctest_complit_in_loop(void)
+int test_main(void)
 {
    int sum = 0;
    for (int i = 1; i <= 5; i++) {

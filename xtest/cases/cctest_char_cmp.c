@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_char_cmp.c --- cctest case char_cmp
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_char_cmp(void)
+int test_main(void)
 {
    signed char a   = -1;
    unsigned char b = 255;

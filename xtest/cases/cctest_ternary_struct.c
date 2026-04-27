@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ternary_struct.c --- cctest case ternary_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x46 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct tern_s {
    int b;
 };
 
-/* @expect 0x46 */
-int cctest_ternary_struct(void)
+int test_main(void)
 {
    struct tern_s x, y;
    x.a             = 10;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_3d_array.c --- cctest case 3d_array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x12 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x12 */
-int cctest_3d_array(void)
+int test_main(void)
 {
    int m[2][2][2];
    m[0][0][0] = 1;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_verbose_types.c --- cctest case verbose_types
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x96 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x96 */
-int cctest_verbose_types(void)
+int test_main(void)
 {
    unsigned long int a  = 100UL;
    signed long int b    = -50L;

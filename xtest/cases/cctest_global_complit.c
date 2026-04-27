@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_complit.c --- cctest case global_complit
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x99 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static int *g_complit_ptr = &(int){0x99};
 
-/* @expect 0x99 */
-int cctest_global_complit(void)
+int test_main(void)
 {
    return *g_complit_ptr; /* 0x99 */
 }

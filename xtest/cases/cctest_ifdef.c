@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ifdef.c --- cctest case ifdef
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define CCTEST_IFDEF_MARKER
 
-/* @expect 0x30 */
-int cctest_ifdef(void)
+int test_main(void)
 {
    int r = 0;
 #ifdef CCTEST_IFDEF_MARKER

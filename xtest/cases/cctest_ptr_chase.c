@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_chase.c --- cctest case ptr_chase
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -22,8 +28,7 @@ struct l1 {
    int v;
 };
 
-/* @expect 0x3C */
-int cctest_ptr_chase(void)
+int test_main(void)
 {
    struct l3 c;
    c.v = 30;

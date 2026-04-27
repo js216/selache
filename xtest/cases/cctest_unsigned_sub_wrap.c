@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_unsigned_sub_wrap.c --- cctest case unsigned_sub_wrap
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xFF */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xFF */
-int cctest_unsigned_sub_wrap(void)
+int test_main(void)
 {
    unsigned int a = 0;
    unsigned int b = a - 1;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stdint_limits.c --- cctest case stdint_limits
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@
 #define INT32_MAX  2147483647
 #define UINT32_MAX 0xFFFFFFFFU
 #endif
-/* @expect 0x1F */
-int cctest_stdint_limits(void)
+int test_main(void)
 {
    int r = 0;
    if (INT8_MIN == -128)

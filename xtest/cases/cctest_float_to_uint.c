@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_float_to_uint.c --- cctest case float_to_uint
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x2A */
-int cctest_float_to_uint(void)
+int test_main(void)
 {
    float f        = 42.7f;
    unsigned int u = (unsigned int)f; /* 42 */

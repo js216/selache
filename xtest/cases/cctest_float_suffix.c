@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_float_suffix.c --- cctest case float_suffix
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0C */
-int cctest_float_suffix(void)
+int test_main(void)
 {
    float a       = 3.0f;
    double b      = 4.0;

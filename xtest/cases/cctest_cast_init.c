@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_cast_init.c --- cctest case cast_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static int g_cast_init = (int)3;
 
-/* @expect 3 */
-int cctest_cast_init(void)
+int test_main(void)
 {
    return g_cast_init; /* 3 */
 }

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_signed_rshift.c --- cctest case signed_rshift
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_signed_rshift(void)
+int test_main(void)
 {
    int x = -8;
    int y = x >> 1;

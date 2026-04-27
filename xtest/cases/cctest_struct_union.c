@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_union.c --- cctest case struct_union
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x31 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ struct tagged_val {
    } u;
 };
 
-/* @expect 0x31 */
-int cctest_struct_union(void)
+int test_main(void)
 {
    struct tagged_val tv;
    tv.tag = 1;

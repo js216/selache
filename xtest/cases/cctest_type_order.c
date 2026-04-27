@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_type_order.c --- cctest case type_order
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x19A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -11,8 +17,7 @@
    return AE_X + AE_Y + AE_Z; /* 40 = 0x28 */
 }
 
-/* @expect 0x19A */
-int cctest_type_order(void)
+int test_main(void)
 {
    unsigned long int a = 100UL;
    long unsigned int b = 200UL;

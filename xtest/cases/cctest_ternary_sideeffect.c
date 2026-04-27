@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ternary_sideeffect.c --- cctest case ternary_sideeffect
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0A */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0A */
-int cctest_ternary_sideeffect(void)
+int test_main(void)
 {
    int y = 5;
    (1) ? (void)(y += 5) : (void)0;

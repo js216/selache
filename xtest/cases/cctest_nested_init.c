@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_init.c --- cctest case nested_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ struct ns_outer {
    int c;
 };
 
-/* @expect 0x1E */
-int cctest_nested_init(void)
+int test_main(void)
 {
    struct ns_outer o = {
        .in = {.a = 5, .b = 10},

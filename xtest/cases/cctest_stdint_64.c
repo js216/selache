@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_stdint_64.c --- cctest case stdint_64
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 1 */
-int cctest_stdint_64(void)
+int test_main(void)
 {
    int64_t a = 1;
    a <<= 40;

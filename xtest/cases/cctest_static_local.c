@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_static_local.c --- cctest case static_local
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int static_counter(void)
    return n;
 }
 
-/* @expect 1 */
-int cctest_static_local(void)
+int test_main(void)
 {
    int a = static_counter();
    int b = static_counter();

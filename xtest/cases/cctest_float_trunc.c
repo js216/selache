@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_float_trunc.c --- cctest case float_trunc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_float_trunc(void)
+int test_main(void)
 {
    float f = -3.7f;
    int i   = (int)f; /* -3 (truncate toward zero) */

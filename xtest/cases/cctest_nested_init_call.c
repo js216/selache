@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_init_call.c --- cctest case nested_init_call
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -23,8 +29,7 @@ struct s2 {
    int b;
 };
 
-/* @expect 0x0F */
-int cctest_nested_init_call(void)
+int test_main(void)
 {
    struct s2 arr[2] = {
        {helper_add(1, 2), helper_mul(3, 4)},

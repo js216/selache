@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_local_extern.c --- cctest case local_extern
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x88 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 int cctest_extern_var = 0x88;
 
-/* @expect 0x88 */
-int cctest_local_extern(void)
+int test_main(void)
 {
    extern int cctest_extern_var;
    return cctest_extern_var; /* 0x88 */

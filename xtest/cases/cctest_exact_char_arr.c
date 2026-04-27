@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_exact_char_arr.c --- cctest case exact_char_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xD7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xD7 */
-int cctest_exact_char_arr(void)
+int test_main(void)
 {
    char s[5] = "hello"; /* fills all 5 bytes, no room for NUL */
    return s[0] + s[4];  /* 'h'+'o' = 104+111 = 215 = 0xD7 */

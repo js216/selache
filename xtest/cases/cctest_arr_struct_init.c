@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_arr_struct_init.c --- cctest case arr_struct_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x15 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x15 */
-int cctest_arr_struct_init(void)
+int test_main(void)
 {
    struct pt {
       int x;

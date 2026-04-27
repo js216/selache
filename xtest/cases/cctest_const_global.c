@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_const_global.c --- cctest case const_global
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x77 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static const int g_const_val = 0x77;
 
-/* @expect 0x77 */
-int cctest_const_global(void)
+int test_main(void)
 {
    return g_const_val; /* 0x77 */
 }

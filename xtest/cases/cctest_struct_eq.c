@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_eq.c --- cctest case struct_eq
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int struct_eq(const struct cmp_s *x, const struct cmp_s *y)
    return (x->a == y->a && x->b == y->b) ? 1 : 0;
 }
 
-/* @expect 2 */
-int cctest_struct_eq(void)
+int test_main(void)
 {
    struct cmp_s a = {10, 20};
    struct cmp_s b = {10, 20};

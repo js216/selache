@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_char_plus_char.c --- cctest case char_plus_char
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xFE */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xFE */
-int cctest_char_plus_char(void)
+int test_main(void)
 {
    unsigned char a = 127;
    unsigned char b = 127;

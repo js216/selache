@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multichar.c --- cctest case multichar
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@
    return arr[3] + s.y; /* 40 + 15 = 55 = 0x37 */
 }
 
-/* @expect 0x55 */
-int cctest_multichar(void)
+int test_main(void)
 {
    int mc = 'AB';
    /* Implementation-defined, but nonzero and contains 'A' and 'B' bits */

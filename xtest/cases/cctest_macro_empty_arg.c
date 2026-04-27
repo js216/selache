@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_macro_empty_arg.c --- cctest case macro_empty_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define MAYBE(x) (0 x + 1)
 
-/* @expect 1 */
-int cctest_macro_empty_arg(void)
+int test_main(void)
 {
    return MAYBE(); /* (0  + 1) = 1 */
 }

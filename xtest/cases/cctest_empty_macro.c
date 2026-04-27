@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_empty_macro.c --- cctest case empty_macro
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 5 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define EMPTY_MACRO
 
-/* @expect 5 */
-int cctest_empty_macro(void)
+int test_main(void)
 {
    int x = 5 EMPTY_MACRO;
    return x; /* 5 */

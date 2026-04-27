@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_callback.c --- cctest case callback
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x33 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int apply(int (*fn)(int, int), int a, int b)
    return fn(a, b);
 }
 
-/* @expect 0x33 */
-int cctest_callback(void)
+int test_main(void)
 {
    return apply(helper_add, 0x11, 0x22); /* 0x33 */
 }

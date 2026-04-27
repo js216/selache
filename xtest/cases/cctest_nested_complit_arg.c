@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_complit_arg.c --- cctest case nested_complit_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -23,8 +29,7 @@ static int ncl_sum(struct ncl_outer o)
    return o.in.a + o.in.b + o.c;
 }
 
-/* @expect 0x1E */
-int cctest_nested_complit_arg(void)
+int test_main(void)
 {
    return ncl_sum((struct ncl_outer){
        (struct ncl_inner){5, 10},

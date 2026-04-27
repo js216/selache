@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_computed_idx.c --- cctest case struct_computed_idx
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x2D */
-int cctest_struct_computed_idx(void)
+int test_main(void)
 {
    struct {
       int a;

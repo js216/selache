@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_str_param.c --- cctest case str_param
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x68 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int first_char(const char *s)
    return s[0];
 }
 
-/* @expect 0x68 */
-int cctest_str_param(void)
+int test_main(void)
 {
    return first_char("hello"); /* 'h' = 104 = 0x68 */
 }

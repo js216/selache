@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_anon_union_access.c --- cctest case anon_union_access
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ union ival {
    float f;
 };
 
-/* @expect 0x42 */
-int cctest_anon_union_access(void)
+int test_main(void)
 {
    struct mixed {
       int kind;

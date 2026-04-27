@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_rgb.c --- cctest case rgb
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x60 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ struct rgb {
    int b;
 };
 
-/* @expect 0x60 */
-int cctest_rgb(void)
+int test_main(void)
 {
    struct rgb c;
    c.r = 0x10;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_comma_return.c --- cctest case comma_return
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static int g_comma_ret_side = 0;
 
-/* @expect 0x0F */
-int cctest_comma_return(void)
+int test_main(void)
 {
    g_comma_ret_side = 0;
    int val          = (g_comma_ret_side = 10, g_comma_ret_side + 5);

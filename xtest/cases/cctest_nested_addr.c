@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_addr.c --- cctest case nested_addr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ struct outer {
    int b;
 };
 
-/* @expect 0x1E */
-int cctest_nested_addr(void)
+int test_main(void)
 {
    int x      = 10;
    int *outer = &x;

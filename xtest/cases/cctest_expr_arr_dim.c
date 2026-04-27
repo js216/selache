@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_expr_arr_dim.c --- cctest case expr_arr_dim
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 6 */
-int cctest_expr_arr_dim(void)
+int test_main(void)
 {
    int arr[2 + 3]; /* arr[5] */
    for (int i = 0; i < 5; i++)

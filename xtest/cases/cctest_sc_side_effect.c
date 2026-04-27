@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sc_side_effect.c --- cctest case sc_side_effect
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -16,8 +22,7 @@ static int sc_inc(void)
    return 1;
 }
 
-/* @expect 0x55 */
-int cctest_sc_side_effect(void)
+int test_main(void)
 {
    sc_counter = 0;
    int x      = 0;

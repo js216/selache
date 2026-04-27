@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_buf_view.c --- cctest case buf_view
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -21,8 +27,7 @@ static int buf_sum(const struct buf_view *v)
    return s;
 }
 
-/* @expect 0x0F */
-int cctest_buf_view(void)
+int test_main(void)
 {
    const int arr[] = {1, 2, 3, 4, 5};
    struct buf_view v;

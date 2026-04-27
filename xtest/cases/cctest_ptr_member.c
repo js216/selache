@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_member.c --- cctest case ptr_member
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct spair {
    int second;
 };
 
-/* @expect 0x1E */
-int cctest_ptr_member(void)
+int test_main(void)
 {
    struct spair p;
    p.first  = 10;

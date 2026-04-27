@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_assign_cond.c --- cctest case assign_cond
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 8 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int ret7(void)
    return 7;
 }
 
-/* @expect 8 */
-int cctest_assign_cond(void)
+int test_main(void)
 {
    int x;
    if ((x = ret7()) > 5)

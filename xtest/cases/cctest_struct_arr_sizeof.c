@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_arr_sizeof.c --- cctest case struct_arr_sizeof
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x18 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x18 */
-int cctest_struct_arr_sizeof(void)
+int test_main(void)
 {
    struct sa {
       int a;

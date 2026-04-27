@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_cond_const.c --- cctest case cond_const
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x44 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static const int g_cond_const = (sizeof(int) == 4) ? 0x44 : 0x88;
 
-/* @expect 0x44 */
-int cctest_cond_const(void)
+int test_main(void)
 {
    return g_cond_const; /* 0x44 */
 }

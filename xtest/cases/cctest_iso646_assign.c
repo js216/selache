@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_iso646_assign.c --- cctest case iso646_assign
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x34 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x34 */
-int cctest_iso646_assign(void)
+int test_main(void)
 {
    int x = 0xFF;
    x and_eq 0x3C; /* x &= 0x3C → 0x3C */

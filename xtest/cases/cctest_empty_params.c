@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_empty_params.c --- cctest case empty_params
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x33 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int empty_params_fn()
    return 0x33;
 }
 
-/* @expect 0x33 */
-int cctest_empty_params(void)
+int test_main(void)
 {
    return empty_params_fn(); /* 0x33 */
 }

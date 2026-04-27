@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_call.c --- cctest case call
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int helper_add(int x, int y)
    return x + y;
 }
 
-/* @expect 0x30 */
-int cctest_call(void)
+int test_main(void)
 {
    return helper_add(0x10, 0x20);
 }

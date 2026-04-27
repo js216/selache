@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_flex_array.c --- cctest case flex_array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x32 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct flex {
    int data[];
 };
 
-/* @expect 0x32 */
-int cctest_flex_array(void)
+int test_main(void)
 {
    int buf[4];
    struct flex *p = (struct flex *)buf;

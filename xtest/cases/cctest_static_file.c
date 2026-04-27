@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_static_file.c --- cctest case static_file
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x33 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 static int file_scope_var = 0x33;
 
-/* @expect 0x33 */
-int cctest_static_file(void)
+int test_main(void)
 {
    int r          = file_scope_var;
    file_scope_var = 0x33; /* keep idempotent */

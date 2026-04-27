@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_double_cmp.c --- cctest case double_cmp
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1F */
-int cctest_double_cmp(void)
+int test_main(void)
 {
    double a = 1.0, b = 2.0;
    int r = 0;

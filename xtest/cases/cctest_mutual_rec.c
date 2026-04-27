@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mutual_rec.c --- cctest case mutual_rec
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -24,8 +30,7 @@ static int is_odd(int n)
    return is_even(n - 1);
 }
 
-/* @expect 2 */
-int cctest_mutual_rec(void)
+int test_main(void)
 {
    return is_even(4) + is_odd(3); /* 1+1 = 2 */
 }

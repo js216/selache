@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_static_local_persist.c --- cctest case static_local_persist
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ static int _persist_counter2(void)
    return ++c;
 }
 
-/* @expect 0x55 */
-int cctest_static_local_persist(void)
+int test_main(void)
 {
    int a = _persist_counter2();
    int b = _persist_counter2();

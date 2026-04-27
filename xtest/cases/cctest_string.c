@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_string.c --- cctest case string
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xD7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xD7 */
-int cctest_string(void)
+int test_main(void)
 {
    const char *s = "hello";
    return s[0] + s[4]; /* 'h'+'o' = 104+111 = 215 = 0xD7 */

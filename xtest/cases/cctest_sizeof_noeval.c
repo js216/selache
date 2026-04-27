@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sizeof_noeval.c --- cctest case sizeof_noeval
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x54 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x54 */
-int cctest_sizeof_noeval(void)
+int test_main(void)
 {
    int x = 5;
    int s = (int)sizeof(x++);

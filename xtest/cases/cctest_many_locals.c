@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_many_locals.c --- cctest case many_locals
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x78 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x78 */
-int cctest_many_locals(void)
+int test_main(void)
 {
    int a = 1, b = 2, c = 3, d = 4, e = 5;
    int f = 6, g = 7, h = 8, i = 9, j = 10;

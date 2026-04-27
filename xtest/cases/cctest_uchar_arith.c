@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_uchar_arith.c --- cctest case uchar_arith
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x12C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x12C */
-int cctest_uchar_arith(void)
+int test_main(void)
 {
    unsigned char a = 200;
    unsigned char b = 100;

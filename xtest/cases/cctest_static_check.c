@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_static_check.c --- cctest case static_check
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 4 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 typedef int static_check_int_is_4[(sizeof(int) == 4) ? 1 : -1];
 
-/* @expect 4 */
-int cctest_static_check(void)
+int test_main(void)
 {
    return (int)sizeof(static_check_int_is_4); /* 4 (array of 1 int) */
 }

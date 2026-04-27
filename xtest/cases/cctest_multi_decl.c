@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_multi_decl.c --- cctest case multi_decl
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3D */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@
    return arr[0] + arr[4] + s.a + s.b + s.c; /* all zero = 0 */
 }
 
-/* @expect 0x3D */
-int cctest_multi_decl(void)
+int test_main(void)
 {
    int a = 1, *b, c[3];
    b     = &a;

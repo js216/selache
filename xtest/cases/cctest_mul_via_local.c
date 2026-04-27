@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mul_via_local.c --- cctest case mul_via_local
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x9 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int helper_mul(int a, int b)
    return a * b;
 }
 
-/* @expect 0x9 */
-int cctest_mul_via_local(void)
+int test_main(void)
 {
    int x = helper_mul(3, 3);
    return x;

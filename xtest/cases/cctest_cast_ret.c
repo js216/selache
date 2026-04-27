@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_cast_ret.c --- cctest case cast_ret
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x111 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int helper_add(int x, int y)
    return x + y;
 }
 
-/* @expect 0x111 */
-int cctest_cast_ret(void)
+int test_main(void)
 {
    return (short)helper_add(0x100, 0x10) + 1;
    /* helper_add returns 0x110 = 272, cast to short: 0x110, +1 = 0x111 */

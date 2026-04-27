@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_typedef_complex.c --- cctest case typedef_complex
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 typedef int (*arr3_ptr)[3];
 
-/* @expect 0x3C */
-int cctest_typedef_complex(void)
+int test_main(void)
 {
    int arr[3] = {10, 20, 30};
    arr3_ptr p = &arr;

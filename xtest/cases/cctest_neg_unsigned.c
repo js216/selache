@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_neg_unsigned.c --- cctest case neg_unsigned
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0F */
-int cctest_neg_unsigned(void)
+int test_main(void)
 {
    unsigned int a = 1;
    unsigned int b = -a;   /* 0xFFFFFFFF */

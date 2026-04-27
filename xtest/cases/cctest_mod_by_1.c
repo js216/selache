@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_mod_by_1.c --- cctest case mod_by_1
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_mod_by_1(void)
+int test_main(void)
 {
    int r = 1;
    for (int i = -10; i <= 10; i++) {

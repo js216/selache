@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_iso646_misc.c --- cctest case iso646_misc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_iso646_misc(void)
+int test_main(void)
 {
    int r = 0;
    if ((compl 0u) == 0xFFFFFFFFu)

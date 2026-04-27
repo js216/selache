@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_printf_two_unsigned.c --- cctest case printf_two_unsigned
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xcafe */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xcafe */
-int cctest_printf_two_unsigned(void)
+int test_main(void)
 {
    char buf[24];
    for (int i = 0; i < 24; i++)

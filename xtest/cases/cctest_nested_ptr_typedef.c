@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_ptr_typedef.c --- cctest case nested_ptr_typedef
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@
 typedef int *intptr_td;
 typedef intptr_td *intptrptr_td;
 
-/* @expect 0x42 */
-int cctest_nested_ptr_typedef(void)
+int test_main(void)
 {
    int x           = 0x42;
    intptr_td p     = &x;

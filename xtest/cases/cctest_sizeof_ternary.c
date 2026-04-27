@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_sizeof_ternary.c --- cctest case sizeof_ternary
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0C */
-int cctest_sizeof_ternary(void)
+int test_main(void)
 {
    int cond = 1;
    int a    = (int)sizeof(cond ? (long long)0 : (char)0);

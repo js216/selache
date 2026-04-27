@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_switch_neg.c --- cctest case switch_neg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x20 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x20 */
-int cctest_switch_neg(void)
+int test_main(void)
 {
    int x = -1;
    switch (x) {

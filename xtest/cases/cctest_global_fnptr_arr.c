@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_fnptr_arr.c --- cctest case global_fnptr_arr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ static int gfn_c(void)
 
 static int (*const gfn_table[])(void) = {gfn_a, gfn_b, gfn_c};
 
-/* @expect 6 */
-int cctest_global_fnptr_arr(void)
+int test_main(void)
 {
    return gfn_table[0]() + gfn_table[1]() + gfn_table[2](); /* 1+2+3 = 6 */
 }

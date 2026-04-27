@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fn_returning_fnptr.c --- cctest case fn_returning_fnptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0B */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ static unary_fn pick_fn(int which)
    return which ? add1 : sub1;
 }
 
-/* @expect 0x0B */
-int cctest_fn_returning_fnptr(void)
+int test_main(void)
 {
    unary_fn f = pick_fn(1);
    return f(10); /* add1(10) = 11 */

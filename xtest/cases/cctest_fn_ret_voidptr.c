@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_fn_ret_voidptr.c --- cctest case fn_ret_voidptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x66 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static void *ret_voidptr(int *p)
    return (void *)p;
 }
 
-/* @expect 0x66 */
-int cctest_fn_ret_voidptr(void)
+int test_main(void)
 {
    int x  = 0x66;
    int *p = (int *)ret_voidptr(&x);

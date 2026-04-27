@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_chain_ternary.c --- cctest case chain_ternary
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int classify(int x)
    return (x > 10) ? 3 : (x > 5) ? 2 : (x > 0) ? 1 : 0;
 }
 
-/* @expect 2 */
-int cctest_chain_ternary(void)
+int test_main(void)
 {
    return classify(7); /* 2 */
 }

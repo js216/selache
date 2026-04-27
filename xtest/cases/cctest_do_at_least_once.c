@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_do_at_least_once.c --- cctest case do_at_least_once
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x01 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x01 */
-int cctest_do_at_least_once(void)
+int test_main(void)
 {
    int count = 0;
    do {

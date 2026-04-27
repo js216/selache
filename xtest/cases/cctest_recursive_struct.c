@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_recursive_struct.c --- cctest case recursive_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 6 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ struct node {
    struct node *next;
 };
 
-/* @expect 6 */
-int cctest_recursive_struct(void)
+int test_main(void)
 {
    struct node a, b, c;
    a.val          = 1;

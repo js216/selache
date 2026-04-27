@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ubf.c --- cctest case ubf
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x19 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x19 */
-int cctest_ubf(void)
+int test_main(void)
 {
    struct {
       unsigned int x : 4;

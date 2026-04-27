@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_macro_select.c --- cctest case macro_select
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -12,8 +18,7 @@
 #define FIRST_ARG(a, b)  (a)
 #define SECOND_ARG(a, b) (b)
 
-/* @expect 0x55 */
-int cctest_macro_select(void)
+int test_main(void)
 {
    int x = FIRST_ARG(0x55, 0xAA);
    int y = SECOND_ARG(0xAA, 0x55);

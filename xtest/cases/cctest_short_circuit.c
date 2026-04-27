@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_short_circuit.c --- cctest case short_circuit
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0B */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0B */
-int cctest_short_circuit(void)
+int test_main(void)
 {
    int x = 0, y = 5;
    if (y > 0 && ++x > 0)

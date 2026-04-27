@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_desig_struct.c --- cctest case desig_struct
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x50 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -19,8 +25,7 @@ struct dinit {
    int c;
 };
 
-/* @expect 0x50 */
-int cctest_desig_struct(void)
+int test_main(void)
 {
    struct dinit s = {.b = 0x20, .c = 0x30};
    return s.a + s.b + s.c; /* 0 + 0x20 + 0x30 = 0x50 */

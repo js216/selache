@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_str_search.c --- cctest case str_search
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 2 */
-int cctest_str_search(void)
+int test_main(void)
 {
    const char *names[] = {"cat", "dog", "fox"};
    const char *target  = "fox";

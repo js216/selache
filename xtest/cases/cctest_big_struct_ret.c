@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_big_struct_ret.c --- cctest case big_struct_ret
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x18 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -27,8 +33,7 @@ static struct big5 make_big5(int base)
    return r;
 }
 
-/* @expect 0x18 */
-int cctest_big_struct_ret(void)
+int test_main(void)
 {
    struct big5 s = make_big5(10);
    return s.a + s.e; /* 10 + 14 = 24 = 0x18 */

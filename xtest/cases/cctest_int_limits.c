@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_limits.c --- cctest case int_limits
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x1F */
-int cctest_int_limits(void)
+int test_main(void)
 {
    int r = 0;
    if (SCHAR_MIN == -128)

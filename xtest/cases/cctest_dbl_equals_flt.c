@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_dbl_equals_flt.c --- cctest case dbl_equals_flt
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 3 */
-int cctest_dbl_equals_flt(void)
+int test_main(void)
 {
    int r = 0;
    if (DBL_MANT_DIG == FLT_MANT_DIG)

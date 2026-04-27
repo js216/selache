@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested_arr_init.c --- cctest case nested_arr_init
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -17,8 +23,7 @@ struct outer_arr {
    int tag;
 };
 
-/* @expect 0x1E */
-int cctest_nested_arr_init(void)
+int test_main(void)
 {
    struct outer_arr o = {{{5, 10, 15}}, 0};
    return o.in.data[0] + o.in.data[1] + o.in.data[2] + o.tag;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_anon_enum.c --- cctest case anon_enum
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,7 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x28 */
-int cctest_anon_enum(void)
+int test_main(void)
 {
    enum { AE_X = 7, AE_Y = 13, AE_Z = 20 };

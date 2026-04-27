@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_three_cjumps_noret.c --- cctest case three_cjumps_noret
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x11 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static int helper_add(int x, int y)
    return x + y;
 }
 
-/* @expect 0x11 */
-int cctest_three_cjumps_noret(void)
+int test_main(void)
 {
    int a = helper_add(1, 2); /* 3 */
    int b = helper_add(3, 4); /* 7 */

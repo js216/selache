@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_large_local.c --- cctest case large_local
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x2E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x2E */
-int cctest_large_local(void)
+int test_main(void)
 {
    struct {
       int data[32];

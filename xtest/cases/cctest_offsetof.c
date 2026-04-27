@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_offsetof.c --- cctest case offsetof
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ struct off_s {
    int c;
 };
 
-/* @expect 2 */
-int cctest_offsetof(void)
+int test_main(void)
 {
    struct off_s s;
    int off = (int)((char *)&s.c - (char *)&s);

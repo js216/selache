@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_uint_cmp_edge.c --- cctest case uint_cmp_edge
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_uint_cmp_edge(void)
+int test_main(void)
 {
    unsigned int zero = 0;
    unsigned int max  = 0xFFFFFFFFu;

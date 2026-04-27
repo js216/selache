@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_uint_to_float_conv.c --- cctest case uint_to_float_conv
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_uint_to_float_conv(void)
+int test_main(void)
 {
    unsigned int u = 1000000;
    float f        = (float)u;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_va_copy.c --- cctest case va_copy
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x60 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -27,8 +33,7 @@ static int va_sum3v(int n, ...)
    return s;
 }
 
-/* @expect 0x60 */
-int cctest_va_copy(void)
+int test_main(void)
 {
    return va_sum3v(3, 0x20, 0x30, 0x10); /* 0x60 */
 }

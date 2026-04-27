@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_suffix_all.c --- cctest case int_suffix_all
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_int_suffix_all(void)
+int test_main(void)
 {
    unsigned u             = 42U;
    long l                 = 42L;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bf_const_width.c --- cctest case bf_const_width
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define BF_WIDTH (2 + 3)
 
-/* @expect 0x1F */
-int cctest_bf_const_width(void)
+int test_main(void)
 {
    struct {
       unsigned int x : BF_WIDTH;

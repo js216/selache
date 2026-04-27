@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_promo.c --- cctest case int_promo
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xC8 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xC8 */
-int cctest_int_promo(void)
+int test_main(void)
 {
    char a = 10;
    char b = 20;

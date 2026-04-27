@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_minmax.c --- cctest case int_minmax
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 7 */
-int cctest_int_minmax(void)
+int test_main(void)
 {
    int r = 0;
    if (INT_MIN < 0 && INT_MAX > 0)

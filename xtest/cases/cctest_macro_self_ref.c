@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_macro_self_ref.c --- cctest case macro_self_ref
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x42 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -10,8 +16,7 @@
 
 #define SELF_REF SELF_REF
 
-/* @expect 0x42 */
-int cctest_macro_self_ref(void)
+int test_main(void)
 {
    /* SELF_REF expands to SELF_REF (not infinite loop -- stops at
     * self-reference) */

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_embedded_nul.c --- cctest case embedded_nul
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xC3 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xC3 */
-int cctest_embedded_nul(void)
+int test_main(void)
 {
    char s[] = "ab\0cd";
    /* sizeof includes all chars + trailing NUL: 'a','b','\0','c','d','\0' = 6 */

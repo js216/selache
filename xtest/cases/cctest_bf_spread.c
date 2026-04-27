@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_bf_spread.c --- cctest case bf_spread
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x30 */
-int cctest_bf_spread(void)
+int test_main(void)
 {
    struct {
       unsigned int a : 4;

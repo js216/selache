@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_incomplete_later.c --- cctest case incomplete_later
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x28 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -16,8 +22,7 @@ struct later_complete {
    int y;
 };
 
-/* @expect 0x28 */
-int cctest_incomplete_later(void)
+int test_main(void)
 {
    struct later_complete obj;
    obj.x       = 15;

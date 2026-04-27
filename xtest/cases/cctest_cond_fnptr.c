@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_cond_fnptr.c --- cctest case cond_fnptr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 7 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -18,8 +24,7 @@ static int helper_mul(int a, int b)
    return a * b;
 }
 
-/* @expect 7 */
-int cctest_cond_fnptr(void)
+int test_main(void)
 {
    int sel = 1;
    return (sel ? helper_add : helper_mul)(3, 4); /* helper_add(3,4) = 7 */

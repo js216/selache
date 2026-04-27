@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_global_union.c --- cctest case global_union
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x77 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -13,8 +19,7 @@ static union {
    float f;
 } g_union_init = {0x77};
 
-/* @expect 0x77 */
-int cctest_global_union(void)
+int test_main(void)
 {
    return g_union_init.i; /* 0x77 */
 }

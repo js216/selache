@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_fn_ret_fn.c --- cctest case ptr_fn_ret_fn
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x30 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -31,8 +37,7 @@ static binop_t get_binop(int which)
    return helper_mul;
 }
 
-/* @expect 0x30 */
-int cctest_ptr_fn_ret_fn(void)
+int test_main(void)
 {
    binop_t (*getter)(int) = get_binop;
    binop_t op             = getter(0);

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_elseif.c --- cctest case elseif
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 2 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 2 */
-int cctest_elseif(void)
+int test_main(void)
 {
    int x = 7, r = 0;
    if (x > 10)

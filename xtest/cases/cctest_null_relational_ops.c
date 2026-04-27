@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_null_relational_ops.c --- cctest case null_relational_ops
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x03 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x03 */
-int cctest_null_relational_ops(void)
+int test_main(void)
 {
    int x;
    int *p = &x;

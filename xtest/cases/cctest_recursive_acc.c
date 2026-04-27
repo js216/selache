@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_recursive_acc.c --- cctest case recursive_acc
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x37 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -15,8 +21,7 @@ static int sum_acc(int n, int acc)
    return sum_acc(n - 1, acc + n);
 }
 
-/* @expect 0x37 */
-int cctest_recursive_acc(void)
+int test_main(void)
 {
    return sum_acc(10, 0); /* 55 */
 }

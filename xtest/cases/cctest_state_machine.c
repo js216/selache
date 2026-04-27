@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_state_machine.c --- cctest case state_machine
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x3C */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x3C */
-int cctest_state_machine(void)
+int test_main(void)
 {
    int state = 0, sum = 0, count = 0;
    while (state != 3) {

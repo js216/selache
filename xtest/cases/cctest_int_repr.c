@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_repr.c --- cctest case int_repr
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xAA */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xAA */
-int cctest_int_repr(void)
+int test_main(void)
 {
    int x            = 0x55AA;
    unsigned char *p = (unsigned char *)&x;

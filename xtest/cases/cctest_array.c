@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_array.c --- cctest case array
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x32 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x32 */
-int cctest_array(void)
+int test_main(void)
 {
    int arr[4];
    arr[0] = 10;

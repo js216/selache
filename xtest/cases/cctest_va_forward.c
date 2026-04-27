@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_va_forward.c --- cctest case va_forward
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x64 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -25,8 +31,7 @@ static int va_outer(int count, ...)
    return r;
 }
 
-/* @expect 0x64 */
-int cctest_va_forward(void)
+int test_main(void)
 {
    return va_outer(4, 10, 20, 30, 40); /* 100 = 0x64 */
 }

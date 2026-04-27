@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_compound_cross.c --- cctest case compound_cross
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xBE */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xBE */
-int cctest_compound_cross(void)
+int test_main(void)
 {
    int x  = 100;
    char c = 5;

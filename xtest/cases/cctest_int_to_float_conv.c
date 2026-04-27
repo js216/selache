@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_to_float_conv.c --- cctest case int_to_float_conv
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x07 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x07 */
-int cctest_int_to_float_conv(void)
+int test_main(void)
 {
    int i        = 7;
    float f      = 0.5f;

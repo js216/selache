@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_if.c --- cctest case if
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0xA1 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0xA1 */
-int cctest_if(void)
+int test_main(void)
 {
    int x = 3, r = 0xA2;
    if (x > 0)

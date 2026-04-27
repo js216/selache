@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_ptr_walk.c --- cctest case ptr_walk
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x0E */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x0E */
-int cctest_ptr_walk(void)
+int test_main(void)
 {
    int arr[5];
    arr[0]  = 1;

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_nested.c --- cctest case nested
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x20 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x20 */
-int cctest_nested(void)
+int test_main(void)
 {
    int t = 0, i;
    for (i = 0; i < 4; i = i + 1) {

@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_struct_bool.c --- cctest case struct_bool
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x1F */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -14,8 +20,7 @@ struct with_bool {
    int y;
 };
 
-/* @expect 0x1F */
-int cctest_struct_bool(void)
+int test_main(void)
 {
    struct with_bool s;
    s.x    = 10;

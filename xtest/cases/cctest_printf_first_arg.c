@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_printf_first_arg.c --- cctest case printf_first_arg
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x61 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x61 */
-int cctest_printf_first_arg(void)
+int test_main(void)
 {
    char buf[16];
    for (int i = 0; i < 16; i++)

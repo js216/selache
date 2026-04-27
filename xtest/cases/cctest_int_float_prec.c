@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT
+// cctest_int_float_prec.c --- cctest case int_float_prec
+// Copyright (c) 2026 Jakob Kastelic
+
+/* @expect 0x55 */
+
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
@@ -8,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* @expect 0x55 */
-int cctest_int_float_prec(void)
+int test_main(void)
 {
    int big  = 0x1000001; /* 16777217 -- exceeds float 24-bit mantissa */
    float f  = (float)big;
