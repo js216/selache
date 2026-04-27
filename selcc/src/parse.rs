@@ -237,7 +237,7 @@ impl<'a> Parser<'a> {
                         if self.current == Token::Assign {
                             self.advance()?;
                             let val_expr = self.parse_assign()?;
-                            next_val = const_eval(&val_expr);
+                            next_val = self.eval_enum_init(&val_expr);
                         }
                         if self.block_depth > 0 {
                             // Inside a function body: collect for a
@@ -283,6 +283,81 @@ impl<'a> Parser<'a> {
             ty = Type::Const(Box::new(ty));
         }
         Ok(ty)
+    }
+
+    /// Constant-evaluate an enum initializer, resolving identifier
+    /// references to previously-declared enumerators in the same or
+    /// enclosing enum table (C99 6.7.2.2: each enumerator is a constant
+    /// expression once its enclosing enum-specifier has bound it).
+    /// Falls back to `const_eval` semantics for non-ident sub-expressions
+    /// and yields 0 for unrecognized forms (matching `const_eval`).
+    fn eval_enum_init(&self, expr: &Expr) -> i64 {
+        match expr {
+            Expr::IntLit(v, _) => *v,
+            Expr::CharLit(v) => *v,
+            Expr::Ident(name) => {
+                // Search pending block-scoped enumerators first so that
+                // an enclosing block-scoped enum shadows a file-scope one
+                // of the same name (C99 6.2.1). Within a single enum
+                // definition, later enumerators see earlier ones because
+                // both lists are appended-to as we parse.
+                if let Some((_, v)) = self
+                    .pending_block_enum_consts
+                    .iter()
+                    .rev()
+                    .find(|(n, _)| n == name)
+                {
+                    return *v;
+                }
+                if let Some((_, v)) = self
+                    .enum_constants
+                    .iter()
+                    .rev()
+                    .find(|(n, _)| n == name)
+                {
+                    return *v;
+                }
+                0
+            }
+            Expr::Unary { op: UnaryOp::Neg, operand } => -self.eval_enum_init(operand),
+            Expr::Unary { op: UnaryOp::BitNot, operand } => !self.eval_enum_init(operand),
+            Expr::Unary { op: UnaryOp::LogNot, operand } => {
+                if self.eval_enum_init(operand) == 0 { 1 } else { 0 }
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                let l = self.eval_enum_init(lhs);
+                let r = self.eval_enum_init(rhs);
+                match op {
+                    BinaryOp::Add => l + r,
+                    BinaryOp::Sub => l - r,
+                    BinaryOp::Mul => l * r,
+                    BinaryOp::Div => if r == 0 { 0 } else { l / r },
+                    BinaryOp::Mod => if r == 0 { 0 } else { l % r },
+                    BinaryOp::Shl => l << r,
+                    BinaryOp::Shr => l >> r,
+                    BinaryOp::BitAnd => l & r,
+                    BinaryOp::BitOr => l | r,
+                    BinaryOp::BitXor => l ^ r,
+                    BinaryOp::Eq => (l == r) as i64,
+                    BinaryOp::Ne => (l != r) as i64,
+                    BinaryOp::Lt => (l < r) as i64,
+                    BinaryOp::Gt => (l > r) as i64,
+                    BinaryOp::Le => (l <= r) as i64,
+                    BinaryOp::Ge => (l >= r) as i64,
+                    BinaryOp::LogAnd => ((l != 0) && (r != 0)) as i64,
+                    BinaryOp::LogOr => ((l != 0) || (r != 0)) as i64,
+                }
+            }
+            Expr::Ternary { cond, then_expr, else_expr } => {
+                if self.eval_enum_init(cond) != 0 {
+                    self.eval_enum_init(then_expr)
+                } else {
+                    self.eval_enum_init(else_expr)
+                }
+            }
+            Expr::Cast(_, inner) => self.eval_enum_init(inner),
+            _ => 0,
+        }
     }
 
     // ---- Top-level parsing ----
