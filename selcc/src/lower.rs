@@ -191,7 +191,7 @@ impl LowerCtx {
 
     /// Allocate a vreg that is guaranteed non-zero. isel's
     /// `IrOp::Load(dst, base, off)` and `IrOp::Store(val, base, off)`
-    /// treat `base == 0` as the sentinel for a frame-relative access,
+    /// treat `base == 0` as the sentinel for a frame-relative areferences,
     /// so a vreg that the frontend intends to use as a pointer base
     /// must never be allocated as VReg 0. The historical convention of
     /// pinning VReg 0 to the first ARG_REG makes the issue invisible
@@ -424,12 +424,31 @@ fn collect_assigned_expr(expr: &Expr, set: &mut HashSet<String>) {
                 collect_assigned_expr(a, set);
             }
         }
-        Expr::Deref(inner)
-        | Expr::AddrOf(inner)
-        | Expr::PreInc(inner)
+        Expr::PreInc(inner)
         | Expr::PreDec(inner)
         | Expr::PostInc(inner)
-        | Expr::PostDec(inner)
+        | Expr::PostDec(inner) => {
+            // Increment / decrement is a *modifying* operation on the
+            // operand. When the operand is a plain identifier, record
+            // the name as reassigned so the lowering pass binds the
+            // variable to a stack slot rather than `LocalStorage::Reg`.
+            // A register-bound variable in a loop body whose only
+            // mutation is `x++` (e.g. `va_arg(ap, int)` expanding to
+            // `*(int*)((ap)++)`) reads its value through the original
+            // pre-inc vreg every iteration: the rebind that
+            // `lower_inc_dec` performs at lowering time updates the
+            // name → vreg map only for the rest of the lowering pass,
+            // but the loop's branch-back re-executes IR that already
+            // captured the *old* vreg. The result is that the
+            // increment is silently dropped across iterations and
+            // every va_arg returns the first variadic argument.
+            if let Expr::Ident(name) = inner.as_ref() {
+                set.insert(name.clone());
+            }
+            collect_assigned_expr(inner, set);
+        }
+        Expr::Deref(inner)
+        | Expr::AddrOf(inner)
         | Expr::Cast(_, inner) => collect_assigned_expr(inner, set),
         Expr::Index(base, idx) => {
             collect_assigned_expr(base, set);
@@ -534,7 +553,7 @@ pub fn lower_function_with_known(
 
     // Determine which parameters are reassigned in the function body.
     // Volatile parameters are always treated as reassigned to force stack
-    // allocation, ensuring every access goes through memory.
+    // allocation, ensuring every areferences goes through memory.
     let mut reassigned = assigned_vars(&func.body);
     for (name, ty) in &func.params {
         if ty.is_volatile() {
@@ -542,24 +561,44 @@ pub fn lower_function_with_known(
         }
     }
 
-    // Variadic function prologue. The SHARC+ caller pushes *every*
-    // argument (including the named ones) onto the stack via post-modify
-    // `DM(I7, M7) = Rn` — the ARG_REGS path is bypassed entirely so that
-    // `va_arg` can walk a contiguous parameter area regardless of how
-    // many ARG_REGS the caller would normally use. Each named-arg slot
-    // therefore lives at `DM(I6 + i + 1)` for i = 0..named_count-1, with
-    // the first variadic arg one slot past that at
-    // `DM(I6 + named_count + 1)`.
+    // Variadic function prologue. The SHARC+ ABI for variadic
+    // callees passes the first `target::variadic_reg_named(named)`
+    // named arguments in `ARG_REGS[0..reg_named]` (R4, R8, ...) and
+    // *always* pushes the last named arg (and every variadic arg)
+    // onto the caller's stack so `va_start` has a fixed anchor for
+    // the va_list. The reference SHARC+ toolchain emits exactly this
+    // layout; selcc must match it so that selcc-built callers can
+    // invoke reference-built libsel variadic routines (snprintf, printf,
+    // ...) and selcc-built variadic callees can be invoked from
+    // reference-built callers without an ABI mismatch.
     //
-    // Bind every named parameter to a local frame slot whose initial
-    // value comes from a `LoadStackArg(i)`. The local-copy step is
-    // mandatory: the caller's pushed-arg region lies above I6 (positive
-    // offsets) and is unreachable through the negative-offset
-    // `DM(-N, I6)` form that the rest of the body uses for variable
-    // access. Record the named-slot count so `__builtin_va_start_sel`
-    // can lift the address of the first variadic arg.
+    // Inside the callee, named arg `i` for `i < reg_named` arrives
+    // in `ARG_REGS[i]`; named arg `i` for `i >= reg_named` lives at
+    // `DM(I6 + (i - reg_named) + 1)`, and the first variadic arg
+    // sits one slot past the last stack-passed named arg at
+    // `DM(I6 + (named - reg_named) + 1)`.
+    //
+    // Bind every named parameter to a local frame slot. The
+    // local-copy step is mandatory for stack-passed named args: the
+    // caller's pushed-arg region lies above I6 (positive offsets)
+    // and is unreachable through the negative-offset `DM(-N, I6)`
+    // form that the rest of the body uses for variable areferences. For
+    // register-passed named args the same stack-slot binding keeps
+    // the prologue uniform and lets the parameter survive across
+    // calls (the incoming caller-saved register would otherwise be
+    // clobbered). Record the count of named args that were pushed
+    // onto the stack so `__builtin_va_start_sel` can compute the
+    // address of the first variadic arg.
     if func.is_variadic {
-        let mut named_slot_count: u32 = 0;
+        // Pre-allocate vregs 0..reg_named so the prologue's
+        // `Copy(param_vreg, i as VReg)` reads from the same vreg
+        // ids that emit_asm pins to `ARG_REGS[0..reg_named]`. The
+        // pinning is driven by `arg_slots` reported below.
+        let reg_named = target::variadic_reg_named(func.params.len());
+        for slot in 0..reg_named {
+            let v = ctx.alloc_vreg();
+            debug_assert_eq!(v as usize, slot);
+        }
         for (i, (name, ty)) in func.params.iter().enumerate() {
             ctx.local_types.insert(name.clone(), ty.clone());
             let is_float_param = ty.is_float();
@@ -568,12 +607,21 @@ pub fn lower_function_with_known(
             if is_float_param {
                 ctx.vreg_is_float.insert(param_vreg, true);
             }
-            ctx.emit(IrOp::LoadStackArg(param_vreg, i as u32));
+            if i < reg_named {
+                let arg_vreg = i as VReg;
+                if is_float_param {
+                    ctx.vreg_is_float.insert(arg_vreg, true);
+                }
+                ctx.emit(IrOp::Copy(param_vreg, arg_vreg));
+            } else {
+                let stack_off = (i - reg_named) as u32;
+                ctx.emit(IrOp::LoadStackArg(param_vreg, stack_off));
+            }
             ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
             ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
-            named_slot_count += 1;
         }
-        ctx.va_named_slot_count = Some(named_slot_count);
+        let stack_named = func.params.len().saturating_sub(reg_named) as u32;
+        ctx.va_named_slot_count = Some(stack_named);
     }
 
     // Bind parameters to virtual registers pre-loaded from the ABI
@@ -660,7 +708,7 @@ pub fn lower_function_with_known(
                 };
                 // Offset is in bytes — `Store(val, base, off)` with a
                 // non-zero base is emitted via the byte-addressable
-                // indirect-access path, so the stride between fields
+                // indirect-areferences path, so the stride between fields
                 // must be `4 * w` (the byte-offset increment between
                 // 32-bit words) to match the layout `Expr::Member`
                 // reads back.
@@ -802,12 +850,18 @@ pub fn lower_function_with_known(
         ctx.emit(IrOp::Ret(None));
     }
 
-    // Variadic SHARC+ ABI passes *all* arguments on the caller's stack,
-    // so no parameter vregs need pinning to `ARG_REGS`. Reporting zero
-    // arg slots keeps `emit_asm`'s `num_params = min(arg_slots,
-    // ARG_REGS.len())` from forcing unrelated vregs onto R4/R8/R12 and
-    // colliding with regalloc.
-    let reported_arg_slots = if func.is_variadic { 0 } else { total_slots };
+    // The SHARC+ variadic ABI passes the first `reg_named` named
+    // args in `ARG_REGS[0..reg_named]` and pushes the rest. Report
+    // exactly that many arg slots so `emit_asm`'s
+    // `num_params = min(arg_slots, ARG_REGS.len())` pins vregs
+    // 0..reg_named to the matching ARG_REGS and leaves the higher
+    // arg registers free for regalloc, matching the reference convention
+    // and avoiding collisions with the rest of the function body.
+    let reported_arg_slots = if func.is_variadic {
+        target::variadic_reg_named(func.params.len()) as u32
+    } else {
+        total_slots
+    };
     Ok(LowerResult {
         ops: ctx.ops,
         strings: ctx.strings,
@@ -1173,7 +1227,7 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
 /// and as `scale_index_by_elem` for array indexing). Using a
 /// word-scaled offset here would collide with the byte-scaled offsets
 /// produced by `Expr::Index` / `Expr::Binary` pointer arithmetic and
-/// cause adjacent fields to overlap on every struct access.
+/// cause adjacent fields to overlap on every struct areferences.
 fn struct_field_offset(
     fields: &[(String, Type)],
     field_name: &str,
@@ -1349,7 +1403,7 @@ fn strip_to_pointer(ty: &Type) -> Option<&Type> {
 /// Return the pointee type of a pointer or array type, or `None` for any
 /// other type. Used by C99 6.5.6/6.5.2.1 scaling: in `ptr + int` and
 /// `arr[int]`, the integer operand is multiplied by `sizeof(*ptr)` bytes
-/// before being added to the address. Without this scaling every access
+/// before being added to the address. Without this scaling every areferences
 /// past element zero lands on a byte-offset inside the first element, so
 /// `arr[1]` writes into `arr[0]` (corrupting it) and `arr[3]` reads from
 /// the tail of `arr[0]` (returning whatever was last stored there).
@@ -1400,7 +1454,7 @@ fn resolve_type_chain(ty: &Type, ctx: &LowerCtx) -> Type {
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
 /// These types are byte-packed in memory (four per 32-bit word) and
 /// require a dynamic shift+mask when read or written through a pointer
-/// so byte-addressed access alignments hold.
+/// so byte-addressed areferences alignments hold.
 fn is_byte_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
     crate::types::size_bytes_ctx(ty.unqualified(), ctx) == 1
 }
@@ -1732,7 +1786,7 @@ fn int_literal_type(val: i64, suffix: IntSuffix) -> Type {
 }
 
 /// Infer the type of an expression from context (variable types, pointer
-/// dereference, struct member access). Returns `None` when the type cannot
+/// dereference, struct member areferences). Returns `None` when the type cannot
 /// be determined.
 /// C99 6.5.2.1 p2: `E1[E2]` is identical to `(*((E1)+(E2)))`. Addition is
 /// commutative, so `2[arr]` is well-formed and equivalent to `arr[2]`.
@@ -2017,12 +2071,12 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::Member(base, field) => {
             let base_ty = expr_type(base, ctx).ok_or_else(|| {
-                Error::NotImplemented("cannot determine struct type for member access".into())
+                Error::NotImplemented("cannot determine struct type for member areferences".into())
             })?;
             let offset = if is_union_type(&base_ty) {
                 let fields = resolve_struct_fields(&base_ty, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "member access on non-struct type: {base_ty:?}"
+                        "member areferences on non-struct type: {base_ty:?}"
                     ))
                 })?;
                 let _ = union_field_type(fields, field, ctx).ok_or_else(|| {
@@ -2032,7 +2086,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             } else {
                 let fields = resolve_struct_fields(&base_ty, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "member access on non-struct type: {base_ty:?}"
+                        "member areferences on non-struct type: {base_ty:?}"
                     ))
                 })?;
                 let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
@@ -2053,7 +2107,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::Arrow(base, field) => {
             let base_ty = expr_type(base, ctx).ok_or_else(|| {
-                Error::NotImplemented("cannot determine type for arrow access".into())
+                Error::NotImplemented("cannot determine type for arrow areferences".into())
             })?;
             let pointee = match strip_to_pointer(&base_ty) {
                 Some(inner) => inner.clone(),
@@ -2066,7 +2120,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let offset = if is_union_type(&pointee) {
                 let fields = resolve_struct_fields(&pointee, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "arrow access on non-struct pointee: {pointee:?}"
+                        "arrow areferences on non-struct pointee: {pointee:?}"
                     ))
                 })?;
                 let _ = union_field_type(fields, field, ctx).ok_or_else(|| {
@@ -2076,7 +2130,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             } else {
                 let fields = resolve_struct_fields(&pointee, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "arrow access on non-struct pointee: {pointee:?}"
+                        "arrow areferences on non-struct pointee: {pointee:?}"
                     ))
                 })?;
                 let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
@@ -4598,7 +4652,7 @@ fn lower_byte_array_init(
 /// byte offsets.  Char / short fields at sub-word offsets share a
 /// 32-bit word with their neighbours via byte-extract stores so the
 /// layout matches what `struct_field_layout_ctx` reports to member-
-/// access code.  Positional items walk fields in declaration order;
+/// areferences code.  Positional items walk fields in declaration order;
 /// `.field = v` designators jump to that field and subsequent
 /// positional items continue from there.
 fn lower_struct_init(
@@ -4920,7 +4974,7 @@ fn emit_struct_copy(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, num_word
     for i in 0..num_words {
         // Offsets passed to `Load`/`Store` with a non-zero base are
         // byte offsets (the emitter routes through the byte-
-        // addressable indirect-access path). Step by `4 * i` to keep
+        // addressable indirect-areferences path). Step by `4 * i` to keep
         // each word aligned on its 32-bit boundary instead of reading
         // a byte from the next field's storage.
         let byte_off = (i * 4) as i32;
@@ -5464,7 +5518,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_arrow_access() {
+    fn lower_arrow_areferences() {
         let src = "struct s { int val; };\nint f(struct s *p) { return p->val; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
@@ -5521,7 +5575,7 @@ mod tests {
         // Static local should produce a static local entry.
         assert_eq!(result.static_locals.len(), 1);
         assert_eq!(result.static_locals[0].symbol, "_counter_n");
-        // Access to a static local uses ReadGlobal/StoreGlobal.
+        // Areferences to a static local uses ReadGlobal/StoreGlobal.
         assert!(result.ops.iter().any(|op| matches!(op, IrOp::ReadGlobal(_, ref s) if s == "_counter_n")));
         assert!(result.ops.iter().any(|op| matches!(op, IrOp::StoreGlobal(_, ref s) if s == "_counter_n")));
     }
@@ -5796,7 +5850,7 @@ mod tests {
 
     #[test]
     fn lower_variadic_named_param_on_stack() {
-        // Named parameter of a variadic function is accessible as a
+        // Named parameter of a variadic function is areferencesible as a
         // stack-allocated local (required for va_start to take &last).
         let src = "int sum(int count, ...) { return count; }";
         let unit = parse::parse(src).unwrap();

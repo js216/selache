@@ -11,7 +11,7 @@ pub const STACK_PTR: u8 = 7;
 /// I6 is the frame pointer.
 pub const FRAME_PTR: u8 = 6;
 
-/// I4 is used as a scratch index register for global accesses.
+/// I4 is used as a scratch index register for global areferenceses.
 pub const SCRATCH_I: u8 = 4;
 
 /// Integer/pointer argument registers for the SHARC+ C-ABI: the
@@ -22,6 +22,23 @@ pub const SCRATCH_I: u8 = 4;
 /// A 4-argument function reads the 4th arg via DM(M6,I6) from the
 /// caller's frame push, not from R0.
 pub const ARG_REGS: &[u8] = &[4, 8, 12];
+
+/// Number of `ARG_REGS` slots used to pass a variadic function's
+/// named arguments, given the total named-arg count. The SHARC+ ABI
+/// for variadic callees always pushes the *last* named arg onto the
+/// caller's stack so the callee has a stable anchor for the va_list,
+/// then fits as many of the *preceding* named args as it can into
+/// `ARG_REGS`. Variadic args after that always go on the stack.
+/// Concretely: `reg_named =
+/// min(named.saturating_sub(1), ARG_REGS.len())`. For named=1
+/// (e.g. printf) this yields zero register-passed args; for named>=4
+/// it caps at 3 (the full ARG_REGS). The reference SHARC+ toolchain emits
+/// exactly this layout and selcc must match it so the two toolchains
+/// can interoperate across calls into the reference-built libsel
+/// printf/snprintf family (and vice versa).
+pub fn variadic_reg_named(named: usize) -> usize {
+    named.saturating_sub(1).min(ARG_REGS.len())
+}
 
 /// Data registers that do NOT need to be preserved across a
 /// CJUMP. R2 is excluded: it holds the frame-link value (I6)

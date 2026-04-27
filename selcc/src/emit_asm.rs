@@ -128,6 +128,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         typedefs: &unit.typedefs,
         known_functions: &known_functions,
         variadic_callees: &unit.variadic_functions,
+        variadic_named_counts: &unit.variadic_named_counts,
         function_return_types: &function_return_types,
     };
     for func in &unit.functions {
@@ -1009,6 +1010,7 @@ struct UnitCtx<'a> {
     typedefs: &'a [(String, crate::types::Type)],
     known_functions: &'a HashSet<String>,
     variadic_callees: &'a HashSet<String>,
+    variadic_named_counts: &'a HashMap<String, usize>,
     function_return_types: &'a HashMap<String, crate::types::Type>,
 }
 
@@ -1051,7 +1053,8 @@ fn emit_function_instrs(
         | crate::ir::IrOp::CallIndirectStruct { .. }
     ));
 
-    let isel_result = isel::select_with_name(&ir, &func.name, unit.variadic_callees);
+    let isel_result = isel::select_with_name(
+        &ir, &func.name, unit.variadic_callees, unit.variadic_named_counts);
 
     // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
     // by-value parameters consume multiple ABI slots (one 32-bit word

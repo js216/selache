@@ -33,13 +33,18 @@ pub struct IselResult {
 /// Virtual register numbers are preserved as physical register indices;
 /// the register allocator will rewrite them to valid physical registers.
 pub fn select(ir: &[IrOp]) -> IselResult {
-    select_with_name(ir, "anon", &std::collections::HashSet::new())
+    select_with_name(
+        ir, "anon",
+        &std::collections::HashSet::new(),
+        &std::collections::HashMap::new(),
+    )
 }
 
 pub fn select_with_name(
     ir: &[IrOp],
     func_name: &str,
     variadic_callees: &std::collections::HashSet<String>,
+    variadic_named_counts: &std::collections::HashMap<String, usize>,
 ) -> IselResult {
     let mut instrs = Vec::new();
     let mut label_positions = Vec::new();
@@ -518,39 +523,53 @@ pub fn select_with_name(
             IrOp::Call(dst, name, args) => {
                 let is_variadic = variadic_callees.contains(name);
                 if is_variadic {
-                    // Variadic callees expect *all* arguments — including
-                    // the named ones — on the caller's stack so that
-                    // `va_arg` can walk the argument list with simple
-                    // pointer arithmetic. The SHARC+ C runtime (printf etc.)
-                    // is built that way; passing variadic args in
-                    // ARG_REGS leaves the named args in unread registers
-                    // and feeds `va_arg` whatever happened to be on the
-                    // stack — printf reads garbage and emits nothing.
-                    //
-                    // Use the standard post-modify push idiom for
-                    // variadic calls: `DM(I7, M7) = Rn` stores Rn at
-                    // DM(I7) and then decrements I7 by M7 = -1. Pushes
-                    // happen in reverse argument order (last arg first)
-                    // so that arg 0 ends up at the lowest address; the
-                    // CJUMP delay-slot pushes that follow then land
-                    // BELOW the pushed args, leaving the args at
-                    // DM(I6+0..n-1) from the callee's view (where
-                    // CJUMP captured I6 = caller's I7 *after* the arg
-                    // pushes but *before* the delay slots ran).
-                    for arg in args.iter().rev() {
-                        instrs.push(MachInstr {
-                            instr: Instruction::UregDagMove {
-                                pm: false,
-                                write: true,
-                                ureg: *arg as u8,
-                                i_reg: target::STACK_PTR,
-                                m_reg: 7, // M7 = -1
-                                cond: target::COND_TRUE,
-                                compute: None,
-                                post_modify: true,
-                            },
-                            reloc: None,
-                        });
+                    // SHARC+ variadic call ABI: the *last* named
+                    // argument (and every variadic argument after
+                    // it) is always pushed on the caller's stack so
+                    // the callee has a fixed anchor for the va_list.
+                    // The first
+                    // `target::variadic_reg_named(named)` *preceding*
+                    // named args fit into `ARG_REGS`; any beyond
+                    // that overflow onto the stack as well. The
+                    // number of named args comes from the callee's
+                    // signature recorded in `variadic_named_counts`;
+                    // when missing (e.g. an unknown extern), fall
+                    // back to treating the entire arg list as named
+                    // so the call still lays out a valid stack-only
+                    // sequence. Pushes happen in reverse so that the
+                    // lowest-indexed stack-passed arg ends up at the
+                    // lowest address; CJUMP(DB) then captures
+                    // I6 = I7 right after the pushes (before the
+                    // delay-slot pushes of R2 and the return
+                    // address), so in the callee's view stack-arg
+                    // `k` lives at `DM(I6 + k + 1)`.
+                    let named = variadic_named_counts.get(name)
+                        .copied().unwrap_or(args.len());
+                    let reg_count = target::variadic_reg_named(named);
+                    for (i, arg) in args.iter().enumerate().rev() {
+                        if i >= reg_count {
+                            instrs.push(MachInstr {
+                                instr: Instruction::UregDagMove {
+                                    pm: false,
+                                    write: true,
+                                    ureg: *arg as u8,
+                                    i_reg: target::STACK_PTR,
+                                    m_reg: 7, // M7 = -1
+                                    cond: target::COND_TRUE,
+                                    compute: None,
+                                    post_modify: true,
+                                },
+                                reloc: None,
+                            });
+                        }
+                    }
+                    for (i, arg) in args.iter().enumerate() {
+                        if i >= reg_count {
+                            break;
+                        }
+                        let phys = target::ARG_REGS[i];
+                        instrs.push(MachInstr::compute_pass(
+                            0xC0 | phys, *arg as u8));
                     }
                 } else {
                     // Stack arguments (args ARG_REGS.len()+): push in

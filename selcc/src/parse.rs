@@ -370,6 +370,8 @@ impl<'a> Parser<'a> {
         let enum_constants: Vec<(String, i64)> = Vec::new();
         let mut variadic_decls: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut variadic_named_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         while self.current != Token::Eof {
             // Handle typedef declarations.
             if self.current == Token::Typedef {
@@ -649,6 +651,7 @@ impl<'a> Parser<'a> {
                     // stack.
                     if is_variadic {
                         variadic_decls.insert(name.clone());
+                        variadic_named_counts.insert(name.clone(), params.len());
                     }
                     self.advance()?;
                     globals.push(GlobalDecl {
@@ -744,6 +747,7 @@ impl<'a> Parser<'a> {
         for f in &functions {
             if f.is_variadic {
                 variadic_decls.insert(f.name.clone());
+                variadic_named_counts.insert(f.name.clone(), f.params.len());
             }
         }
         Ok(TranslationUnit {
@@ -753,6 +757,7 @@ impl<'a> Parser<'a> {
             struct_defs,
             enum_constants: self.enum_constants.drain(..).chain(enum_constants).collect(),
             variadic_functions: variadic_decls,
+            variadic_named_counts,
         })
     }
 

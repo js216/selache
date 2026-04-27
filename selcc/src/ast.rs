@@ -189,4 +189,11 @@ pub struct TranslationUnit {
     /// including forward declarations of externs. Looked up by call
     /// lowering to choose stack-passing for variadic callees.
     pub variadic_functions: std::collections::HashSet<String>,
+    /// For each variadic function, the number of *named* parameters
+    /// (everything before the `...`). The SHARC+ variadic-call ABI
+    /// always places the last named arg on the stack and only puts
+    /// up to `min(named-1, ARG_REGS.len())` *preceding* named args
+    /// in registers, so callers must know the named count to lay out
+    /// the call exactly the same way the callee's prologue reads it.
+    pub variadic_named_counts: std::collections::HashMap<String, usize>,
 }
