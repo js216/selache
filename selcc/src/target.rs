@@ -11,7 +11,7 @@ pub const STACK_PTR: u8 = 7;
 /// I6 is the frame pointer.
 pub const FRAME_PTR: u8 = 6;
 
-/// I4 is used as a scratch index register for global areferenceses.
+/// I4 is used as a scratch index register for global accesses.
 pub const SCRATCH_I: u8 = 4;
 
 /// Integer/pointer argument registers for the SHARC+ C-ABI: the

@@ -191,7 +191,7 @@ impl LowerCtx {
 
     /// Allocate a vreg that is guaranteed non-zero. isel's
     /// `IrOp::Load(dst, base, off)` and `IrOp::Store(val, base, off)`
-    /// treat `base == 0` as the sentinel for a frame-relative areferences,
+    /// treat `base == 0` as the sentinel for a frame-relative access,
     /// so a vreg that the frontend intends to use as a pointer base
     /// must never be allocated as VReg 0. The historical convention of
     /// pinning VReg 0 to the first ARG_REG makes the issue invisible
@@ -553,7 +553,7 @@ pub fn lower_function_with_known(
 
     // Determine which parameters are reassigned in the function body.
     // Volatile parameters are always treated as reassigned to force stack
-    // allocation, ensuring every areferences goes through memory.
+    // allocation, ensuring every access goes through memory.
     let mut reassigned = assigned_vars(&func.body);
     for (name, ty) in &func.params {
         if ty.is_volatile() {
@@ -582,7 +582,7 @@ pub fn lower_function_with_known(
     // local-copy step is mandatory for stack-passed named args: the
     // caller's pushed-arg region lies above I6 (positive offsets)
     // and is unreachable through the negative-offset `DM(-N, I6)`
-    // form that the rest of the body uses for variable areferences. For
+    // form that the rest of the body uses for variable access. For
     // register-passed named args the same stack-slot binding keeps
     // the prologue uniform and lets the parameter survive across
     // calls (the incoming caller-saved register would otherwise be
@@ -708,7 +708,7 @@ pub fn lower_function_with_known(
                 };
                 // Offset is in bytes — `Store(val, base, off)` with a
                 // non-zero base is emitted via the byte-addressable
-                // indirect-areferences path, so the stride between fields
+                // indirect-access path, so the stride between fields
                 // must be `4 * w` (the byte-offset increment between
                 // 32-bit words) to match the layout `Expr::Member`
                 // reads back.
@@ -1227,7 +1227,7 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
 /// and as `scale_index_by_elem` for array indexing). Using a
 /// word-scaled offset here would collide with the byte-scaled offsets
 /// produced by `Expr::Index` / `Expr::Binary` pointer arithmetic and
-/// cause adjacent fields to overlap on every struct areferences.
+/// cause adjacent fields to overlap on every struct access.
 fn struct_field_offset(
     fields: &[(String, Type)],
     field_name: &str,
@@ -1403,7 +1403,7 @@ fn strip_to_pointer(ty: &Type) -> Option<&Type> {
 /// Return the pointee type of a pointer or array type, or `None` for any
 /// other type. Used by C99 6.5.6/6.5.2.1 scaling: in `ptr + int` and
 /// `arr[int]`, the integer operand is multiplied by `sizeof(*ptr)` bytes
-/// before being added to the address. Without this scaling every areferences
+/// before being added to the address. Without this scaling every access
 /// past element zero lands on a byte-offset inside the first element, so
 /// `arr[1]` writes into `arr[0]` (corrupting it) and `arr[3]` reads from
 /// the tail of `arr[0]` (returning whatever was last stored there).
@@ -1454,7 +1454,7 @@ fn resolve_type_chain(ty: &Type, ctx: &LowerCtx) -> Type {
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
 /// These types are byte-packed in memory (four per 32-bit word) and
 /// require a dynamic shift+mask when read or written through a pointer
-/// so byte-addressed areferences alignments hold.
+/// so byte-addressed access alignments hold.
 fn is_byte_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
     crate::types::size_bytes_ctx(ty.unqualified(), ctx) == 1
 }
@@ -1786,7 +1786,7 @@ fn int_literal_type(val: i64, suffix: IntSuffix) -> Type {
 }
 
 /// Infer the type of an expression from context (variable types, pointer
-/// dereference, struct member areferences). Returns `None` when the type cannot
+/// dereference, struct member access). Returns `None` when the type cannot
 /// be determined.
 /// C99 6.5.2.1 p2: `E1[E2]` is identical to `(*((E1)+(E2)))`. Addition is
 /// commutative, so `2[arr]` is well-formed and equivalent to `arr[2]`.
@@ -2071,12 +2071,12 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::Member(base, field) => {
             let base_ty = expr_type(base, ctx).ok_or_else(|| {
-                Error::NotImplemented("cannot determine struct type for member areferences".into())
+                Error::NotImplemented("cannot determine struct type for member access".into())
             })?;
             let offset = if is_union_type(&base_ty) {
                 let fields = resolve_struct_fields(&base_ty, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "member areferences on non-struct type: {base_ty:?}"
+                        "member access on non-struct type: {base_ty:?}"
                     ))
                 })?;
                 let _ = union_field_type(fields, field, ctx).ok_or_else(|| {
@@ -2086,7 +2086,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             } else {
                 let fields = resolve_struct_fields(&base_ty, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "member areferences on non-struct type: {base_ty:?}"
+                        "member access on non-struct type: {base_ty:?}"
                     ))
                 })?;
                 let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
@@ -2107,7 +2107,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::Arrow(base, field) => {
             let base_ty = expr_type(base, ctx).ok_or_else(|| {
-                Error::NotImplemented("cannot determine type for arrow areferences".into())
+                Error::NotImplemented("cannot determine type for arrow access".into())
             })?;
             let pointee = match strip_to_pointer(&base_ty) {
                 Some(inner) => inner.clone(),
@@ -2120,7 +2120,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let offset = if is_union_type(&pointee) {
                 let fields = resolve_struct_fields(&pointee, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "arrow areferences on non-struct pointee: {pointee:?}"
+                        "arrow access on non-struct pointee: {pointee:?}"
                     ))
                 })?;
                 let _ = union_field_type(fields, field, ctx).ok_or_else(|| {
@@ -2130,7 +2130,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             } else {
                 let fields = resolve_struct_fields(&pointee, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!(
-                        "arrow areferences on non-struct pointee: {pointee:?}"
+                        "arrow access on non-struct pointee: {pointee:?}"
                     ))
                 })?;
                 let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
@@ -4652,7 +4652,7 @@ fn lower_byte_array_init(
 /// byte offsets.  Char / short fields at sub-word offsets share a
 /// 32-bit word with their neighbours via byte-extract stores so the
 /// layout matches what `struct_field_layout_ctx` reports to member-
-/// areferences code.  Positional items walk fields in declaration order;
+/// access code.  Positional items walk fields in declaration order;
 /// `.field = v` designators jump to that field and subsequent
 /// positional items continue from there.
 fn lower_struct_init(
@@ -4974,7 +4974,7 @@ fn emit_struct_copy(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, num_word
     for i in 0..num_words {
         // Offsets passed to `Load`/`Store` with a non-zero base are
         // byte offsets (the emitter routes through the byte-
-        // addressable indirect-areferences path). Step by `4 * i` to keep
+        // addressable indirect-access path). Step by `4 * i` to keep
         // each word aligned on its 32-bit boundary instead of reading
         // a byte from the next field's storage.
         let byte_off = (i * 4) as i32;
@@ -5518,7 +5518,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_arrow_areferences() {
+    fn lower_arrow_access() {
         let src = "struct s { int val; };\nint f(struct s *p) { return p->val; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
@@ -5850,7 +5850,7 @@ mod tests {
 
     #[test]
     fn lower_variadic_named_param_on_stack() {
-        // Named parameter of a variadic function is areferencesible as a
+        // Named parameter of a variadic function is accessible as a
         // stack-allocated local (required for va_start to take &last).
         let src = "int sum(int count, ...) { return count; }";
         let unit = parse::parse(src).unwrap();
