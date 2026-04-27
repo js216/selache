@@ -1912,7 +1912,36 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         // can detect aggregate ternaries and emit the multi-word copy
         // path instead of truncating to a single VReg.
         Expr::Ternary { then_expr, else_expr, .. } => {
-            expr_type(then_expr, ctx).or_else(|| expr_type(else_expr, ctx))
+            let tt = expr_type(then_expr, ctx);
+            let et = expr_type(else_expr, ctx);
+            match (&tt, &et) {
+                // Both arithmetic: integer promotion then usual arithmetic
+                // conversions (C99 6.5.15p5, 6.3.1.1, 6.3.1.8).
+                (Some(t), Some(e))
+                    if (t.is_integer() || t.is_float())
+                        && (e.is_integer() || e.is_float()) =>
+                {
+                    let pt = t.integer_promoted();
+                    let pe = e.integer_promoted();
+                    match (&pt, &pe) {
+                        (Type::Complex(c), _) | (_, Type::Complex(c)) => {
+                            Some(Type::Complex(c.clone()))
+                        }
+                        (a, _) if a.is_float() => Some(pt),
+                        (_, b) if b.is_float() => Some(pe),
+                        (a, b) if a.is_integer() && b.is_integer() => {
+                            Some(Type::usual_arithmetic_conversion(a, b))
+                        }
+                        _ => Some(pt),
+                    }
+                }
+                // Pointer vs null/void/integer-zero: prefer the pointer type.
+                (Some(t), _) if t.is_pointer() => tt,
+                (_, Some(e)) if e.is_pointer() => et,
+                // Aggregate (struct/union) operands: both branches must be the
+                // same type; either is fine to report.
+                _ => tt.or(et),
+            }
         }
         _ => None,
     }
