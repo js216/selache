@@ -2836,10 +2836,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // Byte-granularity read for char / unsigned char / bool.
             // A `char *` may aim at any byte in a packed 32-bit word,
             // so load the whole word and shift/mask the target byte
-            // out.  Sign-extend if the pointee is signed.
+            // out.  Sign-extend if the pointee is signed.  Resolve
+            // typedefs first: a `uint8_t` (typedef for `unsigned char`)
+            // is `Type::Typedef("uint8_t")` here, and `is_unsigned()`
+            // only sees through Const/Volatile — without the resolve
+            // step the load would sign-extend an unsigned byte and
+            // turn `0xAA` into `0xffffffaa` once promoted to int.
             if let Some(ref pt) = pointee {
                 if is_byte_scalar(pt, ctx) {
-                    let signed = !pt.is_unsigned();
+                    let signed = !resolve_type(pt, ctx).is_unsigned();
                     return Ok(emit_byte_load(ctx, ptr, signed));
                 }
             }
@@ -2922,7 +2927,10 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // char / bool element (byte-packed in memory).
             if let Some(ref et) = elem_ty {
                 if is_byte_scalar(et, ctx) {
-                    let signed = !et.is_unsigned();
+                    // Resolve typedefs so a `uint8_t arr[]` element load
+                    // zero-extends; see the matching note in the Deref
+                    // branch above.
+                    let signed = !resolve_type(et, ctx).is_unsigned();
                     return Ok(emit_byte_load(ctx, addr, signed));
                 }
             }
