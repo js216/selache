@@ -7,7 +7,7 @@
 
 #include "stddef.h"
 
-#define HEAP_SIZE (1024 * 1024)
+#define HEAP_SIZE (128 * 1024)
 
 struct block_header {
     size_t size;

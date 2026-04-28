@@ -2,13 +2,12 @@
 /* errno_shim.c --- Set errno for stdlib functions */
 /* Copyright (c) 2026 Jakob Kastelic */
 
-/* Access errno through a pointer returned by a platform-provided function.
-   On glibc: __errno_location().  On the bare-metal SHARC+ target, this
-   file is replaced by a stub that returns &errno directly. */
+/* C99 7.5p2 only requires errno to be a "modifiable lvalue of type int".
+   We use a plain global, defined in libsel/src/support/errno.c. */
 
-int *__errno_location(void);
+#include <errno.h>
 
 void sel_set_errno(int val)
 {
-    *__errno_location() = val;
+    errno = val;
 }
