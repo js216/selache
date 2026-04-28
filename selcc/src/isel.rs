@@ -2166,10 +2166,20 @@ pub fn select_with_name(
                 let dst_hi = (*dst + 1) as u16;
                 // Load lo word at [base + offset].
                 if *base == 0 {
-                    // Frame-relative load: use frame access pattern.
+                    // Frame-relative load: SHARC stack grows downward, so
+                    // the second word of a 64-bit local lives at a MORE
+                    // negative I6 displacement than the first. The IR
+                    // reserves slots `[storage_slot, storage_slot+1]` and
+                    // expects lo at slot N, hi at slot N+1 — both deeper
+                    // than the previous local. After mapping with
+                    // `-slot - 1`, deeper means more negative, so hi is
+                    // at frame_offset_lo - 1, not + 1. Using + 1 placed
+                    // hi on top of the previously-allocated scalar local
+                    // (e.g. `unsigned long ul` ahead of `long long ll`)
+                    // and silently corrupted both.
                     let frame_offset_lo = -*offset - 1;
                     emit_frame_access(&mut instrs, frame_offset_lo, dst_lo, false);
-                    let frame_offset_hi = frame_offset_lo + 1;
+                    let frame_offset_hi = frame_offset_lo - 1;
                     emit_frame_access(&mut instrs, frame_offset_hi, dst_hi, false);
                 } else {
                     // Indirect load through base register.
@@ -2219,10 +2229,12 @@ pub fn select_with_name(
                 let src_lo = *src as u16;
                 let src_hi = (*src + 1) as u16;
                 if *base == 0 {
-                    // Frame-relative store.
+                    // Frame-relative store: hi half goes to the deeper
+                    // (more negative) slot. See the matching note in
+                    // Load64.
                     let frame_offset_lo = -*offset - 1;
                     emit_frame_access(&mut instrs, frame_offset_lo, src_lo, true);
-                    let frame_offset_hi = frame_offset_lo + 1;
+                    let frame_offset_hi = frame_offset_lo - 1;
                     emit_frame_access(&mut instrs, frame_offset_hi, src_hi, true);
                 } else {
                     // Indirect store through base register.
