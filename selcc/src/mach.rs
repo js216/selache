@@ -19,7 +19,7 @@ pub struct MachInstr {
 
 impl MachInstr {
     /// Create a PASS Rx -> Rn copy instruction (unconditional).
-    pub fn compute_pass(dst: u8, src: u8) -> Self {
+    pub fn compute_pass(dst: u16, src: u16) -> Self {
         MachInstr {
             instr: Instruction::Compute {
                 cond: crate::target::COND_TRUE,

@@ -46,7 +46,7 @@ use selinstr::encode::{
 /// merge location across control flow.
 pub fn allocate(
     instrs: &[MachInstr],
-    num_params: u8,
+    num_params: u16,
     reserves_r1: bool,
     label_positions: &[(u32, usize)],
 ) -> (Vec<MachInstr>, u32, Vec<usize>) {
@@ -76,9 +76,9 @@ pub fn allocate(
 
 struct Allocator {
     /// Mapping from virtual register to physical register.
-    vreg_to_phys: BTreeMap<u8, u8>,
+    vreg_to_phys: BTreeMap<u16, u8>,
     /// Reverse: physical register to virtual register.
-    phys_to_vreg: BTreeMap<u8, u8>,
+    phys_to_vreg: BTreeMap<u8, u16>,
     /// Physical registers that must not be evicted. Vreg 0 is always in
     /// this set and pinned to physical R0, so that both the call-return
     /// reload (`dst = PASS R0`) and the function-return move
@@ -93,7 +93,7 @@ struct Allocator {
     /// stored to a spill slot, so a flush followed by a reload-on-use
     /// would read garbage. Any vreg outside this set lives in memory
     /// across BB boundaries via its spill slot.
-    permanent_vregs: BTreeSet<u8>,
+    permanent_vregs: BTreeSet<u16>,
     /// Physical registers pinned for the duration of the current mach
     /// instruction's rewrite. Cleared at the start of every `rewrite`
     /// call. This prevents a later operand lookup inside the same op
@@ -111,11 +111,11 @@ struct Allocator {
     /// Number of spill stack slots allocated.
     spill_slots: u32,
     /// Spill map: virtual register -> spill slot offset.
-    spill_map: BTreeMap<u8, u32>,
+    spill_map: BTreeMap<u16, u32>,
 }
 
 impl Allocator {
-    fn new(num_params: u8, reserves_r1: bool) -> Self {
+    fn new(num_params: u16, reserves_r1: bool) -> Self {
         let mut vreg_to_phys = BTreeMap::new();
         let mut phys_to_vreg = BTreeMap::new();
         let mut pinned = BTreeSet::new();
@@ -127,10 +127,10 @@ impl Allocator {
         let arg_count = (num_params as usize).min(target::ARG_REGS.len());
         let mut permanent_vregs = BTreeSet::new();
         for (i, &phys) in target::ARG_REGS.iter().take(arg_count).enumerate() {
-            vreg_to_phys.insert(i as u8, phys);
-            phys_to_vreg.insert(phys, i as u8);
+            vreg_to_phys.insert(i as u16, phys);
+            phys_to_vreg.insert(phys, i as u16);
             pinned.insert(phys);
-            permanent_vregs.insert(i as u8);
+            permanent_vregs.insert(i as u16);
         }
         // Pin the return-value pseudo-vreg to physical R0 so isel's
         // `Pass { rn: RETURN_REG_VREG, rx: ... }` always resolves to
@@ -205,7 +205,7 @@ impl Allocator {
     /// use of the vreg resolves to the new location via `get_phys` →
     /// either the new physical mapping or the `emit_reload` path.
     fn spill_caller_saved(&mut self, spill: &mut Vec<MachInstr>) {
-        let to_handle: Vec<(u8, u8)> = self.vreg_to_phys.iter()
+        let to_handle: Vec<(u16, u8)> = self.vreg_to_phys.iter()
             .filter(|(&vreg, &phys)| {
                 target::CALLER_SAVED.contains(&phys)
                     && vreg != target::RETURN_REG_VREG
@@ -221,8 +221,8 @@ impl Allocator {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Pass {
-                            rn: callee_phys,
-                            rx: phys,
+                            rn: callee_phys as u16,
+                            rx: phys as u16,
                         }),
                     },
                     reloc: None,
@@ -257,7 +257,7 @@ impl Allocator {
                         write: true,
                         i_reg: target::FRAME_PTR,
                     },
-                    dreg: phys,
+                    dreg: phys as u16,
                     offset: slot as i8,
                     cond: target::COND_TRUE,
                 },
@@ -288,7 +288,7 @@ impl Allocator {
     /// vregs) are skipped: they have no spill slot and the ABI keeps
     /// their register binding live across the whole function.
     fn flush_all_vregs(&mut self, spill: &mut Vec<MachInstr>) {
-        let to_flush: Vec<(u8, u8)> = self.vreg_to_phys.iter()
+        let to_flush: Vec<(u16, u8)> = self.vreg_to_phys.iter()
             .filter(|(&vreg, _)| !self.permanent_vregs.contains(&vreg))
             .map(|(&vreg, &phys)| (vreg, phys))
             .collect();
@@ -310,7 +310,7 @@ impl Allocator {
                         write: true,
                         i_reg: target::FRAME_PTR,
                     },
-                    dreg: phys,
+                    dreg: phys as u16,
                     offset: slot as i8,
                     cond: target::COND_TRUE,
                 },
@@ -355,7 +355,7 @@ impl Allocator {
     /// Emit a spill reload instruction for `vreg` into `phys`, if it was
     /// previously spilled. Uses positive offsets to match the spill
     /// store convention (see `spill_caller_saved` for the rationale).
-    fn emit_reload(&self, vreg: u8, phys: u8, spill_instrs: &mut Vec<MachInstr>) {
+    fn emit_reload(&self, vreg: u16, phys: u8, spill_instrs: &mut Vec<MachInstr>) {
         if let Some(&slot) = self.spill_map.get(&vreg) {
             spill_instrs.push(MachInstr {
                 instr: Instruction::ComputeLoadStore {
@@ -365,7 +365,7 @@ impl Allocator {
                         write: false,
                         i_reg: target::FRAME_PTR,
                     },
-                    dreg: phys,
+                    dreg: phys as u16,
                     offset: slot as i8,
                     cond: target::COND_TRUE,
                 },
@@ -386,7 +386,14 @@ impl Allocator {
     /// duration of the current `rewrite` call, so a later `get_phys` in
     /// the same multi-operand op cannot evict it and leave a stale
     /// physical in the op's earlier operand slot.
-    fn get_phys(&mut self, vreg: u8, spill_instrs: &mut Vec<MachInstr>) -> u8 {
+    /// Convenience wrapper returning the physical register as u16, since
+    /// every `MachInstr` register field carries u16 vreg ids pre-regalloc
+    /// and u16-encoded machine codes post-regalloc.
+    fn get_phys(&mut self, vreg: u16, spill_instrs: &mut Vec<MachInstr>) -> u16 {
+        self.get_phys_u8(vreg, spill_instrs) as u16
+    }
+
+    fn get_phys_u8(&mut self, vreg: u16, spill_instrs: &mut Vec<MachInstr>) -> u8 {
         if let Some(&phys) = self.vreg_to_phys.get(&vreg) {
             self.transient_pin(phys);
             return phys;
@@ -449,7 +456,7 @@ impl Allocator {
                     write: true,
                     i_reg: target::FRAME_PTR,
                 },
-                dreg: evict_phys,
+                dreg: evict_phys as u16,
                 offset: slot as i8,
                 cond: target::COND_TRUE,
             },
@@ -603,7 +610,7 @@ impl Allocator {
                 // register vreg 2 lives in, so the delay-slot push
                 // `DM(I7,M7) = R2` stores an unrelated value and the
                 // callee's RFRAME restores the wrong frame pointer.
-                let is_fixed = |u: u8| {
+                let is_fixed = |u: u16| {
                     u & target::UREG_FIXED_TAG != 0
                         && ((u & 0x70) == 0x00
                             || (u & 0x70) == 0x10
@@ -728,7 +735,7 @@ impl Allocator {
             }
 
             Instruction::UregAbsAccess { pm, write, ureg, addr } => {
-                let is_fixed = |u: u8| {
+                let is_fixed = |u: u16| {
                     u & target::UREG_FIXED_TAG != 0
                         && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
@@ -749,7 +756,7 @@ impl Allocator {
             }
 
             Instruction::UregMemAccess { pm, i_reg, write, lw, ureg, offset } => {
-                let is_fixed = |u: u8| {
+                let is_fixed = |u: u16| {
                     u & target::UREG_FIXED_TAG != 0
                         && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
@@ -772,7 +779,7 @@ impl Allocator {
             Instruction::UregTransfer { src_ureg, dst_ureg, compute } => {
                 let new_compute = compute
                     .map(|c| self.rewrite_compute(&c, &mut spill_pre));
-                let is_fixed = |u: u8| {
+                let is_fixed = |u: u16| {
                     u & target::UREG_FIXED_TAG != 0
                         && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
@@ -841,12 +848,15 @@ impl Allocator {
                 ry: self.get_phys(ry, spill),
             },
             Pass { rn, rx } => {
-                // Forced-physical arg setup: rn = 0xC0 | phys (phys < 16).
-                // The 0xC0 prefix uniquely identifies arg-setup copies
-                // without colliding with RETURN_REG_VREG (0xFF).
-                if (0xC0..0xD0).contains(&rn) {
-                    let dest_phys = rn & 0x0F;
-                    let src_phys = self.get_phys(rx, spill);
+                // Forced-physical arg setup: rn = 0xC000 | phys (phys < 16).
+                // The 0xC000 prefix uniquely identifies arg-setup copies
+                // without colliding with RETURN_REG_VREG (0xFF), with any
+                // raw vreg id (capped at 0x7FFF), or with the
+                // UREG_FIXED_TAG-tagged fixed encodings (which set bit
+                // 0x8000 plus a low-nibble I/M/R group).
+                if (0xC000..0xC010).contains(&rn) {
+                    let dest_phys = (rn & 0x0F) as u8;
+                    let src_phys = self.get_phys_u8(rx, spill);
                     // If the destination physical already holds a
                     // different live vreg, spill it before the forced
                     // write destroys its value. Arises when a later
@@ -873,7 +883,7 @@ impl Allocator {
                                         write: true,
                                         i_reg: target::FRAME_PTR,
                                     },
-                                    dreg: dest_phys,
+                                    dreg: dest_phys as u16,
                                     offset: slot as i8,
                                     cond: target::COND_TRUE,
                                 },
@@ -891,8 +901,8 @@ impl Allocator {
                         self.arg_setup_pins.push(dest_phys);
                     }
                     Pass {
-                        rn: dest_phys,
-                        rx: src_phys,
+                        rn: dest_phys as u16,
+                        rx: src_phys as u16,
                     }
                 } else {
                     Pass {
@@ -1369,9 +1379,9 @@ mod tests {
                 ..
             } = mi.instr
             {
-                assert!(rn < target::NUM_REGS);
-                assert!(rx < target::NUM_REGS);
-                assert!(ry < target::NUM_REGS);
+                assert!(rn < target::NUM_REGS as u16);
+                assert!(rx < target::NUM_REGS as u16);
+                assert!(ry < target::NUM_REGS as u16);
             }
         }
     }
@@ -1381,7 +1391,7 @@ mod tests {
         // Allocate several vregs and verify that caller-saved registers
         // (R0-R7) are used before any callee-saved register (R8-R15).
         let mut instrs = Vec::new();
-        for i in 0..9u8 {
+        for i in 0..9u16 {
             instrs.push(MachInstr {
                 instr: Instruction::LoadImm {
                     ureg: target::ureg_r(i),
@@ -1414,8 +1424,8 @@ mod tests {
         // With 9 simultaneously live vregs and 7 caller-saved
         // registers (R0-R1, R3-R7; R2 reserved), at most 7 can land
         // in the caller-saved pool. The majority should be caller-saved.
-        let caller_set: std::collections::HashSet<u8> =
-            target::CALLER_SAVED.iter().copied().collect();
+        let caller_set: std::collections::HashSet<u16> =
+            target::CALLER_SAVED.iter().map(|&r| r as u16).collect();
         let n_caller = assigned.iter().filter(|r| caller_set.contains(r)).count();
         let n_callee = assigned.iter().filter(|r| !caller_set.contains(r)).count();
         assert!(

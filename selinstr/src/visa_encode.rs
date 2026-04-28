@@ -163,7 +163,7 @@ fn try_type2c(compute: &ComputeOp) -> Option<u16> {
         }
         _ => return None,
     };
-    Some(0b110u16 << 13 | (op as u16) << 8 | (rn as u16) << 4 | (ry as u16))
+    Some(0b110u16 << 13 | (op as u16) << 8 | rn << 4 | ry)
 }
 
 /// Type 3c: 16-bit short data move (dreg <-> DM with DAG1 register addressing).
@@ -173,7 +173,7 @@ fn try_type2c(compute: &ComputeOp) -> Option<u16> {
 ///
 /// Layout: bits[15:12]=1001, bits[11:9]=i, bits[8:6]=m, bit[5]=d,
 ///         bit[4]=1(fixed), bits[3:0]=dreg.
-fn try_type3c(write: bool, ureg: u8, i_reg: u8, m_reg: u8) -> Option<u16> {
+fn try_type3c(write: bool, ureg: u16, i_reg: u8, m_reg: u8) -> Option<u16> {
     // ureg must be a data register (R0-R15): ureg codes 0x00-0x0F
     if ureg > 15 {
         return None;
@@ -183,7 +183,7 @@ fn try_type3c(write: bool, ureg: u8, i_reg: u8, m_reg: u8) -> Option<u16> {
         return None;
     }
     let d = if write { 1u16 } else { 0 };
-    let dreg = ureg as u16;
+    let dreg = ureg;
     Some(
         0b1001u16 << 12
             | (i_reg as u16 & 7) << 9
@@ -308,7 +308,7 @@ fn try_type7b(pm: bool, i_reg: u8, m_reg: u8, cond: u8) -> Option<u32> {
 ///
 /// Layout: p1[15:13]=000, p1[12:8]=01111, p1[7]=1 (32-bit flag),
 ///         p1[6:0]=ureg code, p2=imm16.
-fn try_type17b(ureg: u8, value: u32) -> Option<u32> {
+fn try_type17b(ureg: u16, value: u32) -> Option<u32> {
     // Value must fit in signed 16-bit range
     let v = value as i32;
     if !(-32768..=32767).contains(&v) {
@@ -318,7 +318,7 @@ fn try_type17b(ureg: u8, value: u32) -> Option<u32> {
     if ureg > 127 {
         return None;
     }
-    let p1 = 0x0F80u16 | (ureg as u16 & 0x7F);
+    let p1 = 0x0F80u16 | (ureg & 0x7F);
     let p2 = value as u16;
     Some((p1 as u32) << 16 | p2 as u32)
 }
@@ -333,7 +333,7 @@ fn try_type17b(ureg: u8, value: u32) -> Option<u32> {
 ///   p2[14]   = short-word flag
 ///   p2[13:7] = ureg code
 ///   p2[1:0]  = access width (11=NW normal)
-fn try_type3b(write: bool, ureg: u8, i_reg: u8, m_reg: u8, cond: u8) -> Option<u32> {
+fn try_type3b(write: bool, ureg: u16, i_reg: u8, m_reg: u8, cond: u8) -> Option<u32> {
     // M register must be M4-M7 for Type 3b
     if !(4..=7).contains(&m_reg) {
         return None;
@@ -357,7 +357,7 @@ fn try_type3b(write: bool, ureg: u8, i_reg: u8, m_reg: u8, cond: u8) -> Option<u
     // width disambiguator keys off `p2 & 0x3F >= 0x38` for top3=010 to
     // decide 32-bit vs 48-bit, so the low 6 bits must all be set.
     let p2 = (d << 15)
-        | ((ureg as u16 & 0x7F) << 7)
+        | ((ureg & 0x7F) << 7)
         | 0x3f;
     Some((p1 as u32) << 16 | p2 as u32)
 }
@@ -371,7 +371,7 @@ fn try_type3b(write: bool, ureg: u8, i_reg: u8, m_reg: u8, cond: u8) -> Option<u
 ///   {p1[0], p2[15:11]} = 6-bit signed offset
 ///   p2[10:7] = dreg
 ///   p2[1:0]  = 11 (normal word)
-fn try_type4b(write: bool, i_reg: u8, dreg: u8, offset: i8, cond: u8) -> Option<u32> {
+fn try_type4b(write: bool, i_reg: u8, dreg: u16, offset: i8, cond: u8) -> Option<u32> {
     if i_reg > 15 || dreg > 15 {
         return None;
     }
@@ -392,7 +392,7 @@ fn try_type4b(write: bool, i_reg: u8, dreg: u8, offset: i8, cond: u8) -> Option<
         | ((cond as u16 & 0x1F) << 1)
         | off_hi;
     let p2 = (off_lo << 11)
-        | ((dreg as u16 & 0xF) << 7)
+        | ((dreg & 0xF) << 7)
         | 0b11u16; // normal word
     Some((p1 as u32) << 16 | p2 as u32)
 }
@@ -412,24 +412,24 @@ fn try_type4b(write: bool, i_reg: u8, dreg: u8, offset: i8, cond: u8) -> Option<
 ///   p1[0]     = src_idx[1]
 ///   p2[15]    = src_idx[0]
 ///   p2[13:7]  = dst_ureg (7-bit code)
-fn try_type5b_move(dest: u8, src: u8) -> Option<u32> {
+fn try_type5b_move(dest: u16, src: u16) -> Option<u32> {
     if dest > 127 || src > 127 {
         return None;
     }
     let src_group = (src >> 4) & 7;
     let src_idx = src & 0xF;
 
-    let sub5 = 0b10_000u16 | src_group as u16;
+    let sub5 = 0b10_000u16 | src_group;
     let cond = 31u16; // unconditional
 
     let p1 = (0b011u16 << 13)
         | (sub5 << 8)
-        | (((src_idx >> 3) & 1) as u16) << 7
-        | (((src_idx >> 2) & 1) as u16) << 6
+        | ((src_idx >> 3) & 1) << 7
+        | ((src_idx >> 2) & 1) << 6
         | (cond << 1)
-        | (((src_idx >> 1) & 1) as u16);
-    let p2 = ((src_idx & 1) as u16) << 15
-        | ((dest as u16 & 0x7F) << 7);
+        | ((src_idx >> 1) & 1);
+    let p2 = (src_idx & 1) << 15
+        | ((dest & 0x7F) << 7);
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -457,7 +457,7 @@ fn compute_to_23bit(compute: &ComputeOp) -> Option<u32> {
 }
 
 fn alu_to_23bit(alu: &AluOp) -> Option<u32> {
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *alu {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *alu {
         AluOp::Add { rn, rx, ry } => (0x01, rn, rx, ry),
         AluOp::Sub { rn, rx, ry } => (0x02, rn, rx, ry),
         AluOp::AddCi { rn, rx, ry } => (0x05, rn, rx, ry),
@@ -493,7 +493,7 @@ fn alu_to_23bit(alu: &AluOp) -> Option<u32> {
 }
 
 fn falu_to_23bit(falu: &FaluOp) -> Option<u32> {
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *falu {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *falu {
         FaluOp::Add { rn, rx, ry } => (0x81, rn, rx, ry),
         FaluOp::Sub { rn, rx, ry } => (0x82, rn, rx, ry),
         FaluOp::Avg { rn, rx, ry } => (0x89, rn, rx, ry),
@@ -536,7 +536,7 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
     // Opcodes match the 48-bit `encode_mul`; the 32-bit VISA
     // short-compute form shares the full 8-bit opcode field with
     // the 48-bit form.
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *mul {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *mul {
         MulOp::MulSsi { rn, rx, ry } => (0x70, rn, rx, ry),
         MulOp::MulSsf { rn, rx, ry } => (0x78, rn, rx, ry),
         MulOp::MrfMulSsi { rx, ry } => (0x74, 0, rx, ry),
@@ -570,7 +570,7 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
 
 fn shift_to_23bit(shift: &ShiftOp) -> Option<u32> {
     // Opcodes match the 48-bit `encode_shift`.
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *shift {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *shift {
         ShiftOp::Lshift { rn, rx, ry } => (0x00, rn, rx, ry),
         ShiftOp::Ashift { rn, rx, ry } => (0x04, rn, rx, ry),
         ShiftOp::Rot { rn, rx, ry } => (0x08, rn, rx, ry),

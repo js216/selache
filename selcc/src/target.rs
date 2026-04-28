@@ -85,7 +85,7 @@ pub const STRUCT_RET_MAX_REGS: u32 = 2;
 /// (R0 is ARG_REGS[3]). Any value outside 0..NUM_REGS works; 0xFF is
 /// chosen to stay clear of both the physical register numbers and
 /// any normal vreg the rest of the compiler might produce.
-pub const RETURN_REG_VREG: u8 = 0xFF;
+pub const RETURN_REG_VREG: u16 = 0xFF;
 
 /// Pseudo-vreg pinned to physical R1 for the second word of a
 /// small-struct return (R0:R1 pair). Rationale identical to
@@ -94,7 +94,7 @@ pub const RETURN_REG_VREG: u8 = 0xFF;
 /// colliding with the first argument slot (R4 = ARG_REGS[0] often
 /// holds vreg id 0 and spills overlap low ids). 0xFE stays clear of
 /// both physical register numbers and ordinary vreg ids.
-pub const RETURN_REG_HI_VREG: u8 = 0xFE;
+pub const RETURN_REG_HI_VREG: u16 = 0xFE;
 
 /// 16 data registers total (R0-R15).
 pub const NUM_REGS: u8 = 16;
@@ -111,7 +111,7 @@ pub const COND_TRUE: u8 = 31;
 
 /// Universal register encoding: R-group is 0x0n, I-group is 0x1n.
 /// These produce the *machine* encoding (post-regalloc) used by selinstr.
-pub const fn ureg_r(index: u8) -> u8 {
+pub const fn ureg_r(index: u16) -> u16 {
     index & 0xF
 }
 
@@ -121,23 +121,25 @@ pub const fn ureg_r(index: u8) -> u8 {
 /// In selcc-internal pre-regalloc instruction streams the same I-register
 /// is carried as `ureg_i_pre(N)` (see below), which sets a high tag bit
 /// so the register allocator can tell a fixed I-register apart from a
-/// raw R-vreg id. Without the tag, vreg numbers above 15 would alias
-/// I0..I15 (both fall in 0x10..0x1F), and the allocator would silently
-/// treat the I-register encoding as a vreg id (or vice versa), producing
-/// stale-register reads in indirect loads/stores.
-pub const fn ureg_i(index: u8) -> u8 {
-    0x10 | (index & 0xF)
+/// raw R-vreg id. Without the tag, vreg numbers above 0x7FFF would alias
+/// the tagged-fixed encoding, and the allocator would silently treat the
+/// I-register encoding as a vreg id (or vice versa), producing
+/// stale-register reads in indirect loads/stores. The widened u16
+/// representation lifts the cap from 0x80 to 0x8000.
+pub const fn ureg_i(index: u8) -> u16 {
+    0x10u16 | ((index & 0xF) as u16)
 }
 
 /// Tag bit set on universal-register fields whose value has already been
 /// resolved to a fixed machine encoding (an I-register). The regalloc
 /// strips this bit before emitting the final instruction; absence of the
-/// bit means the field is a raw R-vreg id awaiting allocation.
-pub const UREG_FIXED_TAG: u8 = 0x80;
+/// bit means the field is a raw R-vreg id awaiting allocation. Widened
+/// to u16 (0x8000) so vreg ids up to 0x7FFF stay clear of the tag bit.
+pub const UREG_FIXED_TAG: u16 = 0x8000;
 
 /// Pre-regalloc form of an I-register reference: the machine encoding
 /// 0x10..0x1F OR'd with `UREG_FIXED_TAG`.
-pub const fn ureg_i_pre(index: u8) -> u8 {
+pub const fn ureg_i_pre(index: u8) -> u16 {
     UREG_FIXED_TAG | ureg_i(index)
 }
 

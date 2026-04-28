@@ -770,7 +770,7 @@ fn parse_register_swap(text: &str, line: u32) -> Result<Instruction> {
     let right = swap_text[arrow_pos + 3..].trim();
 
     let dreg = parse_dreg(left, line)?;
-    let cdreg = parse_reg_index(right, 'S', line)?;
+    let cdreg = parse_reg_index(right, 'S', line)? as u16;
     if cdreg > 15 {
         return Err(Error::Parse {
             line,
@@ -810,8 +810,8 @@ fn parse_branch(text: &str, line: u32) -> Result<(Instruction, Option<String>)> 
                     return Ok((Instruction::IndirectBranch {
                         call,
                         cond: 31,
-                        pm_i: i_code & 0xF,
-                        pm_m: m_code & 0xF,
+                        pm_i: (i_code & 0xF) as u8,
+                        pm_m: (m_code & 0xF) as u8,
                         delayed,
                         compute: None,
                     }, None));
@@ -1289,7 +1289,7 @@ fn parse_do_loop(text: &str, line: u32) -> Result<(Instruction, Option<String>)>
             name: counter_str.to_string(),
         })?;
         Ok((Instruction::DoLoop {
-            counter: LoopCounter::Ureg(ureg),
+            counter: LoopCounter::Ureg(ureg as u8),
             end_pc,
         }, label_ref))
     }
@@ -1864,7 +1864,7 @@ fn parse_ireg_and_offset(op1: &str, op2: &str, line: u32) -> Result<(u8, i32)> {
 }
 
 /// Parse a ureg name, falling back to dreg (R0-R15/F0-F15) codes.
-fn parse_ureg_or_dreg(name: &str, line: u32) -> Result<u8> {
+fn parse_ureg_or_dreg(name: &str, line: u32) -> Result<u16> {
     ureg_code(name).ok_or_else(|| Error::UnknownRegister {
         line,
         name: name.to_string(),
@@ -2362,7 +2362,7 @@ fn try_parse_multifunction(text: &str, line: u32) -> Result<Option<ComputeOp>> {
 /// Parse the MUL part of a multifunction instruction.
 /// Returns (fp, mul_sel, rm, rxm, rym).
 ///   mul_sel: 0=Rm=Rxm*Rym, 1=MRF+=Rxm*Rym, 2=Rm=MRF+Rxm*Rym, 3=MRF-=Rxm*Rym
-fn parse_mf_mul_part(text: &str, line: u32) -> Result<(bool, u8, u8, u8, u8)> {
+fn parse_mf_mul_part(text: &str, line: u32) -> Result<(bool, u8, u16, u16, u16)> {
     let eq = text.find('=').ok_or_else(|| Error::Parse {
         line,
         msg: format!("expected '=' in multiply part: {text}"),
@@ -2411,7 +2411,7 @@ fn parse_mf_mul_part(text: &str, line: u32) -> Result<(bool, u8, u8, u8, u8)> {
 
 /// Parse "Rxm * Rym (SSF)" and return (rxm_2bit, rym_2bit).
 /// Rxm is from range R0-R3/F0-F3, Rym from R4-R7/F4-F7.
-fn parse_mf_mul_operands(text: &str, fp: bool, line: u32) -> Result<(u8, u8)> {
+fn parse_mf_mul_operands(text: &str, fp: bool, line: u32) -> Result<(u16, u16)> {
     let star = text.find('*').ok_or_else(|| Error::Parse {
         line,
         msg: format!("expected '*' in multiply: {text}"),
@@ -2454,7 +2454,7 @@ fn parse_mf_mul_operands(text: &str, fp: bool, line: u32) -> Result<(u8, u8)> {
 
 /// Parse the ALU part of a two-part multifunction: "Ra = Rxa + Rya" etc.
 /// Returns (alu_sel, ra, rxa_2bit, rya_2bit).
-fn parse_mf_alu_part(text: &str, fp: bool, line: u32) -> Result<(u8, u8, u8, u8)> {
+fn parse_mf_alu_part(text: &str, fp: bool, line: u32) -> Result<(u8, u16, u16, u16)> {
     let eq = text.find('=').ok_or_else(|| Error::Parse {
         line,
         msg: format!("expected '=' in ALU part: {text}"),
@@ -2508,7 +2508,7 @@ fn parse_mf_alu_part(text: &str, fp: bool, line: u32) -> Result<(u8, u8, u8, u8)
 
 /// Validate multifunction ALU register ranges: Rxa in R8-R11, Rya in R12-R15.
 /// Returns 2-bit encoded values.
-fn check_mf_alu_regs(rxa: u8, rya: u8, fp: bool, line: u32) -> Result<(u8, u8)> {
+fn check_mf_alu_regs(rxa: u16, rya: u16, fp: bool, line: u32) -> Result<(u16, u16)> {
     if !(8..=11).contains(&rxa) {
         return Err(Error::Parse {
             line,
@@ -2809,8 +2809,8 @@ fn try_parse_imm_shift(text: &str, line: u32) -> Result<Option<Instruction>> {
 /// Parsed fields from an immediate FEXT/FDEP expression.
 struct ImmFextFields {
     sub_op: u8,
-    rn: u8,
-    rx: u8,
+    rn: u16,
+    rx: u16,
     imm: u8,
     len_hi: u8,
 }
@@ -3469,7 +3469,7 @@ fn parse_assign(dst: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
     })
 }
 
-fn parse_float_unary(rn: u8, rhs: &str, line: u32) -> Result<ComputeOp> {
+fn parse_float_unary(rn: u16, rhs: &str, line: u32) -> Result<ComputeOp> {
     // Float unary operations that use F-register destination
 
     // PASS, ABS — check BEFORE binary ops so "ABS (F1 - F2)" isn't
@@ -3647,7 +3647,7 @@ fn parse_float_unary(rn: u8, rhs: &str, line: u32) -> Result<ComputeOp> {
 }
 
 fn parse_alu_binary(
-    rn: u8,
+    rn: u16,
     rhs: &str,
     plus_pos: usize,
     is_float: bool,
@@ -3698,7 +3698,7 @@ fn parse_alu_binary(
 }
 
 fn parse_shift_op(
-    rn: u8,
+    rn: u16,
     rhs: &str,
     keyword: &str,
     _base_opcode: u8,
@@ -3727,7 +3727,7 @@ fn parse_shift_op(
     }
 }
 
-fn parse_or_shift(rn: u8, rhs: &str, shift_kind: &str, line: u32) -> Result<ComputeOp> {
+fn parse_or_shift(rn: u16, rhs: &str, shift_kind: &str, line: u32) -> Result<ComputeOp> {
     // "Rn OR LSHIFT Rx BY Ry"
     let kw = format!("OR {shift_kind}");
     let start = rhs.find(&kw).unwrap() + kw.len();
@@ -3749,7 +3749,7 @@ fn parse_or_shift(rn: u8, rhs: &str, shift_kind: &str, line: u32) -> Result<Comp
     }
 }
 
-fn parse_or_fext_fdep(rn: u8, rhs: &str, kind: &str, line: u32) -> Result<ComputeOp> {
+fn parse_or_fext_fdep(rn: u16, rhs: &str, kind: &str, line: u32) -> Result<ComputeOp> {
     let kw = format!("OR {kind}");
     let start = rhs.find(&kw).unwrap() + kw.len();
     let rest = rhs[start..].trim();
@@ -3773,7 +3773,7 @@ fn parse_or_fext_fdep(rn: u8, rhs: &str, kind: &str, line: u32) -> Result<Comput
 }
 
 fn parse_bit_shift(
-    rn: u8,
+    rn: u16,
     rest: &str,
     kind: &str,
     line: u32,
@@ -3796,7 +3796,7 @@ fn parse_bit_shift(
 }
 
 fn parse_fext_fdep(
-    rn: u8,
+    rn: u16,
     rest: &str,
     kind: &str,
     line: u32,
@@ -3817,7 +3817,7 @@ fn parse_fext_fdep(
     }
 }
 
-fn parse_reg_mul(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp> {
+fn parse_reg_mul(rn: u16, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp> {
     let star = rhs.find('*').unwrap();
     let rx_str = rhs[..star].trim();
     let after_star = rhs[star + 1..].trim();
@@ -3844,7 +3844,7 @@ fn parse_reg_mul(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<Compute
 }
 
 fn parse_min_max_clip(
-    rn: u8,
+    rn: u16,
     rhs: &str,
     kind: &str,
     is_float: bool,
@@ -3879,7 +3879,7 @@ fn parse_min_max_clip(
     }
 }
 
-fn parse_clip(rn: u8, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp> {
+fn parse_clip(rn: u16, rhs: &str, is_float: bool, line: u32) -> Result<ComputeOp> {
     // "CLIP Rx BY Ry"
     let rest = rhs.strip_prefix("CLIP ").unwrap().trim();
     let (rx_str, ry_str) = split_at_str(rest, " BY ").ok_or_else(|| Error::Parse {
@@ -4155,19 +4155,19 @@ fn find_eq_outside_parens(text: &str) -> Option<usize> {
     None
 }
 
-fn parse_dreg(name: &str, line: u32) -> Result<u8> {
+fn parse_dreg(name: &str, line: u32) -> Result<u16> {
     let name = name.trim();
     if let Some(rest) = name.strip_prefix('R') {
         if let Ok(n) = rest.parse::<u8>() {
             if n <= 15 {
-                return Ok(n);
+                return Ok(n as u16);
             }
         }
     }
     if let Some(rest) = name.strip_prefix('F') {
         if let Ok(n) = rest.parse::<u8>() {
             if n <= 15 {
-                return Ok(n);
+                return Ok(n as u16);
             }
         }
     }
@@ -4507,7 +4507,7 @@ fn parse_address_or_label(s: &str, line: u32) -> Result<(u32, Option<String>)> {
 
 /// Map a universal register name string to its 8-bit ureg code.
 /// This mirrors the inverse of `disasm::ureg_name`.
-fn ureg_code(name: &str) -> Option<u8> {
+fn ureg_code(name: &str) -> Option<u16> {
     // Check named special registers first, before prefix-based matching,
     // since names like MODE1 start with M which would otherwise match
     // modify registers.
@@ -4555,34 +4555,34 @@ fn ureg_code(name: &str) -> Option<u8> {
     }
     // Data registers: R0-R15
     if let Some(rest) = name.strip_prefix('R') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15);
     }
     // F-alias for data registers: F0-F15
     if let Some(rest) = name.strip_prefix('F') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15);
     }
     // Index registers: I0-I15
     if let Some(rest) = name.strip_prefix('I') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x10 + n);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15).map(|n| 0x10 + n);
     }
     // Modify registers: M0-M15
     if let Some(rest) = name.strip_prefix('M') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x20 + n);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15).map(|n| 0x20 + n);
     }
     // Length registers: L0-L15
     if let Some(rest) = name.strip_prefix('L') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x30 + n);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15).map(|n| 0x30 + n);
     }
     // Base registers: B0-B15
     if let Some(rest) = name.strip_prefix('B') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x40 + n);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15).map(|n| 0x40 + n);
     }
     // Shadow/complementary registers: S0-S15 and SF0-SF15 (float alias)
     if let Some(rest) = name.strip_prefix("SF") {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x50 + n);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15).map(|n| 0x50 + n);
     }
     if let Some(rest) = name.strip_prefix('S') {
-        return rest.parse::<u8>().ok().filter(|&n| n <= 15).map(|n| 0x50 + n);
+        return rest.parse::<u16>().ok().filter(|&n| n <= 15).map(|n| 0x50 + n);
     }
     None
 }

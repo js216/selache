@@ -17,132 +17,132 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AluOp {
     /// Rn = Rx + Ry
-    Add { rn: u8, rx: u8, ry: u8 },
+    Add { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rx - Ry
-    Sub { rn: u8, rx: u8, ry: u8 },
+    Sub { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rx + Ry + CI
-    AddCi { rn: u8, rx: u8, ry: u8 },
+    AddCi { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rx - Ry + CI - 1
-    SubCi { rn: u8, rx: u8, ry: u8 },
+    SubCi { rn: u16, rx: u16, ry: u16 },
     /// Rn = (Rx + Ry)/2
-    Avg { rn: u8, rx: u8, ry: u8 },
+    Avg { rn: u16, rx: u16, ry: u16 },
     /// COMP(Rx, Ry)
-    Comp { rx: u8, ry: u8 },
+    Comp { rx: u16, ry: u16 },
     /// COMPU(Rx, Ry) -- always integer
-    CompU { rx: u8, ry: u8 },
+    CompU { rx: u16, ry: u16 },
     /// Rn = PASS Rx
-    Pass { rn: u8, rx: u8 },
+    Pass { rn: u16, rx: u16 },
     /// Rn = -Rx
-    Neg { rn: u8, rx: u8 },
+    Neg { rn: u16, rx: u16 },
     /// Rn = Rx + CI
-    PassCi { rn: u8, rx: u8 },
+    PassCi { rn: u16, rx: u16 },
     /// Rn = Rx + CI - 1
-    PassCiMinus1 { rn: u8, rx: u8 },
+    PassCiMinus1 { rn: u16, rx: u16 },
     /// Rn = Rx + 1
-    Inc { rn: u8, rx: u8 },
+    Inc { rn: u16, rx: u16 },
     /// Rn = Rx - 1
-    Dec { rn: u8, rx: u8 },
+    Dec { rn: u16, rx: u16 },
     /// Rn = ABS Rx
-    Abs { rn: u8, rx: u8 },
+    Abs { rn: u16, rx: u16 },
     /// Rn = Rx AND Ry
-    And { rn: u8, rx: u8, ry: u8 },
+    And { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rx OR Ry
-    Or { rn: u8, rx: u8, ry: u8 },
+    Or { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rx XOR Ry
-    Xor { rn: u8, rx: u8, ry: u8 },
+    Xor { rn: u16, rx: u16, ry: u16 },
     /// Rn = NOT Rx
-    Not { rn: u8, rx: u8 },
+    Not { rn: u16, rx: u16 },
     /// Rn = MIN(Rx, Ry)
-    Min { rn: u8, rx: u8, ry: u8 },
+    Min { rn: u16, rx: u16, ry: u16 },
     /// Rn = MAX(Rx, Ry)
-    Max { rn: u8, rx: u8, ry: u8 },
+    Max { rn: u16, rx: u16, ry: u16 },
     /// Rn = CLIP Rx BY Ry
-    Clip { rn: u8, rx: u8, ry: u8 },
+    Clip { rn: u16, rx: u16, ry: u16 },
 }
 
 /// Floating-point ALU operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaluOp {
     /// Fn = Fx + Fy
-    Add { rn: u8, rx: u8, ry: u8 },
+    Add { rn: u16, rx: u16, ry: u16 },
     /// Fn = Fx - Fy
-    Sub { rn: u8, rx: u8, ry: u8 },
+    Sub { rn: u16, rx: u16, ry: u16 },
     /// Fn = (Fx + Fy)/2
-    Avg { rn: u8, rx: u8, ry: u8 },
+    Avg { rn: u16, rx: u16, ry: u16 },
     /// COMP(Fx, Fy)
-    Comp { rx: u8, ry: u8 },
+    Comp { rx: u16, ry: u16 },
     /// Fn = ABS(Fx + Fy)
-    AbsAdd { rn: u8, rx: u8, ry: u8 },
+    AbsAdd { rn: u16, rx: u16, ry: u16 },
     /// Fn = ABS(Fx - Fy)
-    AbsSub { rn: u8, rx: u8, ry: u8 },
+    AbsSub { rn: u16, rx: u16, ry: u16 },
     /// Fn = PASS Fx
-    Pass { rn: u8, rx: u8 },
+    Pass { rn: u16, rx: u16 },
     /// Fn = -Fx
-    Neg { rn: u8, rx: u8 },
+    Neg { rn: u16, rx: u16 },
     /// Fn = RND Fx
-    Rnd { rn: u8, rx: u8 },
+    Rnd { rn: u16, rx: u16 },
     /// Rn = MANT Fx (result is integer)
-    Mant { rn: u8, rx: u8 },
+    Mant { rn: u16, rx: u16 },
     /// Fn = ABS Fx
-    Abs { rn: u8, rx: u8 },
+    Abs { rn: u16, rx: u16 },
     /// Fn = SCALB Fx BY Ry (Ry is integer)
-    Scalb { rn: u8, rx: u8, ry: u8 },
+    Scalb { rn: u16, rx: u16, ry: u16 },
     /// Rn = LOGB Fx (result is integer)
-    Logb { rn: u8, rx: u8 },
+    Logb { rn: u16, rx: u16 },
     /// Fn = RECIPS Fx
-    Recips { rn: u8, rx: u8 },
+    Recips { rn: u16, rx: u16 },
     /// Fn = RSQRTS Fx
-    Rsqrts { rn: u8, rx: u8 },
+    Rsqrts { rn: u16, rx: u16 },
     /// Rn = FIX Fx (result is integer)
-    Fix { rn: u8, rx: u8 },
+    Fix { rn: u16, rx: u16 },
     /// Fn = FLOAT Rx (input is integer)
-    Float { rn: u8, rx: u8 },
+    Float { rn: u16, rx: u16 },
     /// Rn = TRUNC Fx (result is integer)
-    Trunc { rn: u8, rx: u8 },
+    Trunc { rn: u16, rx: u16 },
     /// Rn = FIX Fx BY Ry
-    FixBy { rn: u8, rx: u8, ry: u8 },
+    FixBy { rn: u16, rx: u16, ry: u16 },
     /// Fn = FLOAT Rx BY Ry
-    FloatBy { rn: u8, rx: u8, ry: u8 },
+    FloatBy { rn: u16, rx: u16, ry: u16 },
     /// Rn = TRUNC Fx BY Ry
-    TruncBy { rn: u8, rx: u8, ry: u8 },
+    TruncBy { rn: u16, rx: u16, ry: u16 },
     /// Fn = Fx COPYSIGN Fy
-    Copysign { rn: u8, rx: u8, ry: u8 },
+    Copysign { rn: u16, rx: u16, ry: u16 },
     /// Fn = MIN(Fx, Fy)
-    Min { rn: u8, rx: u8, ry: u8 },
+    Min { rn: u16, rx: u16, ry: u16 },
     /// Fn = MAX(Fx, Fy)
-    Max { rn: u8, rx: u8, ry: u8 },
+    Max { rn: u16, rx: u16, ry: u16 },
     /// Fn = CLIP Fx BY Fy
-    Clip { rn: u8, rx: u8, ry: u8 },
+    Clip { rn: u16, rx: u16, ry: u16 },
 }
 
 /// Multiplier operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MulOp {
     /// MRF = Rx * Ry (SSF)
-    MrfMulSsf { rx: u8, ry: u8 },
+    MrfMulSsf { rx: u16, ry: u16 },
     /// MRB = Rx * Ry (SSF)
-    MrbMulSsf { rx: u8, ry: u8 },
+    MrbMulSsf { rx: u16, ry: u16 },
     /// Rn = Rx * Ry (SSF)
-    MulSsf { rn: u8, rx: u8, ry: u8 },
+    MulSsf { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rx * Ry (SSI) — signed-integer multiply, 32-bit result
-    MulSsi { rn: u8, rx: u8, ry: u8 },
+    MulSsi { rn: u16, rx: u16, ry: u16 },
     /// MRF = Rx * Ry (SSI) — signed-integer multiply, full 64-bit
     /// product available in MR0F (low 32) and MR1F (high 32).
-    MrfMulSsi { rx: u8, ry: u8 },
+    MrfMulSsi { rx: u16, ry: u16 },
     /// MRF = MRF + Rx * Ry (SSF)
-    MrfMacSsf { rx: u8, ry: u8 },
+    MrfMacSsf { rx: u16, ry: u16 },
     /// MRB = MRB + Rx * Ry (SSF)
-    MrbMacSsf { rx: u8, ry: u8 },
+    MrbMacSsf { rx: u16, ry: u16 },
     /// Rn = MRF + Rx * Ry (SSF)
-    MacSsf { rn: u8, rx: u8, ry: u8 },
+    MacSsf { rn: u16, rx: u16, ry: u16 },
     /// MRF = MRF - Rx * Ry (SSF)
-    MrfMsubSsf { rx: u8, ry: u8 },
+    MrfMsubSsf { rx: u16, ry: u16 },
     /// MRB = MRB - Rx * Ry (SSF)
-    MrbMsubSsf { rx: u8, ry: u8 },
+    MrbMsubSsf { rx: u16, ry: u16 },
     /// Rn = SAT MRF
-    SatMrf { rn: u8 },
+    SatMrf { rn: u16 },
     /// Rn = SAT MRB
-    SatMrb { rn: u8 },
+    SatMrb { rn: u16 },
     /// MRF = 0
     ClrMrf,
     /// MRB = 0
@@ -152,80 +152,80 @@ pub enum MulOp {
     /// MRB = TRNC MRB
     TrncMrb,
     /// Rn = TRNC MRF
-    TrncMrfReg { rn: u8 },
+    TrncMrfReg { rn: u16 },
     /// Rn = TRNC MRB
-    TrncMrbReg { rn: u8 },
+    TrncMrbReg { rn: u16 },
     /// MRF = Rx * Ry (UUF)
-    MrfMulUuf { rx: u8, ry: u8 },
+    MrfMulUuf { rx: u16, ry: u16 },
     /// Fn = Fx * Fy (floating-point multiply)
-    FMul { rn: u8, rx: u8, ry: u8 },
+    FMul { rn: u16, rx: u16, ry: u16 },
     /// Rn = MR0F (read MR register field)
-    ReadMr0f { rn: u8 },
+    ReadMr0f { rn: u16 },
     /// Rn = MR1F
-    ReadMr1f { rn: u8 },
+    ReadMr1f { rn: u16 },
     /// Rn = MR2F
-    ReadMr2f { rn: u8 },
+    ReadMr2f { rn: u16 },
     /// Rn = MR0B
-    ReadMr0b { rn: u8 },
+    ReadMr0b { rn: u16 },
     /// Rn = MR1B
-    ReadMr1b { rn: u8 },
+    ReadMr1b { rn: u16 },
     /// Rn = MR2B
-    ReadMr2b { rn: u8 },
+    ReadMr2b { rn: u16 },
     /// MR0F = Rn (write MR register field)
-    WriteMr0f { rn: u8 },
+    WriteMr0f { rn: u16 },
     /// MR1F = Rn
-    WriteMr1f { rn: u8 },
+    WriteMr1f { rn: u16 },
     /// MR2F = Rn
-    WriteMr2f { rn: u8 },
+    WriteMr2f { rn: u16 },
     /// MR0B = Rn
-    WriteMr0b { rn: u8 },
+    WriteMr0b { rn: u16 },
     /// MR1B = Rn
-    WriteMr1b { rn: u8 },
+    WriteMr1b { rn: u16 },
     /// MR2B = Rn
-    WriteMr2b { rn: u8 },
+    WriteMr2b { rn: u16 },
 }
 
 /// Shifter operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShiftOp {
     /// Rn = LSHIFT Rx BY Ry
-    Lshift { rn: u8, rx: u8, ry: u8 },
+    Lshift { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rn OR LSHIFT Rx BY Ry
-    OrLshift { rn: u8, rx: u8, ry: u8 },
+    OrLshift { rn: u16, rx: u16, ry: u16 },
     /// Rn = ASHIFT Rx BY Ry
-    Ashift { rn: u8, rx: u8, ry: u8 },
+    Ashift { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rn OR ASHIFT Rx BY Ry
-    OrAshift { rn: u8, rx: u8, ry: u8 },
+    OrAshift { rn: u16, rx: u16, ry: u16 },
     /// Rn = ROT Rx BY Ry
-    Rot { rn: u8, rx: u8, ry: u8 },
+    Rot { rn: u16, rx: u16, ry: u16 },
     /// BTST Rx BY Ry
-    Btst { rx: u8, ry: u8 },
+    Btst { rx: u16, ry: u16 },
     /// Rn = BCLR Rx BY Ry
-    Bclr { rn: u8, rx: u8, ry: u8 },
+    Bclr { rn: u16, rx: u16, ry: u16 },
     /// Rn = BSET Rx BY Ry
-    Bset { rn: u8, rx: u8, ry: u8 },
+    Bset { rn: u16, rx: u16, ry: u16 },
     /// Rn = BTGL Rx BY Ry
-    Btgl { rn: u8, rx: u8, ry: u8 },
+    Btgl { rn: u16, rx: u16, ry: u16 },
     /// Rn = FEXT Rx BY Ry
-    Fext { rn: u8, rx: u8, ry: u8 },
+    Fext { rn: u16, rx: u16, ry: u16 },
     /// Rn = FDEP Rx BY Ry
-    Fdep { rn: u8, rx: u8, ry: u8 },
+    Fdep { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rn OR FEXT Rx BY Ry (SE)
-    OrFextSe { rn: u8, rx: u8, ry: u8 },
+    OrFextSe { rn: u16, rx: u16, ry: u16 },
     /// Rn = Rn OR FDEP Rx BY Ry
-    OrFdep { rn: u8, rx: u8, ry: u8 },
+    OrFdep { rn: u16, rx: u16, ry: u16 },
     /// Rn = EXP Rx
-    Exp { rn: u8, rx: u8 },
+    Exp { rn: u16, rx: u16 },
     /// Rn = EXP Rx (EX)
-    ExpEx { rn: u8, rx: u8 },
+    ExpEx { rn: u16, rx: u16 },
     /// Rn = LEFTZ Rx
-    Leftz { rn: u8, rx: u8 },
+    Leftz { rn: u16, rx: u16 },
     /// Rn = LEFTO Rx
-    Lefto { rn: u8, rx: u8 },
+    Lefto { rn: u16, rx: u16 },
     /// Rn = FPACK Fx
-    Fpack { rn: u8, rx: u8 },
+    Fpack { rn: u16, rx: u16 },
     /// Fn = FUNPACK Rx
-    Funpack { rn: u8, rx: u8 },
+    Funpack { rn: u16, rx: u16 },
 }
 
 /// Multifunction compute: MUL + ALU in a single cycle.
@@ -238,24 +238,24 @@ pub enum MultiOp {
         fp: bool,
         mul_sel: u8,
         alu_sel: u8,
-        rm: u8,
-        ra: u8,
-        rxm: u8,
-        rym: u8,
-        rxa: u8,
-        rya: u8,
+        rm: u16,
+        ra: u16,
+        rxm: u16,
+        rym: u16,
+        rxa: u16,
+        rya: u16,
     },
     /// MUL + Dual Add/Subtract (32-bit fixed or 32/40-bit float).
     /// Ra = Rxa + Rya , Rs = Rxa - Rya
     MulDualAddSub {
         fp: bool,
-        rm: u8,
-        ra: u8,
-        rs: u8,
-        rxm: u8,
-        rym: u8,
-        rxa: u8,
-        rya: u8,
+        rm: u16,
+        ra: u16,
+        rs: u16,
+        rxm: u16,
+        rym: u16,
+        rxa: u16,
+        rya: u16,
     },
 }
 
@@ -308,7 +308,7 @@ pub struct DagAccess {
     /// M register index within DAG (0-7)
     pub m_reg: u8,
     /// Data register index (0-15)
-    pub dreg: u8,
+    pub dreg: u16,
 }
 
 /// Memory access descriptor for Type 4.
@@ -338,7 +338,7 @@ pub enum Instruction {
     /// compressed form is the canonical encoding (parcel 0x1901).
     Rframe,
     /// Type 17: ureg = immediate32.
-    LoadImm { ureg: u8, value: u32 },
+    LoadImm { ureg: u16, value: u32 },
     /// Type 11a: RTS / RTI, optional compute.
     Return {
         interrupt: bool,
@@ -361,7 +361,7 @@ pub enum Instruction {
     ComputeLoadStore {
         compute: Option<ComputeOp>,
         access: MemAccess,
-        dreg: u8,
+        dreg: u16,
         offset: i8,
         cond: u8,
     },
@@ -424,7 +424,7 @@ pub enum Instruction {
         /// true=write (mem=ureg), false=read (ureg=mem)
         write: bool,
         /// Universal register code (8-bit)
-        ureg: u8,
+        ureg: u16,
         /// I register index within DAG (0-7)
         i_reg: u8,
         /// M register index within DAG (0-3 for Type 3)
@@ -453,9 +453,9 @@ pub enum Instruction {
     /// Type 5b: Compute, dreg<->cdreg (SIMD register swap).
     RegisterSwap {
         /// Data register index (0-15, R0-R15)
-        dreg: u8,
+        dreg: u16,
         /// Complementary data register index (0-15, S0-S15)
-        cdreg: u8,
+        cdreg: u16,
         /// Condition code (31 = TRUE = unconditional)
         cond: u8,
         /// Optional compute
@@ -464,14 +464,14 @@ pub enum Instruction {
     /// Type 5a: Compute, ureg<->ureg transfer.
     UregTransfer {
         /// Source universal register code
-        src_ureg: u8,
+        src_ureg: u16,
         /// Destination universal register code
-        dst_ureg: u8,
+        dst_ureg: u16,
         /// Optional compute
         compute: Option<ComputeOp>,
     },
     /// Type 5a: Universal register transfer (dest = src), no compute.
-    URegMove { dest: u8, src: u8 },
+    URegMove { dest: u16, src: u16 },
     /// Type 15: ureg <-> DM/PM with 32-bit offset.
     UregMemAccess {
         /// 0=DM, 1=PM
@@ -483,7 +483,7 @@ pub enum Instruction {
         /// Long-word access flag (bit 39)
         lw: bool,
         /// Universal register code (7-bit)
-        ureg: u8,
+        ureg: u16,
         /// 32-bit signed offset
         offset: i32,
     },
@@ -496,9 +496,9 @@ pub enum Instruction {
         /// 8-bit immediate (signed for LSHIFT/ASHIFT; pos|len_lo for FEXT/FDEP)
         imm: u8,
         /// Destination register (0-15)
-        rn: u8,
+        rn: u16,
         /// Source register (0-15)
-        rx: u8,
+        rx: u16,
         /// Extra data for bits[31:27] (FEXT/FDEP length high bits)
         data_hi: u8,
         /// Condition code (31 = TRUE = unconditional), at bits[37:33]
@@ -513,9 +513,9 @@ pub enum Instruction {
         /// 8-bit immediate (pos[5:0] | len_lo[1:0]<<6)
         imm: u8,
         /// Shift destination register (0-15)
-        rn: u8,
+        rn: u16,
         /// Shift source register (0-15)
-        rx: u8,
+        rx: u16,
         /// High 4 bits of length (bits[30:27])
         len_hi: u8,
         /// I-register index (0-7)
@@ -525,7 +525,7 @@ pub enum Instruction {
         /// true = store (DM=dreg), false = load (dreg=DM)
         write: bool,
         /// Data register for memory access (0-15)
-        dreg: u8,
+        dreg: u16,
         /// Condition code (31 = TRUE = unconditional)
         cond: u8,
     },
@@ -551,7 +551,7 @@ pub enum Instruction {
         /// true = write (mem = ureg), false = read (ureg = mem)
         write: bool,
         /// Universal register code (8-bit)
-        ureg: u8,
+        ureg: u16,
         /// 32-bit absolute address
         addr: u32,
     },
@@ -765,7 +765,7 @@ fn encode_compute_opt(op: &Option<ComputeOp>) -> Result<u32, EncodeError> {
 }
 
 /// Build compute field: multi=0, cu, opcode, rn, rx, ry.
-fn compute_field(cu: u32, opcode: u8, rn: u8, rx: u8, ry: u8) -> u32 {
+fn compute_field(cu: u32, opcode: u8, rn: u16, rx: u16, ry: u16) -> u32 {
     // bit22 = 0 (single function)
     // bits[21:20] = cu
     // bits[19:12] = opcode
@@ -779,7 +779,7 @@ fn compute_field(cu: u32, opcode: u8, rn: u8, rx: u8, ry: u8) -> u32 {
         | ((ry as u32) & 0xF)
 }
 
-fn check_reg4(name: &str, val: u8) -> Result<(), EncodeError> {
+fn check_reg4(name: &str, val: u16) -> Result<(), EncodeError> {
     if val > 15 {
         return Err(EncodeError {
             msg: format!("{name} register index {val} out of range (0-15)"),
@@ -789,7 +789,7 @@ fn check_reg4(name: &str, val: u8) -> Result<(), EncodeError> {
 }
 
 fn encode_alu(op: &AluOp) -> Result<u32, EncodeError> {
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *op {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *op {
         AluOp::Add { rn, rx, ry } => (0x01, rn, rx, ry),
         AluOp::Sub { rn, rx, ry } => (0x02, rn, rx, ry),
         AluOp::AddCi { rn, rx, ry } => (0x05, rn, rx, ry),
@@ -820,7 +820,7 @@ fn encode_alu(op: &AluOp) -> Result<u32, EncodeError> {
 }
 
 fn encode_falu(op: &FaluOp) -> Result<u32, EncodeError> {
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *op {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *op {
         FaluOp::Add { rn, rx, ry } => (0x81, rn, rx, ry),
         FaluOp::Sub { rn, rx, ry } => (0x82, rn, rx, ry),
         FaluOp::Avg { rn, rx, ry } => (0x89, rn, rx, ry),
@@ -875,7 +875,7 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
     //   Fn   = Fx * Fy           0011 0000
     //
     // (SSF) => y=1 x=1 f=1 r=0.  (SSI) => y=1 x=1 f=0 r=0.
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *op {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *op {
         // Rn = Rx * Ry family.
         MulOp::MulSsi { rn, rx, ry } => (0x70, rn, rx, ry),
         MulOp::MulSsf { rn, rx, ry } => (0x78, rn, rx, ry),
@@ -942,7 +942,7 @@ fn encode_shift(op: &ShiftOp) -> Result<u32, EncodeError> {
     // register-count form lives here; the immediate-count
     // (shiftimm) form is encoded by `encode_type6b` and sits in
     // a separate 6-bit sub-opcode space.
-    let (opcode, rn, rx, ry): (u8, u8, u8, u8) = match *op {
+    let (opcode, rn, rx, ry): (u8, u16, u16, u16) = match *op {
         ShiftOp::Lshift { rn, rx, ry } => (0x00, rn, rx, ry),
         ShiftOp::Ashift { rn, rx, ry } => (0x04, rn, rx, ry),
         ShiftOp::Rot { rn, rx, ry } => (0x08, rn, rx, ry),
@@ -1026,7 +1026,7 @@ fn encode_multi(op: &MultiOp) -> Result<u32, EncodeError> {
 // bits[31:0] = imm32
 // ---------------------------------------------------------------------------
 
-fn encode_type17(ureg: u8, value: u32) -> Result<u64, EncodeError> {
+fn encode_type17(ureg: u16, value: u32) -> Result<u64, EncodeError> {
     let word = (0x0Fu64 << 40) | ((ureg as u64) << 32) | (value as u64);
     Ok(word)
 }
@@ -1152,7 +1152,7 @@ fn encode_type9a(call: bool, cond: u8, pm_i: u8, pm_m: u8, delayed: bool) -> Res
 struct UregDagMoveArgs {
     _pm: bool,
     write: bool,
-    ureg: u8,
+    ureg: u16,
     i_reg: u8,
     m_reg: u8,
     cond: u8,
@@ -1195,7 +1195,7 @@ fn encode_type3(
 fn encode_type4(
     compute: Option<ComputeOp>,
     access: MemAccess,
-    dreg: u8,
+    dreg: u16,
     offset: i8,
     cond: u8,
 ) -> Result<u64, EncodeError> {
@@ -1420,7 +1420,7 @@ fn encode_type16(pm: bool, i_reg: u8, m_reg: u8, value: u32) -> Result<u64, Enco
 // bits[31:0]  = addr32
 // ---------------------------------------------------------------------------
 
-fn encode_type14(pm: bool, write: bool, ureg: u8, addr: u32) -> Result<u64, EncodeError> {
+fn encode_type14(pm: bool, write: bool, ureg: u16, addr: u32) -> Result<u64, EncodeError> {
     let g = if pm { 1u64 } else { 0 };
     let d = if write { 1u64 } else { 0 };
     let word = (0b000_100u64 << 42)
@@ -1441,7 +1441,7 @@ fn encode_type14(pm: bool, write: bool, ureg: u8, addr: u32) -> Result<u64, Enco
 // bits[22:0] = compute (0 = no compute)
 // ---------------------------------------------------------------------------
 
-fn encode_type5a(dest: u8, src: u8) -> Result<u64, EncodeError> {
+fn encode_type5a(dest: u16, src: u16) -> Result<u64, EncodeError> {
     // Type 5a layout (see `decode_type5a` for the bit-field split):
     //   bits[47:45] = 011, bit[44]=1
     //   bits[42:38] = src_ureg[6:2]
@@ -1486,7 +1486,7 @@ fn encode_type5a(dest: u8, src: u8) -> Result<u64, EncodeError> {
 // bits[22:0]  = compute
 // ---------------------------------------------------------------------------
 
-fn encode_type5b(dreg: u8, cdreg: u8, cond: u8, compute: &Option<ComputeOp>) -> Result<u64, EncodeError> {
+fn encode_type5b(dreg: u16, cdreg: u16, cond: u8, compute: &Option<ComputeOp>) -> Result<u64, EncodeError> {
     check_reg4("dreg", dreg)?;
     check_reg4("cdreg", cdreg)?;
     let comp = encode_compute_opt(compute)?;
@@ -1509,7 +1509,7 @@ fn encode_type5b(dreg: u8, cdreg: u8, cond: u8, compute: &Option<ComputeOp>) -> 
 // bits[31:0]  = offset32
 // ---------------------------------------------------------------------------
 
-fn encode_type15(pm: bool, i_reg: u8, write: bool, lw: bool, ureg: u8, offset: i32) -> Result<u64, EncodeError> {
+fn encode_type15(pm: bool, i_reg: u8, write: bool, lw: bool, ureg: u16, offset: i32) -> Result<u64, EncodeError> {
     let g = if pm { 1u64 } else { 0 };
     let d = if write { 1u64 } else { 0 };
     let lw_bit = if lw { 1u64 } else { 0 };
@@ -1532,7 +1532,7 @@ fn encode_type15(pm: bool, i_reg: u8, write: bool, lw: bool, ureg: u8, offset: i
 // bits[3:0]   = Rx
 // ---------------------------------------------------------------------------
 
-fn encode_type6b(shift_type: u8, sub_op: u8, imm: u8, rn: u8, rx: u8, data_hi: u8, cond: u8) -> Result<u64, EncodeError> {
+fn encode_type6b(shift_type: u8, sub_op: u8, imm: u8, rn: u16, rx: u16, data_hi: u8, cond: u8) -> Result<u64, EncodeError> {
     let op_field = ((shift_type as u64 & 0xF) << 4) | (sub_op as u64 & 3);
     let word = (0x02u64 << 40)
         | ((cond as u64 & 0x1F) << 33)

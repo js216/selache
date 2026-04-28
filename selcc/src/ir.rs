@@ -517,13 +517,14 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
         next += 1;
     }
 
-    // Hard cap: 0x80 keeps every renumbered id below the
-    // UREG_FIXED_TAG bit, so no truncated `as u8` collides with the
-    // tagged-fixed-encoding range that the regalloc rewrite uses.
+    // Hard cap: 0x8000 keeps every renumbered id below the
+    // UREG_FIXED_TAG bit (now widened to u16's bit 15), so no `as u16`
+    // cast collides with the tagged-fixed-encoding range that the
+    // regalloc rewrite uses.
     assert!(
-        next <= 0x80,
+        next <= 0x8000,
         "renumber_vregs: function uses {next} vregs after compression, \
-         exceeds the 0x80 tag-bit-safe cap"
+         exceeds the 0x8000 tag-bit-safe cap"
     );
 
     // Apply mapping. `apply` is a single-vreg lookup; vregs missing

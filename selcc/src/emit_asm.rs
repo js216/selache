@@ -1062,7 +1062,7 @@ fn emit_function_instrs(
     // vregs to arbitrary registers and reads uninitialised data for
     // every field past the first ABI slot of a multi-word struct.
     let num_params = (lower_result.arg_slots as usize)
-        .min(target::ARG_REGS.len()) as u8;
+        .min(target::ARG_REGS.len()) as u16;
 
     // Renumber IR virtual registers into a tag-bit-safe u8 range
     // *before* instruction selection truncates `VReg` (u32) to `u8`
@@ -1335,17 +1335,17 @@ fn splice_epilogues(
 // final encode step.
 // --------------------------------------------------------------------
 
-fn callee_saved_used(instrs: &[MachInstr]) -> Vec<u8> {
+fn callee_saved_used(instrs: &[MachInstr]) -> Vec<u16> {
     let mut used = Vec::new();
     for &reg in target::CALLEE_SAVED {
-        if instrs.iter().any(|mi| instr_uses_reg(&mi.instr, reg)) {
-            used.push(reg);
+        if instrs.iter().any(|mi| instr_uses_reg(&mi.instr, reg as u16)) {
+            used.push(reg as u16);
         }
     }
     used
 }
 
-fn instr_uses_reg(instr: &Instruction, reg: u8) -> bool {
+fn instr_uses_reg(instr: &Instruction, reg: u16) -> bool {
     match *instr {
         Instruction::LoadImm { ureg, .. } => (ureg & 0xF) == reg && (ureg >> 4) == 0,
         Instruction::Compute { compute, .. } => compute_uses_reg(&compute, reg),
@@ -1360,7 +1360,7 @@ fn instr_uses_reg(instr: &Instruction, reg: u8) -> bool {
     }
 }
 
-fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u8) -> bool {
+fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u16) -> bool {
     use selinstr::encode::ComputeOp;
     match *op {
         ComputeOp::Alu(ref a) => alu_uses_reg(a, reg),
@@ -1371,7 +1371,7 @@ fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u8) -> bool {
     }
 }
 
-fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u8) -> bool {
+fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u16) -> bool {
     use selinstr::encode::AluOp::*;
     match *op {
         Add { rn, rx, ry } | Sub { rn, rx, ry } | And { rn, rx, ry }
@@ -1383,7 +1383,7 @@ fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u8) -> bool {
     }
 }
 
-fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u8) -> bool {
+fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u16) -> bool {
     use selinstr::encode::MulOp::*;
     match *op {
         MulSsf { rn, rx, ry } | MulSsi { rn, rx, ry } | FMul { rn, rx, ry } => {
@@ -1393,7 +1393,7 @@ fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u8) -> bool {
     }
 }
 
-fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u8) -> bool {
+fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u16) -> bool {
     use selinstr::encode::ShiftOp::*;
     match *op {
         Lshift { rn, rx, ry } | Ashift { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
@@ -1401,7 +1401,7 @@ fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u8) -> bool {
     }
 }
 
-fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u8) -> bool {
+fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u16) -> bool {
     use selinstr::encode::MultiOp::*;
     match *op {
         MulAlu { rm, ra, rxm, rym, rxa, rya, .. } => {
@@ -1415,7 +1415,7 @@ fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u8) -> bool {
     }
 }
 
-fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u8) -> bool {
+fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u16) -> bool {
     use selinstr::encode::FaluOp::*;
     match *op {
         Add { rn, rx, ry } | Sub { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
@@ -1457,9 +1457,9 @@ const FRAME_SKIP: i32 = 2;
 /// executes `CJUMP` so the two extra words would be dead stack.
 const CJUMP_PUSH_RESERVE: i32 = 2;
 
-fn build_prologue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<MachInstr> {
+fn build_prologue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec<MachInstr> {
     debug_assert!(
-        callee_saved.iter().all(|r| target::CALLER_SAVED.iter().all(|c| c != r)),
+        callee_saved.iter().all(|r| target::CALLER_SAVED.iter().all(|c| (*c as u16) != *r)),
         "callee-saved register overlaps with caller-saved set"
     );
     if frame_size == 0 && callee_saved.is_empty() {
@@ -1510,7 +1510,7 @@ fn build_prologue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<
     instrs
 }
 
-fn build_epilogue(frame_size: u32, callee_saved: &[u8], has_calls: bool) -> Vec<MachInstr> {
+fn build_epilogue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec<MachInstr> {
     if frame_size == 0 && callee_saved.is_empty() {
         return Vec::new();
     }
@@ -1657,7 +1657,7 @@ fn emit_adjusted_access(
     out: &mut Vec<MachInstr>,
     compute: Option<selinstr::encode::ComputeOp>,
     access: selinstr::encode::MemAccess,
-    dreg: u8,
+    dreg: u16,
     new_offset: i32,
     cond: u8,
     reloc: Option<Reloc>,
@@ -1735,7 +1735,7 @@ fn eliminate_copies(
     instrs: &[MachInstr],
     label_map: &mut HashMap<Label, usize>,
 ) -> Vec<MachInstr> {
-    let mut use_count: HashMap<u8, u32> = HashMap::new();
+    let mut use_count: HashMap<u16, u32> = HashMap::new();
     for mi in instrs {
         for reg in source_regs(&mi.instr) {
             *use_count.entry(reg).or_insert(0) += 1;
@@ -1754,7 +1754,7 @@ fn eliminate_copies(
 
     let mut removed = Vec::new();
     let mut result = Vec::with_capacity(instrs.len());
-    let mut skip_next_remap: Option<(u8, u8)> = None;
+    let mut skip_next_remap: Option<(u16, u16)> = None;
     let mut i = 0;
 
     while i < instrs.len() {
@@ -1868,7 +1868,7 @@ fn eliminate_copies(
     result
 }
 
-fn rewrite_dest(mi: &MachInstr, old_dst: u8, new_dst: u8) -> Option<MachInstr> {
+fn rewrite_dest(mi: &MachInstr, old_dst: u16, new_dst: u16) -> Option<MachInstr> {
     use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
     let new_instr = match mi.instr {
         Instruction::Compute { cond, compute } => {
@@ -1919,7 +1919,7 @@ fn rewrite_dest(mi: &MachInstr, old_dst: u8, new_dst: u8) -> Option<MachInstr> {
     Some(MachInstr { instr: new_instr, reloc: mi.reloc.clone() })
 }
 
-fn is_pass_copy(instr: &Instruction) -> Option<(u8, u8)> {
+fn is_pass_copy(instr: &Instruction) -> Option<(u16, u16)> {
     match *instr {
         Instruction::Compute {
             compute: selinstr::encode::ComputeOp::Alu(selinstr::encode::AluOp::Pass { rn, rx }),
@@ -1929,7 +1929,7 @@ fn is_pass_copy(instr: &Instruction) -> Option<(u8, u8)> {
     }
 }
 
-fn source_regs(instr: &Instruction) -> Vec<u8> {
+fn source_regs(instr: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
     match *instr {
         Instruction::Compute { compute, .. } => compute_source_regs(&compute, &mut regs),
@@ -1961,22 +1961,22 @@ fn source_regs(instr: &Instruction) -> Vec<u8> {
             // the call site. The callee then dereferences whatever
             // garbage was in R4 and faults.
             for &r in target::ARG_REGS {
-                regs.push(r);
+                regs.push(r as u16);
             }
-            regs.push(target::RETURN_REG);
+            regs.push(target::RETURN_REG as u16);
         }
         Instruction::IndirectBranch { call: true, .. } => {
             for &r in target::ARG_REGS {
-                regs.push(r);
+                regs.push(r as u16);
             }
-            regs.push(target::RETURN_REG);
+            regs.push(target::RETURN_REG as u16);
         }
         _ => {}
     }
     regs
 }
 
-fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u8>) {
+fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u16>) {
     use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
     match *op {
         ComputeOp::Alu(ref a) => match *a {
@@ -2027,7 +2027,7 @@ fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u8>) {
     }
 }
 
-fn remap_sources(mi: &MachInstr, from: u8, to: u8) -> MachInstr {
+fn remap_sources(mi: &MachInstr, from: u16, to: u16) -> MachInstr {
     let new_instr = match mi.instr {
         Instruction::Compute { cond, compute } => Instruction::Compute {
             cond,
@@ -2064,11 +2064,11 @@ fn remap_sources(mi: &MachInstr, from: u8, to: u8) -> MachInstr {
 
 fn remap_compute_sources(
     op: &selinstr::encode::ComputeOp,
-    from: u8,
-    to: u8,
+    from: u16,
+    to: u16,
 ) -> selinstr::encode::ComputeOp {
     use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
-    let r = |reg: u8| if reg == from { to } else { reg };
+    let r = |reg: u16| if reg == from { to } else { reg };
     match *op {
         ComputeOp::Alu(ref a) => ComputeOp::Alu(match *a {
             AluOp::Add { rn, rx, ry } => AluOp::Add { rn, rx: r(rx), ry: r(ry) },

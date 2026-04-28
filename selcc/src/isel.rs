@@ -63,18 +63,18 @@ pub fn select_with_name(
     // pre-isel compression pass is capped at 0x80, so we need
     // `max_ir_vreg + 6 < 0x80`.
     let max_ir_vreg = max_ir_vreg(ir);
-    let fdiv_scratch_base: u8 = {
+    let fdiv_scratch_base: u16 = {
         let base = max_ir_vreg.saturating_add(1);
         assert!(
-            base + 5 < 0x80,
+            base + 5 < 0x8000,
             "function uses too many vregs to fit FDiv scratch slots; \
              max_ir_vreg={max_ir_vreg}",
         );
-        base as u8
+        base as u16
     };
     // Convenience: scratch_vreg(i) gives the i-th FDiv scratch vreg
     // id, replacing the old hardcoded literals 0..5.
-    let s = |i: u8| -> u8 { fdiv_scratch_base + i };
+    let s = |i: u16| -> u16 { fdiv_scratch_base + i };
 
     for op in ir {
         match op {
@@ -90,7 +90,7 @@ pub fn select_with_name(
                 // any high-pressure function.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: *dst as u8,
+                        ureg: *dst as u16,
                         value: *val as u32,
                     },
                     reloc: None,
@@ -103,8 +103,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Pass {
-                            rn: *dst as u8,
-                            rx: *src as u8,
+                            rn: *dst as u16,
+                            rx: *src as u16,
                         }),
                     },
                     reloc: None,
@@ -116,9 +116,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Add {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -130,9 +130,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Sub {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -147,9 +147,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Mul(selinstr::encode::MulOp::MulSsi {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -215,9 +215,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::And {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -229,9 +229,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Or {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -243,9 +243,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Xor {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -258,9 +258,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Shift(ShiftOp::Lshift {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -276,9 +276,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Shift(ShiftOp::Ashift {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -294,9 +294,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Shift(ShiftOp::Lshift {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -308,8 +308,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Neg {
-                            rn: *dst as u8,
-                            rx: *src as u8,
+                            rn: *dst as u16,
+                            rx: *src as u16,
                         }),
                     },
                     reloc: None,
@@ -321,8 +321,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Not {
-                            rn: *dst as u8,
-                            rx: *src as u8,
+                            rn: *dst as u16,
+                            rx: *src as u16,
                         }),
                     },
                     reloc: None,
@@ -334,8 +334,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Comp {
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -347,8 +347,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::CompU {
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -366,7 +366,7 @@ pub fn select_with_name(
                             cond: target::COND_TRUE,
                             compute: ComputeOp::Alu(AluOp::Pass {
                                 rn: target::RETURN_REG_VREG,
-                                rx: *vreg as u8,
+                                rx: *vreg as u16,
                             }),
                         },
                         reloc: None,
@@ -442,7 +442,7 @@ pub fn select_with_name(
                 // to physical R1) so it survives into a data-vreg the
                 // frontend can then stash in a frame slot.
                 instrs.push(MachInstr::compute_pass(
-                    *dst as u8,
+                    *dst as u16,
                     target::RETURN_REG_HI_VREG,
                 ));
             }
@@ -465,7 +465,7 @@ pub fn select_with_name(
                     // Load word 0 into R0 (ureg_r = 0 -> RETURN_REG_VREG).
                     emit_indirect_access(
                         &mut instrs,
-                        *src_addr as u8,
+                        *src_addr as u16,
                         target::RETURN_REG_VREG,
                         0,
                         false,
@@ -473,7 +473,7 @@ pub fn select_with_name(
                     if *num_words == 2 {
                         emit_indirect_access(
                             &mut instrs,
-                            *src_addr as u8,
+                            *src_addr as u16,
                             target::RETURN_REG_HI_VREG,
                             4,
                             false,
@@ -495,14 +495,14 @@ pub fn select_with_name(
                         // final R0 = dst_vreg pass overwrites it.
                         emit_indirect_access(
                             &mut instrs,
-                            *src_addr as u8,
+                            *src_addr as u16,
                             target::RETURN_REG_VREG,
                             byte_off,
                             false,
                         );
                         emit_indirect_access(
                             &mut instrs,
-                            dst_vreg as u8,
+                            dst_vreg as u16,
                             target::RETURN_REG_VREG,
                             byte_off,
                             true,
@@ -510,7 +510,7 @@ pub fn select_with_name(
                     }
                     instrs.push(MachInstr::compute_pass(
                         target::RETURN_REG_VREG,
-                        dst_vreg as u8,
+                        dst_vreg as u16,
                     ));
                 }
 
@@ -588,7 +588,7 @@ pub fn select_with_name(
                                 instr: Instruction::UregDagMove {
                                     pm: false,
                                     write: true,
-                                    ureg: *arg as u8,
+                                    ureg: *arg as u16,
                                     i_reg: target::STACK_PTR,
                                     m_reg: 7, // M7 = -1
                                     cond: target::COND_TRUE,
@@ -605,7 +605,7 @@ pub fn select_with_name(
                         }
                         let phys = target::ARG_REGS[i];
                         instrs.push(MachInstr::compute_pass(
-                            0xC0 | phys, *arg as u8));
+                            0xC000u16 | phys as u16, *arg as u16));
                     }
                 } else {
                     // Stack arguments (args ARG_REGS.len()+): push in
@@ -626,7 +626,7 @@ pub fn select_with_name(
                                 instr: Instruction::UregDagMove {
                                     pm: false,
                                     write: true,
-                                    ureg: *arg as u8,
+                                    ureg: *arg as u16,
                                     i_reg: target::STACK_PTR,
                                     m_reg: 7, // M7 = -1
                                     cond: target::COND_TRUE,
@@ -645,7 +645,7 @@ pub fn select_with_name(
                             break;
                         }
                         let phys = target::ARG_REGS[i];
-                        instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
+                        instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
                     }
                 }
                 // CJUMP (DB) target: the SHARC+ C-ABI call. The two
@@ -710,7 +710,7 @@ pub fn select_with_name(
                 // the callee placed the value) instead of whatever
                 // vreg happens to have the number `RETURN_REG` in it.
                 instrs.push(MachInstr::compute_pass(
-                    *dst as u8,
+                    *dst as u16,
                     target::RETURN_REG_VREG,
                 ));
             }
@@ -749,7 +749,7 @@ pub fn select_with_name(
                             instr: Instruction::UregDagMove {
                                 pm: false,
                                 write: true,
-                                ureg: *arg as u8,
+                                ureg: *arg as u16,
                                 i_reg: target::STACK_PTR,
                                 m_reg: 7, // M7 = -1
                                 cond: target::COND_TRUE,
@@ -761,7 +761,7 @@ pub fn select_with_name(
                     }
                 }
                 // Register arguments (args 0-2). Tag the destination
-                // ureg with `0xC0 | phys` (UREG_FIXED_TAG | phys) so
+                // ureg with `(0xC000u16 | phys as u16)` (UREG_FIXED_TAG | phys) so
                 // regalloc treats it as a fixed physical register
                 // instead of a raw vreg id; without the tag, regalloc
                 // remaps the phys number (e.g. 4) through its pinning
@@ -772,7 +772,7 @@ pub fn select_with_name(
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
+                    instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
                 }
                 // Move the function address (held in a data-register
                 // vreg) into I12. `URegMove` with the src tagged as a
@@ -782,7 +782,7 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
                         dest: target::ureg_i_pre(12),
-                        src: *addr as u8,
+                        src: *addr as u16,
                     },
                     reloc: None,
                 });
@@ -869,7 +869,7 @@ pub fn select_with_name(
                 call_return_labels.push((instrs.len(), ret_label_name));
                 // Result in R0, via the pinned `RETURN_REG_VREG`.
                 instrs.push(MachInstr::compute_pass(
-                    *dst as u8,
+                    *dst as u16,
                     target::RETURN_REG_VREG,
                 ));
             }
@@ -902,7 +902,7 @@ pub fn select_with_name(
                             instr: Instruction::UregDagMove {
                                 pm: false,
                                 write: true,
-                                ureg: *arg as u8,
+                                ureg: *arg as u16,
                                 i_reg: target::STACK_PTR,
                                 m_reg: 7,
                                 cond: target::COND_TRUE,
@@ -919,7 +919,7 @@ pub fn select_with_name(
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
+                    instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
                 }
                 // Hidden ret-pointer in R1 for the large-struct path.
                 // Emitted AFTER the scalar arg moves so that a scalar
@@ -930,7 +930,7 @@ pub fn select_with_name(
                 if is_hidden_ptr {
                     instrs.push(MachInstr::compute_pass(
                         target::RETURN_REG_HI_VREG,
-                        *dst_addr as u8,
+                        *dst_addr as u16,
                     ));
                 }
                 // CJUMP to callee: identical to IrOp::Call.
@@ -978,7 +978,7 @@ pub fn select_with_name(
                     // Read R0 into mem[dst_addr + 0].
                     emit_indirect_access(
                         &mut instrs,
-                        *dst_addr as u8,
+                        *dst_addr as u16,
                         target::RETURN_REG_VREG,
                         0,
                         true,
@@ -986,7 +986,7 @@ pub fn select_with_name(
                     if *num_words == 2 {
                         emit_indirect_access(
                             &mut instrs,
-                            *dst_addr as u8,
+                            *dst_addr as u16,
                             target::RETURN_REG_HI_VREG,
                             4,
                             true,
@@ -1007,7 +1007,7 @@ pub fn select_with_name(
                             instr: Instruction::UregDagMove {
                                 pm: false,
                                 write: true,
-                                ureg: *arg as u8,
+                                ureg: *arg as u16,
                                 i_reg: target::STACK_PTR,
                                 m_reg: 7,
                                 cond: target::COND_TRUE,
@@ -1023,18 +1023,18 @@ pub fn select_with_name(
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC0 | phys, *arg as u8));
+                    instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
                 }
                 if is_hidden_ptr {
                     instrs.push(MachInstr::compute_pass(
                         target::RETURN_REG_HI_VREG,
-                        *dst_addr as u8,
+                        *dst_addr as u16,
                     ));
                 }
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
                         dest: target::ureg_i_pre(12),
-                        src: *addr as u8,
+                        src: *addr as u16,
                     },
                     reloc: None,
                 });
@@ -1096,7 +1096,7 @@ pub fn select_with_name(
                 if !is_hidden_ptr {
                     emit_indirect_access(
                         &mut instrs,
-                        *dst_addr as u8,
+                        *dst_addr as u16,
                         target::RETURN_REG_VREG,
                         0,
                         true,
@@ -1104,7 +1104,7 @@ pub fn select_with_name(
                     if *num_words == 2 {
                         emit_indirect_access(
                             &mut instrs,
-                            *dst_addr as u8,
+                            *dst_addr as u16,
                             target::RETURN_REG_HI_VREG,
                             4,
                             true,
@@ -1152,12 +1152,12 @@ pub fn select_with_name(
                     emit_frame_access(
                         &mut instrs,
                         frame_offset,
-                        *dst as u8,
+                        *dst as u16,
                         false, // read
                     );
                 } else {
                     // Indirect load through pointer in a data register.
-                    emit_indirect_access(&mut instrs, *base as u8, *dst as u8, *offset as i8, false);
+                    emit_indirect_access(&mut instrs, *base as u16, *dst as u16, *offset as i8, false);
                 }
             }
 
@@ -1168,12 +1168,12 @@ pub fn select_with_name(
                     emit_frame_access(
                         &mut instrs,
                         frame_offset,
-                        *val as u8,
+                        *val as u16,
                         true, // write
                     );
                 } else {
                     // Indirect store through pointer in a data register.
-                    emit_indirect_access(&mut instrs, *base as u8, *val as u8, *offset as i8, true);
+                    emit_indirect_access(&mut instrs, *base as u16, *val as u16, *offset as i8, true);
                 }
             }
 
@@ -1185,7 +1185,7 @@ pub fn select_with_name(
                 // collapse vregs above 15 onto their low-nibble twins.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: *dst as u8,
+                        ureg: *dst as u16,
                         value: 0,
                     },
                     reloc: Some(Reloc {
@@ -1202,7 +1202,7 @@ pub fn select_with_name(
                     instr: Instruction::UregAbsAccess {
                         pm: false,
                         write: true,
-                        ureg: *val as u8,
+                        ureg: *val as u16,
                         addr: 0,
                     },
                     reloc: Some(Reloc {
@@ -1218,7 +1218,7 @@ pub fn select_with_name(
                     instr: Instruction::UregAbsAccess {
                         pm: false,
                         write: false,
-                        ureg: *dst as u8,
+                        ureg: *dst as u16,
                         addr: 0,
                     },
                     reloc: Some(Reloc {
@@ -1231,8 +1231,8 @@ pub fn select_with_name(
             IrOp::ReadGlobal64(dst, name) => {
                 // Read a 64-bit value from a global symbol. Two words:
                 // lo at address, hi at address+1.
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
                         ureg: target::ureg_i_pre(target::SCRATCH_I),
@@ -1270,8 +1270,8 @@ pub fn select_with_name(
             IrOp::WriteGlobal64(src, name) => {
                 // Write a 64-bit value to a global symbol. Two words:
                 // lo at address, hi at address+1.
-                let src_lo = *src as u8;
-                let src_hi = (*src + 1) as u8;
+                let src_lo = *src as u16;
+                let src_hi = (*src + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
                         ureg: target::ureg_i_pre(target::SCRATCH_I),
@@ -1317,7 +1317,7 @@ pub fn select_with_name(
                 // ever appeared on hardware.
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: *dst as u8,
+                        ureg: *dst as u16,
                         value: 0,
                     },
                     reloc: Some(Reloc {
@@ -1330,7 +1330,7 @@ pub fn select_with_name(
             IrOp::LoadWideString(dst, idx) => {
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: *dst as u8,
+                        ureg: *dst as u16,
                         value: 0,
                     },
                     reloc: Some(Reloc {
@@ -1345,9 +1345,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Falu(FaluOp::Add {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -1359,9 +1359,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Falu(FaluOp::Sub {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -1373,9 +1373,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Mul(MulOp::FMul {
-                            rn: *dst as u8,
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rn: *dst as u16,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -1429,11 +1429,11 @@ pub fn select_with_name(
                 let s_y = s(3);
                 let s_t = s(4);
                 let s_a_save = s(5);
-                if *lhs as u8 != s_a {
-                    instrs.push(MachInstr::compute_pass(s_a, *lhs as u8));
+                if *lhs as u16 != s_a {
+                    instrs.push(MachInstr::compute_pass(s_a, *lhs as u16));
                 }
-                if *rhs as u8 != s_b {
-                    instrs.push(MachInstr::compute_pass(s_b, *rhs as u8));
+                if *rhs as u16 != s_b {
+                    instrs.push(MachInstr::compute_pass(s_b, *rhs as u16));
                 }
                 // s_two = 2.0f (IEEE single-precision bit pattern).
                 instrs.push(MachInstr {
@@ -1541,8 +1541,8 @@ pub fn select_with_name(
                     },
                     reloc: None,
                 });
-                if *dst as u8 != s_a {
-                    instrs.push(MachInstr::compute_pass(*dst as u8, s_a));
+                if *dst as u16 != s_a {
+                    instrs.push(MachInstr::compute_pass(*dst as u16, s_a));
                 }
             }
 
@@ -1551,8 +1551,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Falu(FaluOp::Neg {
-                            rn: *dst as u8,
-                            rx: *src as u8,
+                            rn: *dst as u16,
+                            rx: *src as u16,
                         }),
                     },
                     reloc: None,
@@ -1564,8 +1564,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Falu(FaluOp::Float {
-                            rn: *dst as u8,
-                            rx: *src as u8,
+                            rn: *dst as u16,
+                            rx: *src as u16,
                         }),
                     },
                     reloc: None,
@@ -1582,8 +1582,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Falu(FaluOp::Trunc {
-                            rn: *dst as u8,
-                            rx: *src as u8,
+                            rn: *dst as u16,
+                            rx: *src as u16,
                         }),
                     },
                     reloc: None,
@@ -1608,8 +1608,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Falu(FaluOp::Comp {
-                            rx: *lhs as u8,
-                            ry: *rhs as u8,
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
                         }),
                     },
                     reloc: None,
@@ -1623,7 +1623,7 @@ pub fn select_with_name(
                 // alias vregs > 15 onto their low-nibble twins.
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
-                        dest: *dst as u8,
+                        dest: *dst as u16,
                         src: target::ureg_i_pre(target::STACK_PTR),
                     },
                     reloc: None,
@@ -1635,7 +1635,7 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::URegMove {
                         dest: target::ureg_i_pre(target::STACK_PTR),
-                        src: *src as u8,
+                        src: *src as u16,
                     },
                     reloc: None,
                 });
@@ -1647,7 +1647,7 @@ pub fn select_with_name(
                 //   Rn = I7        (UReg transfer)
                 //   Rn = Rn - Ry   (ALU subtract)
                 //   I7 = Rn        (UReg transfer)
-                let tmp = *dst as u8;
+                let tmp = *dst as u16;
 
                 // Rn = I7
                 instrs.push(MachInstr {
@@ -1664,7 +1664,7 @@ pub fn select_with_name(
                         compute: ComputeOp::Alu(AluOp::Sub {
                             rn: tmp,
                             rx: tmp,
-                            ry: *count as u8,
+                            ry: *count as u16,
                         }),
                     },
                     reloc: None,
@@ -1699,7 +1699,7 @@ pub fn select_with_name(
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
                             src_ureg: target::ureg_i_pre(target::FRAME_PTR),
-                            dst_ureg: *dst as u8,
+                            dst_ureg: *dst as u16,
                             compute: None,
                         },
                         reloc: None,
@@ -1717,7 +1717,7 @@ pub fn select_with_name(
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
                             src_ureg: target::ureg_i_pre(target::FRAME_PTR),
-                            dst_ureg: *dst as u8,
+                            dst_ureg: *dst as u16,
                             compute: None,
                         },
                         reloc: None,
@@ -1763,7 +1763,7 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::UregTransfer {
                         src_ureg: target::ureg_i_pre(target::SCRATCH_I),
-                        dst_ureg: *dst as u8,
+                        dst_ureg: *dst as u16,
                         compute: None,
                     },
                     reloc: None,
@@ -1810,7 +1810,7 @@ pub fn select_with_name(
                     instr: Instruction::UregDagMove {
                         pm: false,
                         write: false,
-                        ureg: *dst as u8,
+                        ureg: *dst as u16,
                         i_reg: target::SCRATCH_I,
                         m_reg: 5,
                         cond: target::COND_TRUE,
@@ -1825,8 +1825,8 @@ pub fn select_with_name(
             // Each 64-bit vreg V occupies two physical registers: V (lo) and V+1 (hi).
 
             IrOp::LoadImm64(dst, val) => {
-                let lo = *dst as u8;
-                let hi = (*dst + 1) as u8;
+                let lo = *dst as u16;
+                let hi = (*dst + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
                         ureg: lo,
@@ -1844,10 +1844,10 @@ pub fn select_with_name(
             }
 
             IrOp::Copy64(dst, src) => {
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let src_lo = *src as u8;
-                let src_hi = (*src + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let src_lo = *src as u16;
+                let src_hi = (*src + 1) as u16;
                 instrs.push(MachInstr::compute_pass(dst_lo, src_lo));
                 instrs.push(MachInstr::compute_pass(dst_hi, src_hi));
             }
@@ -1856,12 +1856,12 @@ pub fn select_with_name(
                 // 64-bit add: lo = lhs_lo + rhs_lo, then
                 // hi = lhs_hi + rhs_hi + carry.
                 // SHARC ADD sets the carry flag (AC bit in ASTAT).
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let lhs_lo = *lhs as u8;
-                let lhs_hi = (*lhs + 1) as u8;
-                let rhs_lo = *rhs as u8;
-                let rhs_hi = (*rhs + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let lhs_lo = *lhs as u16;
+                let lhs_hi = (*lhs + 1) as u16;
+                let rhs_lo = *rhs as u16;
+                let rhs_hi = (*rhs + 1) as u16;
                 // dst_lo = lhs_lo + rhs_lo (sets carry)
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
@@ -1891,12 +1891,12 @@ pub fn select_with_name(
             IrOp::Sub64(dst, lhs, rhs) => {
                 // 64-bit subtract: lo = lhs_lo - rhs_lo, then
                 // hi = lhs_hi - rhs_hi - borrow.
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let lhs_lo = *lhs as u8;
-                let lhs_hi = (*lhs + 1) as u8;
-                let rhs_lo = *rhs as u8;
-                let rhs_hi = (*rhs + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let lhs_lo = *lhs as u16;
+                let lhs_hi = (*lhs + 1) as u16;
+                let rhs_lo = *rhs as u16;
+                let rhs_hi = (*rhs + 1) as u16;
                 // dst_lo = lhs_lo - rhs_lo (sets borrow)
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
@@ -1945,12 +1945,12 @@ pub fn select_with_name(
             }
 
             IrOp::BitAnd64(dst, lhs, rhs) => {
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let lhs_lo = *lhs as u8;
-                let lhs_hi = (*lhs + 1) as u8;
-                let rhs_lo = *rhs as u8;
-                let rhs_hi = (*rhs + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let lhs_lo = *lhs as u16;
+                let lhs_hi = (*lhs + 1) as u16;
+                let rhs_lo = *rhs as u16;
+                let rhs_hi = (*rhs + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
@@ -1972,12 +1972,12 @@ pub fn select_with_name(
             }
 
             IrOp::BitOr64(dst, lhs, rhs) => {
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let lhs_lo = *lhs as u8;
-                let lhs_hi = (*lhs + 1) as u8;
-                let rhs_lo = *rhs as u8;
-                let rhs_hi = (*rhs + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let lhs_lo = *lhs as u16;
+                let lhs_hi = (*lhs + 1) as u16;
+                let rhs_lo = *rhs as u16;
+                let rhs_hi = (*rhs + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
@@ -1999,12 +1999,12 @@ pub fn select_with_name(
             }
 
             IrOp::BitXor64(dst, lhs, rhs) => {
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let lhs_lo = *lhs as u8;
-                let lhs_hi = (*lhs + 1) as u8;
-                let rhs_lo = *rhs as u8;
-                let rhs_hi = (*rhs + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let lhs_lo = *lhs as u16;
+                let lhs_hi = (*lhs + 1) as u16;
+                let rhs_lo = *rhs as u16;
+                let rhs_hi = (*rhs + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
@@ -2045,10 +2045,10 @@ pub fn select_with_name(
 
             IrOp::Neg64(dst, src) => {
                 // -x = ~x + 1 for 64-bit.
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let src_lo = *src as u8;
-                let src_hi = (*src + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let src_lo = *src as u16;
+                let src_hi = (*src + 1) as u16;
                 // NOT lo, NOT hi
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
@@ -2091,10 +2091,10 @@ pub fn select_with_name(
             }
 
             IrOp::BitNot64(dst, src) => {
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let src_lo = *src as u8;
-                let src_hi = (*src + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let src_lo = *src as u16;
+                let src_hi = (*src + 1) as u16;
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
@@ -2122,10 +2122,10 @@ pub fn select_with_name(
                 // We compare hi first: if hi != equal, the hi comparison
                 // result determines the outcome. If hi are equal, the lo
                 // comparison determines the outcome.
-                let lhs_hi = (*lhs + 1) as u8;
-                let rhs_hi = (*rhs + 1) as u8;
-                let lhs_lo = *lhs as u8;
-                let rhs_lo = *rhs as u8;
+                let lhs_hi = (*lhs + 1) as u16;
+                let rhs_hi = (*rhs + 1) as u16;
+                let lhs_lo = *lhs as u16;
+                let rhs_lo = *rhs as u16;
                 // Compare hi words.
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
@@ -2162,8 +2162,8 @@ pub fn select_with_name(
             }
 
             IrOp::Load64(dst, base, offset) => {
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
                 // Load lo word at [base + offset].
                 if *base == 0 {
                     // Frame-relative load: use frame access pattern.
@@ -2176,7 +2176,7 @@ pub fn select_with_name(
                     // Transfer address from data register to I4.
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
-                            src_ureg: *base as u8,
+                            src_ureg: *base as u16,
                             dst_ureg: target::ureg_i_pre(target::SCRATCH_I),
                             compute: None,
                         },
@@ -2216,8 +2216,8 @@ pub fn select_with_name(
             }
 
             IrOp::Store64(src, base, offset) => {
-                let src_lo = *src as u8;
-                let src_hi = (*src + 1) as u8;
+                let src_lo = *src as u16;
+                let src_hi = (*src + 1) as u16;
                 if *base == 0 {
                     // Frame-relative store.
                     let frame_offset_lo = -*offset - 1;
@@ -2229,7 +2229,7 @@ pub fn select_with_name(
                     // Transfer address from data register to I4.
                     instrs.push(MachInstr {
                         instr: Instruction::UregTransfer {
-                            src_ureg: *base as u8,
+                            src_ureg: *base as u16,
                             dst_ureg: target::ureg_i_pre(target::SCRATCH_I),
                             compute: None,
                         },
@@ -2268,9 +2268,9 @@ pub fn select_with_name(
 
             IrOp::IntToLongLong(dst, src) => {
                 // Zero-extend: lo = src, hi = 0.
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                instrs.push(MachInstr::compute_pass(dst_lo, *src as u8));
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                instrs.push(MachInstr::compute_pass(dst_lo, *src as u16));
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
                         ureg: dst_hi,
@@ -2282,9 +2282,9 @@ pub fn select_with_name(
 
             IrOp::SExtToLongLong(dst, src) => {
                 // Sign-extend: lo = src, hi = src >> 31 (arithmetic).
-                let dst_lo = *dst as u8;
-                let dst_hi = (*dst + 1) as u8;
-                let src_r = *src as u8;
+                let dst_lo = *dst as u16;
+                let dst_hi = (*dst + 1) as u16;
+                let src_r = *src as u16;
                 instrs.push(MachInstr::compute_pass(dst_lo, src_r));
                 // Load shift amount -31 for arithmetic right shift by 31.
                 // SHARC ASHIFT uses negative values for right shift.
@@ -2311,7 +2311,7 @@ pub fn select_with_name(
 
             IrOp::LongLongToInt(dst, src) => {
                 // Truncate: just take the lo word.
-                instrs.push(MachInstr::compute_pass(*dst as u8, *src as u8));
+                instrs.push(MachInstr::compute_pass(*dst as u16, *src as u16));
             }
         }
     }
@@ -2327,7 +2327,7 @@ pub fn select_with_name(
 /// range (-32..31) of the Type 4 instruction, emit a single instruction.
 /// Otherwise, use a three-instruction sequence: MODIFY I6 to reach the slot,
 /// access at offset 0, then MODIFY I6 back.
-fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: bool) {
+fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u16, write: bool) {
     if (-32..=31).contains(&offset) {
         instrs.push(MachInstr {
             instr: Instruction::ComputeLoadStore {
@@ -2385,7 +2385,7 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u8, write: 
 /// Without the NOP the AG computes the address from the STALE I4, and the
 /// load/store lands at the wrong memory location (typically an instant
 /// hard fault on a read-only or out-of-range address).
-fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u8, dreg: u8, offset: i8, write: bool) {
+fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u16, dreg: u16, offset: i8, write: bool) {
     // Use the bare URegMove form for the R-vreg → I4 transfer
     // instead of UregTransfer-with-compute=None. UregTransfer
     // packs a compute slot into bits[22:0] of the encoded word; when
@@ -2480,12 +2480,12 @@ fn emit_inline_mul_64(
     lhs: u32,
     rhs: u32,
 ) {
-    let dst_lo = dst as u8;
-    let dst_hi = (dst + 1) as u8;
-    let lhs_lo = lhs as u8;
-    let lhs_hi = (lhs + 1) as u8;
-    let rhs_lo = rhs as u8;
-    let rhs_hi = (rhs + 1) as u8;
+    let dst_lo = dst as u16;
+    let dst_hi = (dst + 1) as u16;
+    let lhs_lo = lhs as u16;
+    let lhs_hi = (lhs + 1) as u16;
+    let rhs_lo = rhs as u16;
+    let rhs_hi = (rhs + 1) as u16;
     // Move args into R0 = lhs_lo, R1 = lhs_hi, R2 = rhs_lo, R3 = rhs_hi.
     if lhs_lo != 0 {
         instrs.push(MachInstr::compute_pass(0, lhs_lo));
@@ -2607,11 +2607,11 @@ fn emit_inline_shr_64(
     rhs: u32,
     signed: bool,
 ) {
-    let dst_lo = dst as u8;
-    let dst_hi = (dst + 1) as u8;
-    let lhs_lo = lhs as u8;
-    let lhs_hi = (lhs + 1) as u8;
-    let rhs_lo = rhs as u8;
+    let dst_lo = dst as u16;
+    let dst_hi = (dst + 1) as u16;
+    let lhs_lo = lhs as u16;
+    let lhs_hi = (lhs + 1) as u16;
+    let rhs_lo = rhs as u16;
     // Move args into R0 = lo, R1 = hi, R2 = shift count.
     if lhs_lo != 0 {
         instrs.push(MachInstr::compute_pass(0, lhs_lo));
@@ -2739,11 +2739,11 @@ fn emit_inline_shl_64(
     lhs: u32,
     rhs: u32,
 ) {
-    let dst_lo = dst as u8;
-    let dst_hi = (dst + 1) as u8;
-    let lhs_lo = lhs as u8;
-    let lhs_hi = (lhs + 1) as u8;
-    let rhs_lo = rhs as u8;
+    let dst_lo = dst as u16;
+    let dst_hi = (dst + 1) as u16;
+    let lhs_lo = lhs as u16;
+    let lhs_hi = (lhs + 1) as u16;
+    let rhs_lo = rhs as u16;
     // vreg 0 = lhs_lo, vreg 1 = lhs_hi, vreg 2 = rhs_lo.
     if lhs_lo != 0 {
         instrs.push(MachInstr::compute_pass(0, lhs_lo));
@@ -2828,12 +2828,12 @@ fn emit_runtime_call_64_binop(
     lhs: u32,
     rhs: u32,
 ) {
-    let dst_lo = dst as u8;
-    let dst_hi = (dst + 1) as u8;
-    let lhs_lo = lhs as u8;
-    let lhs_hi = (lhs + 1) as u8;
-    let rhs_lo = rhs as u8;
-    let rhs_hi = (rhs + 1) as u8;
+    let dst_lo = dst as u16;
+    let dst_hi = (dst + 1) as u16;
+    let lhs_lo = lhs as u16;
+    let lhs_hi = (lhs + 1) as u16;
+    let rhs_lo = rhs as u16;
+    let rhs_hi = (rhs + 1) as u16;
     // Move args to R0:R1 (lhs lo:hi), R2:R3 (rhs lo:hi).
     if lhs_lo != 0 {
         instrs.push(MachInstr::compute_pass(0, lhs_lo));
@@ -2900,16 +2900,16 @@ fn emit_runtime_call_32_divmod(
     ctx: &mut CallSiteCtx<'_>,
 ) {
     // Forced-physical arg setup: R4 = lhs, R8 = rhs. Matches the
-    // IrOp::Call lowering's use of `0xC0 | phys` so regalloc pins
+    // IrOp::Call lowering's use of `(0xC000u16 | phys as u16)` so regalloc pins
     // ARG_REGS[0] and ARG_REGS[1] to the correct physical registers
     // across spill and copy-elimination.
     instrs.push(MachInstr::compute_pass(
-        0xC0 | target::ARG_REGS[0],
-        lhs as u8,
+        0xC000u16 | target::ARG_REGS[0] as u16,
+        lhs as u16,
     ));
     instrs.push(MachInstr::compute_pass(
-        0xC0 | target::ARG_REGS[1],
-        rhs as u8,
+        0xC000u16 | target::ARG_REGS[1] as u16,
+        rhs as u16,
     ));
     // CJUMP (DB) to the helper: two delay slots push R2 and the return
     // address, mirroring the ordinary SHARC+ C call.
@@ -2957,7 +2957,7 @@ fn emit_runtime_call_32_divmod(
     ctx.return_labels.push((instrs.len(), ret_label_name));
     // Pick up the result from R0 via the `RETURN_REG_VREG` pinned
     // source so regalloc reads physical R0 after the call.
-    instrs.push(MachInstr::compute_pass(dst as u8, target::RETURN_REG_VREG));
+    instrs.push(MachInstr::compute_pass(dst as u16, target::RETURN_REG_VREG));
 }
 
 /// Map IR condition to SHARC condition code.
