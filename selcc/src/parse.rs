@@ -360,6 +360,98 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Constant-fold `expr` like the free `try_const_eval` but additionally
+    /// resolve bare identifiers that name previously-declared enumerators
+    /// (C99 6.7.2.2: enumeration constants are integer constant
+    /// expressions). Without this, a declaration like `int arr[SZ_TOTAL]`
+    /// where `SZ_TOTAL` is an enum constant would be classified as a VLA
+    /// at parse time, causing the lowering pipeline to use word-stride
+    /// allocation that disagrees with the byte-stride indexing in
+    /// `lower_expr` and corrupts the array's stack region.
+    fn try_const_eval_with_enums(&self, expr: &Expr) -> Option<i64> {
+        if let Expr::Ident(name) = expr {
+            if let Some((_, v)) = self
+                .pending_block_enum_consts
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+            {
+                return Some(*v);
+            }
+            if let Some((_, v)) = self
+                .enum_constants
+                .iter()
+                .rev()
+                .find(|(n, _)| n == name)
+            {
+                return Some(*v);
+            }
+            return None;
+        }
+        match expr {
+            Expr::Unary { op, operand } => {
+                let v = self.try_const_eval_with_enums(operand)?;
+                match op {
+                    UnaryOp::Neg => Some(-v),
+                    UnaryOp::BitNot => Some(!v),
+                    UnaryOp::LogNot => Some(if v == 0 { 1 } else { 0 }),
+                }
+            }
+            Expr::Binary { op, lhs, rhs } => {
+                match op {
+                    BinaryOp::LogAnd => {
+                        let l = self.try_const_eval_with_enums(lhs)?;
+                        if l == 0 {
+                            return Some(0);
+                        }
+                        let r = self.try_const_eval_with_enums(rhs)?;
+                        return Some(if r != 0 { 1 } else { 0 });
+                    }
+                    BinaryOp::LogOr => {
+                        let l = self.try_const_eval_with_enums(lhs)?;
+                        if l != 0 {
+                            return Some(1);
+                        }
+                        let r = self.try_const_eval_with_enums(rhs)?;
+                        return Some(if r != 0 { 1 } else { 0 });
+                    }
+                    _ => {}
+                }
+                let l = self.try_const_eval_with_enums(lhs)?;
+                let r = self.try_const_eval_with_enums(rhs)?;
+                match op {
+                    BinaryOp::Add => Some(l + r),
+                    BinaryOp::Sub => Some(l - r),
+                    BinaryOp::Mul => Some(l * r),
+                    BinaryOp::Div => if r == 0 { None } else { Some(l / r) },
+                    BinaryOp::Mod => if r == 0 { None } else { Some(l % r) },
+                    BinaryOp::BitAnd => Some(l & r),
+                    BinaryOp::BitOr => Some(l | r),
+                    BinaryOp::BitXor => Some(l ^ r),
+                    BinaryOp::Shl => Some(l << r),
+                    BinaryOp::Shr => Some(l >> r),
+                    BinaryOp::Eq => Some(if l == r { 1 } else { 0 }),
+                    BinaryOp::Ne => Some(if l != r { 1 } else { 0 }),
+                    BinaryOp::Lt => Some(if l < r { 1 } else { 0 }),
+                    BinaryOp::Gt => Some(if l > r { 1 } else { 0 }),
+                    BinaryOp::Le => Some(if l <= r { 1 } else { 0 }),
+                    BinaryOp::Ge => Some(if l >= r { 1 } else { 0 }),
+                    BinaryOp::LogAnd | BinaryOp::LogOr => unreachable!(),
+                }
+            }
+            Expr::Ternary { cond, then_expr, else_expr } => {
+                let c = self.try_const_eval_with_enums(cond)?;
+                if c != 0 {
+                    self.try_const_eval_with_enums(then_expr)
+                } else {
+                    self.try_const_eval_with_enums(else_expr)
+                }
+            }
+            Expr::Cast(_, inner) => self.try_const_eval_with_enums(inner),
+            _ => try_const_eval(expr),
+        }
+    }
+
     // ---- Top-level parsing ----
 
     fn parse_translation_unit(&mut self) -> Result<TranslationUnit, Error> {
@@ -1078,7 +1170,7 @@ impl<'a> Parser<'a> {
                 (None, None)
             } else {
                 let expr = self.parse_assign()?;
-                match try_const_eval(&expr) {
+                match self.try_const_eval_with_enums(&expr) {
                     Some(v) => (Some(v as usize), None),
                     None => (None, Some(expr)),
                 }
