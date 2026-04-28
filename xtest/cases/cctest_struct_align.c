@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      char c;
-      int i;
-   } s;
+int test_main(void) {
+  struct { char c; int i; } s;
+  /* &s.i should be aligned to 4 */
+  int offset = (char *)&s.i - (char *)&s;
+  return (offset >= 2) ? 0x55 : 0xAA; /* at least 2 bytes gap for alignment */
+}

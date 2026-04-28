@@ -18,7 +18,7 @@
 int test_main(void)
 {
    double c0 = cos(0.0);
-   double cpi = cos(M_PI);
+   double cpi = cos(3.141592653589793);
    if (fabs(c0 - 1.0) > 1e-5) return 0;
    if (fabs(cpi + 1.0) > 1e-4) return 0;
    return 1;

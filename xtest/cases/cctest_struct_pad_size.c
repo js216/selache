@@ -14,9 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct padded {
-      char a;
-      int b;
-   };
+int test_main(void) {
+  struct padded { char a; int b; };
+  return (sizeof(struct padded) >= 5) ? 0x55 : 0xAA;
+}

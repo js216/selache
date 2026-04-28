@@ -14,11 +14,16 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      unsigned int a : 4;
-      unsigned int b : 4;
-      unsigned int c : 4;
-      unsigned int d : 4;
-   } bf;
+int test_main(void) {
+  struct {
+    unsigned int a : 4;
+    unsigned int b : 4;
+    unsigned int c : 4;
+    unsigned int d : 4;
+  } bf;
+  bf.a = 5;
+  bf.b = 10;
+  bf.c = 3;
+  bf.d = 7;
+  return bf.a * bf.d + bf.b + bf.c; /* 35 + 10 + 3 = 48 = 0x30 */
+}

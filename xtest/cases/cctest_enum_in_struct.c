@@ -14,7 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      enum { E_LO = 1, E_HI = 10 } tag;
+int test_main(void) {
+  struct { enum { E_LO = 1, E_HI = 10 } tag; int val; } s;
+  s.tag = E_HI;
+  s.val = 5;
+  return s.tag + s.val; /* 10+5 = 15 = 0x0F */
+}

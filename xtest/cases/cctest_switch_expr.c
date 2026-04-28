@@ -14,17 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-   s.val = 3;
-   s.val += 2;
-   return s.val; /* 5 */
-}
-
-int test_main(void)
-{
-   int a = 3, b = 4;
-   switch (a + b) {
-      case 7: return 0x55;
-      case 8: return 0xAA;
-      default: return 0;
-   }
+int test_main(void) {
+  int a = 3, b = 4;
+  switch (a + b) {
+  case 7: return 0x55;
+  case 8: return 0xAA;
+  default: return 0;
+  }
 }

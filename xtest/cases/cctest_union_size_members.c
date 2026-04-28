@@ -14,10 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   union {
-      char c;
-      short s;
-      int i;
-   } u;
+int test_main(void) {
+  union { char c; short s; int i; } u;
+  return (sizeof(u) == sizeof(int)) ? 0x55 : 0xAA;
+}

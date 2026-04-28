@@ -14,11 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   return s.a + s.b + s.c;
-}
-
-int test_main(void)
-{
-   const char *s = "hello";
-   return s[1]; /* 'e' */
+int test_main(void) {
+  const char *s = "hello";
+  return s[1]; /* 'e' */
 }

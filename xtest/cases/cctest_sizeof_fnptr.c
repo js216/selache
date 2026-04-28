@@ -14,15 +14,6 @@
 #include <stdio.h>
 #include <string.h>
 
-      int val;
-   } s;
-
-   s.tag = E_HI;
-   s.val = 5;
-   return s.tag + s.val; /* 10+5 = 15 = 0x0F */
-}
-
-int test_main(void)
-{
-   return (int)sizeof(int (*)(int, int)); /* 4 on 32-bit */
+int test_main(void) {
+  return (int)sizeof(int (*)(int, int)); /* 4 on 32-bit */
 }

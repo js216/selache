@@ -14,13 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   int s        = 5; /* 's' the variable, not the tag */
-   struct s obj = {s + 5};
-   return obj.x; /* 10 */
+int test_main(void) {
+  enum e { X };
+  return (int)sizeof(enum e); /* sizeof(int) = 4 */
 }
-
-#define X(name, val) XC_##name = val,
-
-int test_main(void)
-{
-   enum e { X };

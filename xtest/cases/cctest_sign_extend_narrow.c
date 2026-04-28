@@ -14,8 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      signed int val : 8;
-   } s;
+int test_main(void) {
+  struct { signed int val : 8; } s;
+  s.val = -5; /* stored as 8-bit: 0xFB */
+  int wide = s.val; /* sign-extends to -5 */
+  return (wide == -5) ? 0x55 : 0xAA;
+}

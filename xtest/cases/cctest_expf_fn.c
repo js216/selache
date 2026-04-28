@@ -18,7 +18,7 @@
 int test_main(void)
 {
    float e = expf(1.0f);
-   if (fabsf(e - (float)M_E) > 1e-4f) return 0;
+   if (fabsf(e - 2.718281828459045f) > 1e-4f) return 0;
    if (fabsf(expf(0.0f) - 1.0f) > 1e-6f) return 0;
    return 1;
 }

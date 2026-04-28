@@ -14,8 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int x;
-   } s;
+int test_main(void) {
+  struct { int x; } s;
+  s.x = 0x42;
+  return s.x; /* 0x42 */
+}

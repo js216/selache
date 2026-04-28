@@ -2,7 +2,7 @@
 // cctest_tag_name_space.c --- cctest case tag_name_space
 // Copyright (c) 2026 Jakob Kastelic
 
-/* @expect 0x0A */
+/* @expect 0xa */
 
 #include <float.h>
 #include <iso646.h>
@@ -14,8 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct s {
-      int x;
-   };
+int test_main(void) {
+  struct s { int x; };
+  int s = 5; /* 's' the variable, not the tag */
+  struct s obj = { s + 5 };
+  return obj.x; /* 10 */
+}

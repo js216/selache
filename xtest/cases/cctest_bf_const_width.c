@@ -14,10 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 
-#define BF_WIDTH (2 + 3)
 
-int test_main(void)
-{
-   struct {
-      unsigned int x : BF_WIDTH;
-   } bf; /* 5-bit field */
+
+/* Integer constant expression in bitfield width (C99 6.6 + 6.7.2.1) */
+#define BF_WIDTH (2 + 3)
+int test_main(void) {
+  struct { unsigned int x : BF_WIDTH; } bf; /* 5-bit field */
+  bf.x = 31; /* max for 5 bits */
+  return bf.x; /* 31 = 0x1F */
+}

@@ -14,23 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-      union {
-         int ival;
-         float fval;
-      };
-   };
-   struct mixed m;
-   m.kind = 1;
-   m.ival = 0x42;
-   return m.ival;
-}
 
-static int pair_sum(const int *p)
-{
-   return p[0] + p[1];
-}
 
-int test_main(void)
-{
-   return pair_sum((const int[]){10, 20});
+/* Compound literal as function argument (C99 6.5.2.5) */
+static int pair_sum(const int *p) { return p[0] + p[1]; }
+int test_main(void) {
+  return pair_sum((const int[]){10, 20});
 }

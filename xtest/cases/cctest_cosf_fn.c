@@ -18,7 +18,7 @@
 int test_main(void)
 {
    float c0 = cosf(0.0f);
-   float cpi = cosf((float)M_PI);
+   float cpi = cosf(3.141592653589793f);
    if (fabsf(c0 - 1.0f) > 1e-5f) return 0;
    if (fabsf(cpi + 1.0f) > 1e-4f) return 0;
    return 1;

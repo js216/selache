@@ -14,10 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      unsigned int a : 4;
-      unsigned int : 0; /* force alignment to next storage unit */
-      unsigned int b : 4;
-   } bf;
+int test_main(void) {
+  struct {
+    unsigned int a : 4;
+    unsigned int   : 0; /* force alignment to next storage unit */
+    unsigned int b : 4;
+  } bf;
+  bf.a = 0x0A;
+  bf.b = 0x05;
+  return bf.a + bf.b; /* 10+5 = 15 = 0x0F */
+}

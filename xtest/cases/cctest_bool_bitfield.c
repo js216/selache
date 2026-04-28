@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      _Bool a : 1;
-      _Bool b : 1;
-   } bf;
+int test_main(void) {
+  struct { _Bool a : 1; _Bool b : 1; } bf;
+  bf.a = 1;
+  bf.b = 0;
+  return bf.a + bf.b; /* 1+0 = 1 */
+}

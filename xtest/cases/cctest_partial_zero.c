@@ -14,10 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int a;
-      int b;
-      int c;
-   } s = {0};
+int test_main(void) {
+  struct { int a; int b; int c; } s = { 0 };
+  return s.a + s.b + s.c;
+}

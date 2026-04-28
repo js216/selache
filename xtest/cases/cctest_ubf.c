@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      unsigned int x : 4;
-      unsigned int y : 4;
-   } bf;
+int test_main(void) {
+  struct { unsigned int x : 4; unsigned int y : 4; } bf;
+  bf.x = 0xF;
+  bf.y = 0xA;
+  return bf.x + bf.y; /* 15+10 = 25 = 0x19 */
+}

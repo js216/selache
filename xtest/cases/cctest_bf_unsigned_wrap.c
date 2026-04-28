@@ -14,11 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-   return (int)sizeof(enum e); /* sizeof(int) = 4 */
+int test_main(void) {
+  struct { unsigned int v : 3; } s;
+  s.v = 7; /* max for 3-bit */
+  s.v += 1; /* wraps to 0 */
+  return (s.v == 0) ? 0x07 : 0x00;
 }
-
-int test_main(void)
-{
-   struct {
-      unsigned int v : 3;
-   } s;

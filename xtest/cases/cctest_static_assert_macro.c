@@ -18,7 +18,7 @@
 
 int test_main(void)
 {
-   static_assert(sizeof(int) == 4, "int must be 4 bytes");
+   _Static_assert(sizeof(int) == 4, "int must be 4 bytes");
    _Static_assert(CHAR_BIT == 8, "byte is 8 bits");
    return 0x33;
 }

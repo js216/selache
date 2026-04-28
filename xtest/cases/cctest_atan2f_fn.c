@@ -18,8 +18,8 @@
 int test_main(void)
 {
    float a = atan2f(1.0f, 1.0f);
-   if (fabsf(a - (float)M_PI_4) > 1e-4f) return 0;
+   if (fabsf(a - 0.7853981633974483f) > 1e-4f) return 0;
    float b = atan2f(0.0f, -1.0f);
-   if (fabsf(b - (float)M_PI) > 1e-4f) return 0;
+   if (fabsf(b - 3.141592653589793f) > 1e-4f) return 0;
    return 1;
 }

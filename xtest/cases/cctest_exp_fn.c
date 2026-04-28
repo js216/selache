@@ -18,7 +18,7 @@
 int test_main(void)
 {
    double e = exp(1.0);
-   if (fabs(e - M_E) > 1e-4) return 0;
+   if (fabs(e - 2.718281828459045) > 1e-4) return 0;
    if (fabs(exp(0.0) - 1.0) > 1e-6) return 0;
    return 1;
 }

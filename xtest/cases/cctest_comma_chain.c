@@ -14,12 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-   return (int)sizeof(union u); /* sizeof(double)=4 with -double-size-32 */
-}
-
-int test_main(void)
-{
-   int x = 10;
-   int y = (x += 5, x += 5, x);
-   return y; /* 20 */
+int test_main(void) {
+  int x = 10;
+  int y = (x += 5, x += 5, x);
+  return y; /* 20 */
 }

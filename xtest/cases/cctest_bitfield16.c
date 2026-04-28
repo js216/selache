@@ -14,13 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-   bf.val = -1;                       /* 0b11 → sign-extends to -1 */
-   return (bf.val < 0) ? 0xAA : 0xBB; /* 0xAA */
+int test_main(void) {
+  struct { unsigned int lo : 16; unsigned int hi : 16; } bf;
+  bf.lo = 0x1234;
+  bf.hi = 0xABCD;
+  return (int)((bf.hi >> 8) + (bf.lo & 0xFF)); /* 0xAB + 0x34 = 0xDF */
 }
-
-int test_main(void)
-{
-   struct {
-      unsigned int lo : 16;
-      unsigned int hi : 16;
-   } bf;

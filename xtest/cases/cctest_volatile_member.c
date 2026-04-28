@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      volatile int x;
-      int y;
-   } s;
+int test_main(void) {
+  struct { volatile int x; int y; } s;
+  s.x = 0x10;
+  s.y = 0x20;
+  return s.x + s.y; /* 0x30 */
+}

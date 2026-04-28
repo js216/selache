@@ -17,8 +17,9 @@
 
 int test_main(void)
 {
+   static const double PI_2 = 1.5707963267948966;
    double s0 = sin(0.0);
-   double spi2 = sin(M_PI_2);
+   double spi2 = sin(PI_2);
    if (fabs(s0) > 1e-5) return 0;
    if (fabs(spi2 - 1.0) > 1e-4) return 0;
    return 1;

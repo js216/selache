@@ -14,20 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-      struct {
-         unsigned int lo : 16;
-         unsigned int hi : 16;
-      } parts;
-   } u;
-
-   u.raw      = 0;
-   u.parts.lo = 0x1234;
-   u.parts.hi = 0x5678;
-   return (u.raw == 0x56781234u) ? 0x55 : 0xAA;
-}
-
-int test_main(void)
-{
-   volatile int x = 42;
-   return x * 0;
+int test_main(void) {
+  volatile int x = 42;
+  return x * 0;
 }

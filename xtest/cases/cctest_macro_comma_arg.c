@@ -14,13 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-   return ONLY; /* 0x33 */
-}
 
+
+/* Macro argument containing commas -- protected by parens (C99 6.10.3) */
 #define FIRST_ARG(x) (x)
-
-int test_main(void)
-{
-   /* The argument (1, 2, 3) is a single macro arg due to outer parens */
-   return FIRST_ARG((1, 2, 3)); /* comma operator: result is 3 */
+int test_main(void) {
+  /* The argument (1, 2, 3) is a single macro arg due to outer parens */
+  return FIRST_ARG((1, 2, 3)); /* comma operator: result is 3 */
 }

@@ -14,12 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-   s.x = 0x42;
-   return s.x; /* 0x42 */
+int test_main(void) {
+  union { int x; } u;
+  u.x = 0x55;
+  return u.x; /* 0x55 */
 }
-
-int test_main(void)
-{
-   union {
-      int x;
-   } u;

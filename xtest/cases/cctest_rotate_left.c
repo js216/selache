@@ -14,13 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-   return (sizeof(u) == sizeof(int)) ? 0x55 : 0xAA;
-}
-
-int test_main(void)
-{
-   unsigned int x       = 0x12345678u;
-   int n                = 8;
-   unsigned int rotated = (x << n) | (x >> (32 - n));
-   return (rotated == 0x34567812u) ? 0x55 : 0xAA;
+int test_main(void) {
+  unsigned int x = 0x12345678u;
+  int n = 8;
+  unsigned int rotated = (x << n) | (x >> (32 - n));
+  return (rotated == 0x34567812u) ? 0x55 : 0xAA;
 }

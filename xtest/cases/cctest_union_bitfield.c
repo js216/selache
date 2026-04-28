@@ -14,7 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   union {
-      unsigned int raw;
+int test_main(void) {
+  union {
+    unsigned int raw;
+    struct { unsigned int lo : 16; unsigned int hi : 16; } parts;
+  } u;
+  u.raw = 0;
+  u.parts.lo = 0x1234;
+  u.parts.hi = 0x5678;
+  return (u.raw == 0x56781234u) ? 0x55 : 0xAA;
+}

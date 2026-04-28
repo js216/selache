@@ -14,16 +14,14 @@
 #include <stdio.h>
 #include <string.h>
 
-struct rgb {
-   int r;
-   int g;
-   int b;
-};
-
-int test_main(void)
-{
-   struct {
-      unsigned int r : 5;
-      unsigned int g : 6;
-      unsigned int b : 5;
-   } rgb;
+int test_main(void) {
+  struct {
+    unsigned int r : 5;
+    unsigned int g : 6;
+    unsigned int b : 5;
+  } rgb;
+  rgb.r = 31;  /* max 5-bit */
+  rgb.g = 63;  /* max 6-bit */
+  rgb.b = 15;
+  return rgb.r + rgb.g + rgb.b; /* 31+63+15 = 109 = 0x6D */
+}

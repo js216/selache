@@ -14,19 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-   bf.x = 5;
-   bf.y = 3;
-   return bf.x + bf.y; /* 8 */
-}
 
-struct dinit {
-   int a;
-   int b;
-   int c;
-};
 
-int test_main(void)
-{
-   struct dinit s = {.b = 0x20, .c = 0x30};
-   return s.a + s.b + s.c; /* 0 + 0x20 + 0x30 = 0x50 */
+/* Designated initializer for structs (C99 6.7.8) */
+struct dinit { int a; int b; int c; };
+int test_main(void) {
+  struct dinit s = { .b = 0x20, .c = 0x30 };
+  return s.a + s.b + s.c; /* 0 + 0x20 + 0x30 = 0x50 */
 }

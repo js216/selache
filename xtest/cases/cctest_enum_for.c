@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   enum { START = 0, END = 3 };
+int test_main(void) {
+  enum { START = 0, END = 3 };
+  int sum = 0;
+  for (int i = START; i <= END; i++) sum += i;
+  return sum; /* 0+1+2+3 = 6 */
+}

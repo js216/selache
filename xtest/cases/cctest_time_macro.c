@@ -14,13 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   s.x = 0x0A;
-   s.y = 0x05;
-   return s.x + s.y; /* 10+5 = 15 = 0x0F */
-}
-
-int test_main(void)
-{
-   const char *t = __TIME__;
-   return (t[0] != '\0') ? 1 : 0; /* 1 */
+int test_main(void) {
+  const char *t = __TIME__;
+  return (t[0] != '\0') ? 1 : 0; /* 1 */
 }

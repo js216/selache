@@ -14,17 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-   bf.a = 1;
-   bf.b = 0;
-   return bf.a + bf.b; /* 1+0 = 1 */
-}
 
-static int empty_params_fn()
-{
-   return 0x33;
-}
 
-int test_main(void)
-{
-   return empty_params_fn(); /* 0x33 */
+/* Empty parameter list f() accepts any args (C99 6.7.5.3) */
+static int empty_params_fn() { return 0x33; }
+int test_main(void) {
+  return empty_params_fn(); /* 0x33 */
 }

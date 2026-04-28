@@ -14,12 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   /* s.x cannot be modified after init */
-   return s.x + s.y; /* 0x30 */
-}
-
-int test_main(void)
-{
-   long val = *(long *)(int[]){0x55};
-   return (int)val; /* 0x55 */
+int test_main(void) {
+  long val = *(long *)(int []){0x55};
+  return (int)val; /* 0x55 */
 }

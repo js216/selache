@@ -14,17 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-   /* &s.i should be aligned to 4 */
-   int offset = (char *)&s.i - (char *)&s;
-   return (offset >= 2) ? 0x55 : 0xAA; /* at least 2 bytes gap for alignment */
-}
 
-static int unspec_params()
-{
-   return 0x42;
-}
 
-int test_main(void)
-{
-   return unspec_params();
+/* Empty parameter list means unspecified args in C99 (C99 6.7.5.3 p14) */
+static int unspec_params() { return 0x42; }
+int test_main(void) {
+  return unspec_params();
 }

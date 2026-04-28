@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   int arr[5] = {0};
+int test_main(void) {
+  int arr[5] = {0};
+  struct { int a; int b; int c; } s = {0};
+  return arr[0] + arr[4] + s.a + s.b + s.c; /* all zero = 0 */
+}

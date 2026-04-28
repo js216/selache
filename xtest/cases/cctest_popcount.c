@@ -14,16 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 
-   return s.a + s.b + s.c; /* 30 = 0x1E */
-}
-
-int test_main(void)
-{
-   unsigned int x = 0xFFFF0000u; /* 16 one-bits */
-   int count      = 0;
-   while (x) {
-      count += x & 1;
-      x >>= 1;
-   }
-   return count; /* 16 = 0x10 */
+int test_main(void) {
+  unsigned int x = 0xFFFF0000u; /* 16 one-bits */
+  int count = 0;
+  while (x) {
+    count += x & 1;
+    x >>= 1;
+  }
+  return count; /* 16 = 0x10 */
 }

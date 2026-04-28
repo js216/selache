@@ -14,8 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int idx;
-   } s;
+int test_main(void) {
+  struct { int idx; } s;
+  int arr[5];
+  arr[0] = 10; arr[1] = 20; arr[2] = 30; arr[3] = 40; arr[4] = 50;
+  s.idx = 3;
+  return arr[s.idx]; /* arr[3] = 40 = 0x28 */
+}

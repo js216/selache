@@ -14,8 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-enum seq { SEQ_A = 5, SEQ_B = SEQ_A + 3, SEQ_C = SEQ_B * 2 };
-
-int test_main(void)
-{
-   enum seq { A, B, C, D };
+int test_main(void) {
+  enum seq { A, B, C, D };
+  return A + B + C + D; /* 0+1+2+3=6 */
+}

@@ -14,9 +14,15 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int s : 8;
-      unsigned int u : 8;
-   } bf;
+int test_main(void) {
+  struct {
+    int s : 8;
+    unsigned int u : 8;
+  } bf;
+  bf.s = -1;     /* sign-extended: all ones in 8-bit field */
+  bf.u = 255;    /* 0xFF */
+  int r = 0;
+  if (bf.s == -1)   r += 1;
+  if (bf.u == 255)  r += 2;
+  return r; /* 1+2 = 3 */
+}

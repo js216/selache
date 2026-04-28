@@ -21,7 +21,7 @@ int test_main(void)
     * typically clobber bytes; memmove must produce the correct
     * post-state {'A','A','B','C','D','E','F'}. */
    char buf[8] = "ABCDEF";  /* buf[6] = '\0', buf[7] = '\0' */
-   memmove(buf + 1, buf, 5);
+   memmove(buf + 1, buf, 6);
 
    /* Verify the full shifted region: A A B C D E F. */
    if (buf[0] != 'A') return 0;

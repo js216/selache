@@ -14,10 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      char a;
-      int b;
-      char c;
-   } s;
+int test_main(void) {
+  struct { char a; int b; char c; } s;
+  s.a = 1;
+  s.b = 100;
+  s.c = 2;
+  /* Verify values survive padding */
+  return s.a + s.b + s.c; /* 103 = 0x67 */
+}

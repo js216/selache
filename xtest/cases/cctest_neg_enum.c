@@ -14,14 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-   bf.x = 0xF;
-   bf.y = 0xA;
-   return bf.x + bf.y; /* 15+10 = 25 = 0x19 */
-}
 
+
+/* Negative enum values (C99 6.7.2.2) */
 enum signed_enum { NEG2 = -2, NEG1, ZERO, POS1 };
-
-int test_main(void)
-{
-   return ZERO - NEG2 + POS1; /* 0-(-2)+1 = 3 */
+int test_main(void) {
+  return ZERO - NEG2 + POS1; /* 0-(-2)+1 = 3 */
 }

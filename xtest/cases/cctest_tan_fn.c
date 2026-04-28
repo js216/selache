@@ -17,8 +17,9 @@
 
 int test_main(void)
 {
+   static const double PI_4 = 0.7853981633974483;
    double t0 = tan(0.0);
-   double tp4 = tan(M_PI_4);
+   double tp4 = tan(PI_4);
    if (fabs(t0) > 1e-5) return 0;
    if (fabs(tp4 - 1.0) > 1e-3) return 0;
    return 1;

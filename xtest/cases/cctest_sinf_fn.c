@@ -17,8 +17,9 @@
 
 int test_main(void)
 {
+   static const float PI_2 = 1.5707963267948966f;
    float s0 = sinf(0.0f);
-   float spi2 = sinf((float)M_PI_2);
+   float spi2 = sinf(PI_2);
    if (fabsf(s0) > 1e-5f) return 0;
    if (fabsf(spi2 - 1.0f) > 1e-4f) return 0;
    return 1;

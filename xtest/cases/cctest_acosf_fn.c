@@ -17,8 +17,9 @@
 
 int test_main(void)
 {
+   static const float PI_2 = 1.5707963267948966f;
    float a = acosf(1.0f);
    if (fabsf(a) > 1e-5f) return 0;
-   if (fabsf(acosf(0.0f) - (float)M_PI_2) > 1e-4f) return 0;
+   if (fabsf(acosf(0.0f) - PI_2) > 1e-4f) return 0;
    return 1;
 }

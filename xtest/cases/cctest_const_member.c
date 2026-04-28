@@ -14,15 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-   for (int i = 0; i < 32; i++)
-      big.data[i] = i;
-   return big.data[0] + big.data[15] + big.data[31];
-   /* 0 + 15 + 31 = 46 = 0x2E */
+int test_main(void) {
+  struct { const int x; int y; } s = { 0x10, 0x20 };
+  /* s.x cannot be modified after init */
+  return s.x + s.y; /* 0x30 */
 }
-
-int test_main(void)
-{
-   struct {
-      const int x;
-      int y;
-   } s = {0x10, 0x20};

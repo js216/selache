@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   union {
-      unsigned int u;
-      unsigned char b[4];
-   } u;
+int test_main(void) {
+  union { unsigned int u; unsigned char b[4]; } u;
+  u.u = 0x44332211;
+  /* SHARC is little-endian for -char-size-8 */
+  return u.b[0] + u.b[3]; /* 0x11 + 0x44 = 0x55 */
+}

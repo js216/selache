@@ -14,11 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   int arr[4] = {
-       10,
-       20,
-       30,
-       40,
-   };
+int test_main(void) {
+  int arr[4] = {10, 20, 30, 40,};
+  struct { int x; int y; } s = {5, 15,};
+  return arr[3] + s.y; /* 40 + 15 = 55 = 0x37 */
+}

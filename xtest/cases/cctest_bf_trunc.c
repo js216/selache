@@ -14,8 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      unsigned int x : 4;
-   } bf;
+int test_main(void) {
+  struct { unsigned int x : 4; } bf;
+  bf.x = 0xFF; /* only low 4 bits stored */
+  return bf.x; /* 15 = 0x0F */
+}

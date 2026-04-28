@@ -17,7 +17,7 @@
 
 int test_main(void)
 {
-   double l = log(M_E);
+   double l = log(2.718281828459045);
    if (fabs(l - 1.0) > 1e-4) return 0;
    if (fabs(log(1.0)) > 1e-6) return 0;
    return 1;

@@ -17,7 +17,8 @@
 
 int test_main(void)
 {
+   static const double PI_4 = 0.7853981633974483;
    double a = atan(1.0);
-   if (fabs(a - M_PI_4) > 1e-4) return 0;
+   if (fabs(a - PI_4) > 1e-4) return 0;
    return 1;
 }

@@ -14,23 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 
-   s.a = 1;
-   s.b = 100;
-   s.c = 2;
-   /* Verify values survive padding */
-   return s.a + s.b + s.c; /* 103 = 0x67 */
-}
 
-struct s2 {
-   int a;
-   int b;
-};
 
+/* Stringify (#) with special characters (C99 6.10.3.2) */
 #define STR_SPECIAL(x) #x
-
-int test_main(void)
-{
-   const char *s1 = STR_SPECIAL(a + b);  /* "a+b" */
-   const char *s2 = STR_SPECIAL(x == y); /* "x==y" */
-   return s1[1] + s2[1];                 /* '+' + '=' = 43 + 61 = 104 = 0x68 */
+int test_main(void) {
+  const char *s1 = STR_SPECIAL(a+b);   /* "a+b" */
+  const char *s2 = STR_SPECIAL(x==y);  /* "x==y" */
+  return s1[1] + s2[1]; /* '+' + '=' = 43 + 61 = 104 = 0x68 */
 }

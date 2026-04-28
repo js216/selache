@@ -14,9 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int hdr;
-      char data[12];
-   } s;
+int test_main(void) {
+  struct { int hdr; char data[12]; } s;
+  /* sizeof should be at least 4 + 12 = 16 */
+  return (sizeof(s) >= 16) ? 0x55 : 0xAA;
+}

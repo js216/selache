@@ -17,7 +17,7 @@
 
 int test_main(void)
 {
-   float l = logf((float)M_E);
+   float l = logf(2.718281828459045f);
    if (fabsf(l - 1.0f) > 1e-4f) return 0;
    if (fabsf(logf(1.0f)) > 1e-6f) return 0;
    return 1;

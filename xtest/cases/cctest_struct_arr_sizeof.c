@@ -14,9 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct sa {
-      int a;
-      int b[5];
-   };
+int test_main(void) {
+  struct sa { int a; int b[5]; };
+  return (int)sizeof(struct sa); /* 4+20=24 */
+}

@@ -14,14 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-   return s.a + s.b + s.c; /* 10+0+0 = 10 */
-}
 
+
+/* Global array dimension from enum constant (C99 6.6 + 6.7.2.2) */
 enum { DIM_VAL = 4 };
-
 static int g_enum_dim[DIM_VAL];
-
-int test_main(void)
-{
-   return (int)sizeof(g_enum_dim); /* 4 * 4 = 16 */
+int test_main(void) {
+  return (int)sizeof(g_enum_dim); /* 4 * 4 = 16 */
 }

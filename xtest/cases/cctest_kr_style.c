@@ -14,22 +14,15 @@
 #include <stdio.h>
 #include <string.h>
 
-   s.arr[0] = 5;
-   s.arr[1] = 10;
-   s.arr[2] = 15;
-   s.ptr    = &s.arr[1];
-   s.val    = 20;
-   return s.arr[0] + *s.ptr + s.arr[2] + s.val; /* 5+10+15+20 = 50 = 0x32 */
-}
 
+
+/* K&R old-style function definition (C99 6.9.1 p13, "obsolescent") */
 static int kr_add(a, b)
-int a;
-int b;
+  int a;
+  int b;
 {
-   return a + b;
+  return a + b;
 }
-
-int test_main(void)
-{
-   return kr_add(0x10, 0x20); /* 0x30 */
+int test_main(void) {
+  return kr_add(0x10, 0x20); /* 0x30 */
 }

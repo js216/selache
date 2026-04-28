@@ -17,7 +17,8 @@
 
 int test_main(void)
 {
+   static const double PI_2 = 1.5707963267948966;
    double a = acos(0.0);
-   if (fabs(a - M_PI_2) > 1e-4) return 0;
+   if (fabs(a - PI_2) > 1e-4) return 0;
    return 1;
 }

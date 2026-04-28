@@ -14,8 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      unsigned int val : 4;
-   } s;
+int test_main(void) {
+  struct { unsigned int val : 4; } s;
+  s.val = 3;
+  s.val += 2;
+  return s.val; /* 5 */
+}

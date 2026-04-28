@@ -14,28 +14,16 @@
 #include <stdio.h>
 #include <string.h>
 
-   bf.a = 0x0A;
-   bf.b = 0x05;
-   return bf.a + bf.b; /* 10+5 = 15 = 0x0F */
-}
 
+
+/* Forward-declared struct used as pointer before definition (C99 6.7.2.3) */
 struct fwd_node;
 static int fwd_val(struct fwd_node *p);
-
-struct fwd_node {
-   int val;
-   struct fwd_node *next;
-};
-
-static int fwd_val(struct fwd_node *p)
-{
-   return p->val;
-}
-
-int test_main(void)
-{
-   struct fwd_node n;
-   n.val  = 0x44;
-   n.next = 0;
-   return fwd_val(&n); /* 0x44 */
+struct fwd_node { int val; struct fwd_node *next; };
+static int fwd_val(struct fwd_node *p) { return p->val; }
+int test_main(void) {
+  struct fwd_node n;
+  n.val = 0x44;
+  n.next = 0;
+  return fwd_val(&n); /* 0x44 */
 }

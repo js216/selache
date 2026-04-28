@@ -14,15 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   bf.a = 5;
-   bf.b = 10;
-   bf.c = 3;
-   bf.d = 7;
-   return bf.a * bf.d + bf.b + bf.c; /* 35 + 10 + 3 = 48 = 0x30 */
-}
-
-int test_main(void)
-{
-   int *p = 0;
-   return (int)sizeof(*p); /* sizeof(int) = 4, *p is NOT evaluated */
+int test_main(void) {
+  int *p = 0;
+  return (int)sizeof(*p); /* sizeof(int) = 4, *p is NOT evaluated */
 }

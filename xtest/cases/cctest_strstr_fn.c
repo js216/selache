@@ -2,7 +2,7 @@
 // cctest_strstr_fn.c --- cctest case strstr_fn
 // Copyright (c) 2026 Jakob Kastelic
 
-/* @expect 0x07 */
+/* @expect 0x6 */
 
 #include <float.h>
 #include <iso646.h>

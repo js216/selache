@@ -14,22 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-   int x = VAL_A;
-   switch (x) {
-      case VAL_A: return 10;
-      case VAL_B: return 20;
-      case VAL_C: return 30;
-      default: return 0;
-   }
-}
 
-static int ptr_size(int *p)
-{
-   return (int)sizeof(p);
-}
 
-int test_main(void)
-{
-   int arr[100];
-   return ptr_size(arr); /* sizeof(int*) = 4, not sizeof(arr) */
+/* Array passed to function decays to pointer: sizeof in callee (C99 6.3.2.1 p3) */
+static int ptr_size(int *p) { return (int)sizeof(p); }
+int test_main(void) {
+  int arr[100];
+  return ptr_size(arr); /* sizeof(int*) = 4, not sizeof(arr) */
 }

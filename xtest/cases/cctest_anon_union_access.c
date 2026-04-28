@@ -14,24 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
-      struct {
-         int x;
-         int y;
-      };
-   };
-   struct outer o;
-   o.tag = 0;
-   o.x   = 10;
-   o.y   = 20;
-   return o.x + o.y;
+int test_main(void) {
+  struct mixed {
+    int kind;
+    union { int ival; float fval; };
+  };
+  struct mixed m;
+  m.kind = 1;
+  m.ival = 0x42;
+  return m.ival;
 }
-
-union ival {
-   int i;
-   float f;
-};
-
-int test_main(void)
-{
-   struct mixed {
-      int kind;

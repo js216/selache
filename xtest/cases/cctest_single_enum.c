@@ -14,10 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   u.x = 0x55;
-   return u.x; /* 0x55 */
+int test_main(void) {
+  enum { ONLY = 0x33 };
+  return ONLY; /* 0x33 */
 }
-
-int test_main(void)
-{
-   enum { ONLY = 0x33 };

@@ -14,10 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int arr[3];
-      int *ptr;
-      int val;
-   } s;
+int test_main(void) {
+  struct { int arr[3]; int *ptr; int val; } s;
+  s.arr[0] = 5; s.arr[1] = 10; s.arr[2] = 15;
+  s.ptr = &s.arr[1];
+  s.val = 20;
+  return s.arr[0] + *s.ptr + s.arr[2] + s.val; /* 5+10+15+20 = 50 = 0x32 */
+}

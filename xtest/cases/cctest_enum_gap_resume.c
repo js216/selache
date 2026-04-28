@@ -14,9 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
-   return A + B + C + D; /* 0+1+2+3=6 */
+int test_main(void) {
+  enum e_gap2 { P2 = 3, Q2, R2 = 10 };
+  return Q2 + R2 - P2; /* 4+10-3 = 11 */
 }
-
-int test_main(void)
-{
-   enum e_gap2 { P2 = 3, Q2, R2 = 10 };

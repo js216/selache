@@ -14,9 +14,11 @@
 #include <stdio.h>
 #include <string.h>
 
-static int fwd_static(int x);
 
-int test_main(void)
-{
-   return fwd_static(0x30); /* 0x31 */
+
+/* Static function forward declaration (C99 6.7.1) */
+static int fwd_static(int x);
+int test_main(void) {
+  return fwd_static(0x30); /* 0x31 */
 }
+static int fwd_static(int x) { return x + 1; }

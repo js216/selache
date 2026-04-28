@@ -14,8 +14,8 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int val : 2;
-   } bf;
+int test_main(void) {
+  struct { int val : 2; } bf;
+  bf.val = -1; /* 0b11 → sign-extends to -1 */
+  return (bf.val < 0) ? 0xAA : 0xBB; /* 0xAA */
+}

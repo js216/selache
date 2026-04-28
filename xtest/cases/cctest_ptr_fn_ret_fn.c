@@ -13,33 +13,23 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
+#include <complex.h>
+#include <stdlib.h>
+#include <ctype.h>
 
-   bf.val = 0xDEADBEEF;
-   return (int)((bf.val >> 16) & 0xFF); /* 0xAD = 173 */
-}
 
-static int helper_mul(int a, int b)
-{
-   return a * b;
-}
 
-static int fn_ret_add(int a, int b)
-{
-   return a + b;
-}
-
+/* Pointer to function returning function pointer (C99 6.7.5.3) */
+static int fn_ret_add(int a, int b) { return a + b; }
+static int helper_mul(int a, int b) { return a * b; }
 typedef int (*binop_t)(int, int);
-
-static binop_t get_binop(int which)
-{
-   if (which == 0)
-      return fn_ret_add;
-   return helper_mul;
+static binop_t get_binop(int which) {
+  if (which == 0) return fn_ret_add;
+  return helper_mul;
 }
-
-int test_main(void)
-{
-   binop_t (*getter)(int) = get_binop;
-   binop_t op             = getter(0);
-   return op(0x10, 0x20); /* 0x30 */
+int test_main(void) {
+  binop_t (*getter)(int) = get_binop;
+  binop_t op = getter(0);
+  return op(0x10, 0x20); /* 0x30 */
 }

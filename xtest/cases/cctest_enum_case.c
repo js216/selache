@@ -14,6 +14,13 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   enum { VAL_A = 10, VAL_B = 20, VAL_C = 30 };
+int test_main(void) {
+  enum { VAL_A = 10, VAL_B = 20, VAL_C = 30 };
+  int x = VAL_A;
+  switch (x) {
+  case VAL_A: return 10;
+  case VAL_B: return 20;
+  case VAL_C: return 30;
+  default: return 0;
+  }
+}

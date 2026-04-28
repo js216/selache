@@ -14,6 +14,10 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   enum { EA = 10, EB = 20 };
+int test_main(void) {
+  enum { EA = 10, EB = 20 };
+  int x = EA + 5;       /* enum + int → int */
+  int y = EB * 2;       /* enum * int → int */
+  int z = EA < EB;      /* enum < enum → int (1) */
+  return x + y + z; /* 15 + 40 + 1 = 56 = 0x38 */
+}

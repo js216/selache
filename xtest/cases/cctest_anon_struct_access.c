@@ -14,19 +14,14 @@
 #include <stdio.h>
 #include <string.h>
 
-   return (sizeof(struct padded) >= 5) ? 0x55 : 0xAA;
+int test_main(void) {
+  struct outer {
+    int tag;
+    struct { int x; int y; };
+  };
+  struct outer o;
+  o.tag = 0;
+  o.x = 10;
+  o.y = 20;
+  return o.x + o.y;
 }
-
-struct inner {
-   int val;
-};
-
-struct outer {
-   struct inner a;
-   int b;
-};
-
-int test_main(void)
-{
-   struct outer {
-      int tag;

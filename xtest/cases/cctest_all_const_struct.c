@@ -21,3 +21,5 @@ int test_main(void)
       const int b;
       const int c;
    } s = {5, 10, 15};
+   return s.a + s.b + s.c; /* 30 = 0x1E */
+}

@@ -17,8 +17,9 @@
 
 int test_main(void)
 {
+   static const float PI_4 = 0.7853981633974483f;
    float t0 = tanf(0.0f);
-   float tp4 = tanf((float)M_PI_4);
+   float tp4 = tanf(PI_4);
    if (fabsf(t0) > 1e-5f) return 0;
    if (fabsf(tp4 - 1.0f) > 1e-3f) return 0;
    return 1;

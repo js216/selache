@@ -14,9 +14,9 @@
 #include <stdio.h>
 #include <string.h>
 
-int test_main(void)
-{
-   struct {
-      int x : 4;
-      int y : 4;
-   } bf;
+int test_main(void) {
+  struct { int x : 4; int y : 4; } bf;
+  bf.x = 5;
+  bf.y = 3;
+  return bf.x + bf.y; /* 8 */
+}
