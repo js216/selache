@@ -1929,19 +1929,47 @@ pub fn select_with_name(
             }
 
             IrOp::Div64(dst, lhs, rhs) => {
-                emit_runtime_call_64_binop(&mut instrs, "___div64", *dst, *lhs, *rhs);
+                let mut ctx = CallSiteCtx {
+                    func_name,
+                    counter: &mut call_site_counter,
+                    return_labels: &mut call_return_labels,
+                };
+                emit_runtime_call_64_divmod(
+                    &mut instrs, "___div64", *dst, *lhs, *rhs, &mut ctx,
+                );
             }
 
             IrOp::UDiv64(dst, lhs, rhs) => {
-                emit_runtime_call_64_binop(&mut instrs, "___udiv64", *dst, *lhs, *rhs);
+                let mut ctx = CallSiteCtx {
+                    func_name,
+                    counter: &mut call_site_counter,
+                    return_labels: &mut call_return_labels,
+                };
+                emit_runtime_call_64_divmod(
+                    &mut instrs, "___udiv64", *dst, *lhs, *rhs, &mut ctx,
+                );
             }
 
             IrOp::Mod64(dst, lhs, rhs) => {
-                emit_runtime_call_64_binop(&mut instrs, "___mod64", *dst, *lhs, *rhs);
+                let mut ctx = CallSiteCtx {
+                    func_name,
+                    counter: &mut call_site_counter,
+                    return_labels: &mut call_return_labels,
+                };
+                emit_runtime_call_64_divmod(
+                    &mut instrs, "___mod64", *dst, *lhs, *rhs, &mut ctx,
+                );
             }
 
             IrOp::UMod64(dst, lhs, rhs) => {
-                emit_runtime_call_64_binop(&mut instrs, "___umod64", *dst, *lhs, *rhs);
+                let mut ctx = CallSiteCtx {
+                    func_name,
+                    counter: &mut call_site_counter,
+                    return_labels: &mut call_return_labels,
+                };
+                emit_runtime_call_64_divmod(
+                    &mut instrs, "___umod64", *dst, *lhs, *rhs, &mut ctx,
+                );
             }
 
             IrOp::BitAnd64(dst, lhs, rhs) => {
@@ -2828,57 +2856,94 @@ fn emit_inline_shl_64(
     }
 }
 
-/// Emit a runtime call for a 64-bit binary operation that cannot be
-/// synthesized inline (multiply, divide, modulo, shifts).  The calling
-/// convention places lhs in R0:R1 (lo:hi) and rhs in R2:R3 (lo:hi).
-/// The result is returned in R0:R1.  After the call, the result is
-/// copied to the destination vreg pair.
-fn emit_runtime_call_64_binop(
+/// Emit a CJUMP-based call to a 64-bit divmod runtime wrapper
+/// (`___div64.`, `___udiv64.`, `___mod64.`, or `___umod64.`).
+///
+/// The 64-bit wrappers in libsel/src/support/runtime.s use a CJUMP-style
+/// ABI symmetric with the 32-bit wrappers:
+///
+///   In:  R4:R5 = dividend lo:hi,  R8:R9 = divisor lo:hi
+///   Out: R0:R1 = result   lo:hi
+///
+/// R2 must not be used to pass arguments because the CJUMP delay slot's
+/// `DM(I7,M7) = R2` push spills the *caller's* R2 (the wrapper saves the
+/// caller's value, not an argument), and the SHARC+ ABI also reserves R2
+/// as the frame-link spill slot. Pinning args to R4/R5/R8/R9 avoids that.
+///
+/// As with the 32-bit divmod, CJUMP is required (not a raw `CALL`) so
+/// regalloc spills caller-saved registers across the call and lays down
+/// the two delay-slot pushes (`R2`, return address) the helper's
+/// `I12 = DM(M7,I6); JUMP (M14,I12) (DB); RFRAME` epilogue needs.
+fn emit_runtime_call_64_divmod(
     instrs: &mut Vec<MachInstr>,
     name: &str,
     dst: u32,
     lhs: u32,
     rhs: u32,
+    ctx: &mut CallSiteCtx<'_>,
 ) {
-    let dst_lo = dst as u16;
-    let dst_hi = (dst + 1) as u16;
-    let lhs_lo = lhs as u16;
-    let lhs_hi = (lhs + 1) as u16;
-    let rhs_lo = rhs as u16;
-    let rhs_hi = (rhs + 1) as u16;
-    // Move args to R0:R1 (lhs lo:hi), R2:R3 (rhs lo:hi).
-    if lhs_lo != 0 {
-        instrs.push(MachInstr::compute_pass(0, lhs_lo));
-    }
-    if lhs_hi != 1 {
-        instrs.push(MachInstr::compute_pass(1, lhs_hi));
-    }
-    if rhs_lo != 2 {
-        instrs.push(MachInstr::compute_pass(2, rhs_lo));
-    }
-    if rhs_hi != 3 {
-        instrs.push(MachInstr::compute_pass(3, rhs_hi));
-    }
-    // Emit a CALL to the runtime helper (resolved by linker).
+    // Forced-physical arg setup: R4 = lhs_lo, R5 = lhs_hi,
+    // R8 = rhs_lo, R9 = rhs_hi. The `0xC000u16 | phys` tag (==
+    // UREG_FIXED_TAG | phys) tells regalloc to pin these copies to the
+    // listed physical registers across spill and copy-elimination.
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 4u16, lhs as u16));
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 5u16, (lhs + 1) as u16));
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 8u16, rhs as u16));
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 9u16, (rhs + 1) as u16));
+    // CJUMP (DB) to the helper.
     instrs.push(MachInstr {
-        instr: Instruction::Branch {
-            call: true,
-            cond: target::COND_TRUE,
-            delayed: false,
-            target: BranchTarget::Absolute(0),
+        instr: Instruction::CJump {
+            addr: 0,
+            delayed: true,
         },
         reloc: Some(Reloc {
             symbol: name.to_string(),
             kind: RelocKind::Addr24,
         }),
     });
-    // Copy result from R0:R1 to destination.
-    if dst_lo != 0 {
-        instrs.push(MachInstr::compute_pass(dst_lo, 0));
-    }
-    if dst_hi != 1 {
-        instrs.push(MachInstr::compute_pass(dst_hi, 1));
-    }
+    // Delay slot 1: DM(I7, M7) = R2 (push caller's R2).
+    instrs.push(MachInstr {
+        instr: Instruction::UregDagMove {
+            pm: false,
+            write: true,
+            ureg: target::UREG_FIXED_TAG | target::ureg_r(2),
+            i_reg: target::STACK_PTR,
+            m_reg: 7,
+            cond: target::COND_TRUE,
+            compute: None,
+            post_modify: true,
+        },
+        reloc: None,
+    });
+    // Delay slot 2: DM(I7, M7) = return_label (push PC).
+    let ret_label_name = format!(
+        ".L_ret_{}_{name}_{counter}",
+        ctx.func_name,
+        counter = *ctx.counter,
+    );
+    *ctx.counter += 1;
+    instrs.push(MachInstr {
+        instr: Instruction::ImmStore {
+            pm: false,
+            i_reg: target::STACK_PTR,
+            m_reg: 7,
+            value: 0,
+        },
+        reloc: Some(Reloc {
+            symbol: ret_label_name.clone(),
+            kind: RelocKind::Addr24,
+        }),
+    });
+    ctx.return_labels.push((instrs.len(), ret_label_name));
+    // Copy result from R0:R1 to destination via the pinned
+    // RETURN_REG_VREG / RETURN_REG_HI_VREG so regalloc reads the
+    // physical R0/R1 the wrapper left the result in, even when the
+    // dst vreg id happens to equal 0 or 1.
+    instrs.push(MachInstr::compute_pass(dst as u16, target::RETURN_REG_VREG));
+    instrs.push(MachInstr::compute_pass(
+        (dst + 1) as u16,
+        target::RETURN_REG_HI_VREG,
+    ));
 }
 
 /// Caller-provided bookkeeping threaded into every runtime-helper

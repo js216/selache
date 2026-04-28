@@ -392,74 +392,106 @@ ___shl64.:
 .___shl64..end:
       .type ___shl64.,STT_FUNC;
 
+// ===== 64-bit divide/modulo wrappers (selcc CJUMP ABI) ===============
+// These four wrappers are the entry points selcc emits for `long long`
+// `/` and `%`. The ABI mirrors the 32-bit divmod wrappers above:
+//
+//   In:  R4:R5 = dividend lo:hi,  R8:R9 = divisor lo:hi
+//   Out: R0:R1 = result    lo:hi   (quotient or remainder)
+//
+// They are entered via CJUMP (selcc pushes the caller's R2 and the
+// return PC in the two CJUMP delay slots). Internally each wrapper
+// CJUMPs to `__divrem_[us]64.` (which uses R12:R13 for dividend and
+// R14:R15 for divisor and returns quotient in R12:R13 / remainder in
+// R14:R15) and then moves the wanted half into R0:R1 before returning
+// via the standard `JUMP (M14,I12) (DB); RFRAME` epilogue.
+//
+// Picking R4/R5/R8/R9 for the inputs (instead of R0:R1/R2:R3) avoids
+// the R2 collision that otherwise destroys an input: the CJUMP delay
+// slot's `DM(I7,M7) = R2` push spills the *caller's* R2 as the
+// frame-link slot, so any argument passed in R2 would be silently
+// reinterpreted as the saved frame link by the wrapper's epilogue.
+
 // ___div64 -- signed 64-bit division for selcc
-//   In:  R0:R1 = dividend lo:hi, R2:R3 = divisor lo:hi
-//   Out: R0:R1 = quotient lo:hi
       .GLOBAL ___div64.;
 ___div64.:
       // Move to __divrem_s64 ABI: R12:R13 = dividend, R14:R15 = divisor
-      R12 = R0;
-      R13 = R1;
-      R14 = R2;
-      R15 = R3;
+      R12 = R4;
+      R13 = R5;
+      R14 = R8;
+      R15 = R9;
       CJUMP __divrem_s64. (DB);
-      NOP;
-      NOP;
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___div64_ret - 1;
+.___div64_ret:
       // Quotient in R12:R13 → R0:R1
       R0 = R12;
       R1 = R13;
-      RTS;
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
 .___div64..end:
       .type ___div64.,STT_FUNC;
 
 // ___mod64 -- signed 64-bit modulo for selcc
-//   In:  R0:R1 = dividend lo:hi, R2:R3 = divisor lo:hi
-//   Out: R0:R1 = remainder lo:hi
       .GLOBAL ___mod64.;
 ___mod64.:
-      R12 = R0;
-      R13 = R1;
-      R14 = R2;
-      R15 = R3;
+      R12 = R4;
+      R13 = R5;
+      R14 = R8;
+      R15 = R9;
       CJUMP __divrem_s64. (DB);
-      NOP;
-      NOP;
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___mod64_ret - 1;
+.___mod64_ret:
       // Remainder in R14:R15 → R0:R1
       R0 = R14;
       R1 = R15;
-      RTS;
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
 .___mod64..end:
       .type ___mod64.,STT_FUNC;
 
 // ___udiv64 -- unsigned 64-bit division for selcc
       .GLOBAL ___udiv64.;
 ___udiv64.:
-      R12 = R0;
-      R13 = R1;
-      R14 = R2;
-      R15 = R3;
+      R12 = R4;
+      R13 = R5;
+      R14 = R8;
+      R15 = R9;
       CJUMP __divrem_u64. (DB);
-      NOP;
-      NOP;
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___udiv64_ret - 1;
+.___udiv64_ret:
       R0 = R12;
       R1 = R13;
-      RTS;
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
 .___udiv64..end:
       .type ___udiv64.,STT_FUNC;
 
 // ___umod64 -- unsigned 64-bit modulo for selcc
       .GLOBAL ___umod64.;
 ___umod64.:
-      R12 = R0;
-      R13 = R1;
-      R14 = R2;
-      R15 = R3;
+      R12 = R4;
+      R13 = R5;
+      R14 = R8;
+      R15 = R9;
       CJUMP __divrem_u64. (DB);
-      NOP;
-      NOP;
+      DM(I7, M7) = R2;
+      DM(I7, M7) = .___umod64_ret - 1;
+.___umod64_ret:
       R0 = R14;
       R1 = R15;
-      RTS;
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
 .___umod64..end:
       .type ___umod64.,STT_FUNC;
 
