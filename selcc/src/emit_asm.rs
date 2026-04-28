@@ -129,6 +129,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         known_functions: &known_functions,
         variadic_callees: &unit.variadic_functions,
         variadic_named_counts: &unit.variadic_named_counts,
+        complex_arg_callees: &unit.complex_arg_callees,
         function_return_types: &function_return_types,
     };
     for func in &unit.functions {
@@ -1011,6 +1012,7 @@ struct UnitCtx<'a> {
     known_functions: &'a HashSet<String>,
     variadic_callees: &'a HashSet<String>,
     variadic_named_counts: &'a HashMap<String, usize>,
+    complex_arg_callees: &'a HashSet<String>,
     function_return_types: &'a HashMap<String, crate::types::Type>,
 }
 
@@ -1077,7 +1079,8 @@ fn emit_function_instrs(
     let ir = crate::ir::renumber_vregs(&ir, num_params as u32);
 
     let isel_result = isel::select_with_name(
-        &ir, &func.name, unit.variadic_callees, unit.variadic_named_counts);
+        &ir, &func.name, unit.variadic_callees, unit.variadic_named_counts,
+        unit.complex_arg_callees);
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} num_params={} ===", func.name, num_params);
         eprintln!("=== {} IR/isel ===", func.name);

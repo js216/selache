@@ -44,6 +44,10 @@ pub enum SizeofArg {
 pub enum Expr {
     IntLit(i64, IntSuffix),
     FloatLit(f64),
+    /// Imaginary float literal (GCC extension): `1.0fi` parses as
+    /// `ImagLit(1.0)`. The implied real part is zero; the type is
+    /// `_Complex float`.
+    ImagLit(f64),
     StringLit(String),
     WideStringLit(Vec<u32>),
     CharLit(i64),
@@ -196,4 +200,13 @@ pub struct TranslationUnit {
     /// in registers, so callers must know the named count to lay out
     /// the call exactly the same way the callee's prologue reads it.
     pub variadic_named_counts: std::collections::HashMap<String, usize>,
+    /// Names of functions whose parameter list contains a `_Complex`
+    /// type. The reference C calling convention passes complex parameters
+    /// entirely on the stack (no `R4`/`R8`/`R12` register slots): the
+    /// caller pushes imag then real, and the callee reads them as
+    /// `DM(I6+1)` / `DM(I6+2)` from the post-`cjump` swapped-frame
+    /// layout. To stay compatible with reference-toolchain-compiled libsel callees
+    /// such as `cabsf`, every call to a function in this set must use
+    /// the stack-only push path.
+    pub complex_arg_callees: std::collections::HashSet<String>,
 }

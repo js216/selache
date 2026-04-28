@@ -37,6 +37,7 @@ pub fn select(ir: &[IrOp]) -> IselResult {
         ir, "anon",
         &std::collections::HashSet::new(),
         &std::collections::HashMap::new(),
+        &std::collections::HashSet::new(),
     )
 }
 
@@ -45,6 +46,7 @@ pub fn select_with_name(
     func_name: &str,
     variadic_callees: &std::collections::HashSet<String>,
     variadic_named_counts: &std::collections::HashMap<String, usize>,
+    complex_arg_callees: &std::collections::HashSet<String>,
 ) -> IselResult {
     let mut instrs = Vec::new();
     let mut label_positions = Vec::new();
@@ -545,7 +547,8 @@ pub fn select_with_name(
 
             IrOp::Call(dst, name, args) => {
                 let is_variadic = variadic_callees.contains(name);
-                if is_variadic {
+                let is_complex_args = complex_arg_callees.contains(name);
+                if is_variadic || is_complex_args {
                     // SHARC+ variadic call ABI: the *last* named
                     // argument (and every variadic argument after
                     // it) is always pushed on the caller's stack so
@@ -566,9 +569,19 @@ pub fn select_with_name(
                     // delay-slot pushes of R2 and the return
                     // address), so in the callee's view stack-arg
                     // `k` lives at `DM(I6 + k + 1)`.
-                    let named = variadic_named_counts.get(name)
-                        .copied().unwrap_or(args.len());
-                    let reg_count = target::variadic_reg_named(named);
+                    // For reference-ABI complex-arg callees, every arg goes on
+                    // the stack (the convention pushes both halves of
+                    // each `_Complex` value, plus any other params,
+                    // onto the caller's frame instead of using the
+                    // ARG_REGS path). For variadic callees we use the
+                    // existing named-count rule.
+                    let reg_count = if is_complex_args {
+                        0
+                    } else {
+                        let named = variadic_named_counts.get(name)
+                            .copied().unwrap_or(args.len());
+                        target::variadic_reg_named(named)
+                    };
                     for (i, arg) in args.iter().enumerate().rev() {
                         if i >= reg_count {
                             instrs.push(MachInstr {
@@ -874,9 +887,17 @@ pub fn select_with_name(
                 //                written through that pointer, so
                 //                nothing further to copy.
                 let is_hidden_ptr = *num_words > target::STRUCT_RET_MAX_REGS;
-                // Stack args (beyond ARG_REGS): push in reverse order.
+                // For reference-ABI complex-arg callees, every arg must go on
+                // the stack — see `IrOp::Call` for the full rationale.
+                let is_complex_args = complex_arg_callees.contains(name);
+                let reg_count = if is_complex_args {
+                    0
+                } else {
+                    target::ARG_REGS.len()
+                };
+                // Stack args (beyond reg_count): push in reverse order.
                 for (i, arg) in args.iter().enumerate().rev() {
-                    if i >= target::ARG_REGS.len() {
+                    if i >= reg_count {
                         instrs.push(MachInstr {
                             instr: Instruction::UregDagMove {
                                 pm: false,
@@ -892,9 +913,9 @@ pub fn select_with_name(
                         });
                     }
                 }
-                // Register args (0..ARG_REGS.len()).
+                // Register args (0..reg_count).
                 for (i, arg) in args.iter().enumerate() {
-                    if i >= target::ARG_REGS.len() {
+                    if i >= reg_count {
                         break;
                     }
                     let phys = target::ARG_REGS[i];

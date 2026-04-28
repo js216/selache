@@ -168,7 +168,22 @@ impl<'a> Lexer<'a> {
         // Check for float suffix without decimal (e.g. 1f)
         if matches!(self.peek(), Some(b'f' | b'F')) {
             self.advance();
+            // GCC imaginary suffix: `1fi` / `1Fi`
+            if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
+                self.advance();
+                return Token::ImagFloatLit(val as f64);
+            }
             return Token::FloatLit(val as f64);
+        }
+        // GCC imaginary suffix on integer: `1i`, `1j`
+        if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
+            // Disambiguate from identifier start: only treat as imag
+            // suffix if not followed by another ident char.
+            let nxt = self.src.get(self.pos + 1).copied();
+            if !matches!(nxt, Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
+                self.advance();
+                return Token::ImagFloatLit(val as f64);
+            }
         }
 
         let suffix = parse_int_suffix(self);
@@ -225,6 +240,11 @@ impl<'a> Lexer<'a> {
         if matches!(self.peek(), Some(b'f' | b'F' | b'l' | b'L')) {
             self.advance();
         }
+        // GCC imaginary suffix `i` / `j` on hex float literals.
+        if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
+            self.advance();
+            return Token::ImagFloatLit(val);
+        }
         Token::FloatLit(val)
     }
 
@@ -251,6 +271,11 @@ impl<'a> Lexer<'a> {
         // Skip optional float suffix (f/F/l/L)
         if matches!(self.peek(), Some(b'f' | b'F' | b'l' | b'L')) {
             self.advance();
+        }
+        // GCC imaginary suffix `i` / `j` (optionally after f/F/l/L).
+        if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
+            self.advance();
+            return Token::ImagFloatLit(val);
         }
         Token::FloatLit(val)
     }
@@ -283,6 +308,11 @@ impl<'a> Lexer<'a> {
         // Skip optional float suffix
         if matches!(self.peek(), Some(b'f' | b'F' | b'l' | b'L')) {
             self.advance();
+        }
+        // GCC imaginary suffix `i` / `j` on exp-form float literals.
+        if matches!(self.peek(), Some(b'i' | b'I' | b'j' | b'J')) {
+            self.advance();
+            return Token::ImagFloatLit(val);
         }
         Token::FloatLit(val)
     }
@@ -690,7 +720,14 @@ impl<'a> Lexer<'a> {
         if ch.is_ascii_alphabetic() || ch == b'_'
             || (ch == b'\\' && matches!(self.src.get(self.pos + 1), Some(b'u' | b'U')))
         {
-            return Ok(self.read_ident_or_keyword());
+            let tok = self.read_ident_or_keyword();
+            // GCC marker `__extension__`: silences pedantic warnings on
+            // the following expression, no semantic effect. Skip it and
+            // recurse so callers never see the token.
+            if matches!(&tok, Token::Ident(s) if s == "__extension__") {
+                return self.next_token();
+            }
+            return Ok(tok);
         }
 
         // String literal

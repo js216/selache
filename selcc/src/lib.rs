@@ -247,7 +247,7 @@ fn collect_expr_refs(
             collect_expr_refs(index, fns, out);
             collect_expr_refs(value, fns, out);
         }
-        Sizeof(_) | IntLit(..) | FloatLit(_) | StringLit(_)
-        | WideStringLit(_) | CharLit(_) => {}
+        Sizeof(_) | IntLit(..) | FloatLit(_) | ImagLit(_)
+        | StringLit(_) | WideStringLit(_) | CharLit(_) => {}
     }
 }

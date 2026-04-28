@@ -24,6 +24,9 @@ pub enum Token {
     // Literals
     IntLit(i64, IntSuffix),
     FloatLit(f64),
+    /// Imaginary float literal (GCC extension): `1.0fi`, `2.0i`, etc.
+    /// Carries the imaginary magnitude; the implied real part is zero.
+    ImagFloatLit(f64),
     StringLit(String),
     WideStringLit(Vec<u32>),
     CharLit(i64),

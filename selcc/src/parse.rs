@@ -372,6 +372,8 @@ impl<'a> Parser<'a> {
             std::collections::HashSet::new();
         let mut variadic_named_counts: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
+        let mut complex_arg_callees: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         while self.current != Token::Eof {
             // Handle typedef declarations.
             if self.current == Token::Typedef {
@@ -653,6 +655,9 @@ impl<'a> Parser<'a> {
                         variadic_decls.insert(name.clone());
                         variadic_named_counts.insert(name.clone(), params.len());
                     }
+                    if params.iter().any(|(_, t)| t.is_complex()) {
+                        complex_arg_callees.insert(name.clone());
+                    }
                     self.advance()?;
                     globals.push(GlobalDecl {
                         name,
@@ -749,6 +754,9 @@ impl<'a> Parser<'a> {
                 variadic_decls.insert(f.name.clone());
                 variadic_named_counts.insert(f.name.clone(), f.params.len());
             }
+            if f.params.iter().any(|(_, t)| t.is_complex()) {
+                complex_arg_callees.insert(f.name.clone());
+            }
         }
         Ok(TranslationUnit {
             functions,
@@ -758,6 +766,7 @@ impl<'a> Parser<'a> {
             enum_constants: self.enum_constants.drain(..).chain(enum_constants).collect(),
             variadic_functions: variadic_decls,
             variadic_named_counts,
+            complex_arg_callees,
         })
     }
 
@@ -1939,6 +1948,12 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 };
                 Ok(Expr::FloatLit(val))
+            }
+            Token::ImagFloatLit(_) => {
+                let Token::ImagFloatLit(val) = self.advance()? else {
+                    unreachable!()
+                };
+                Ok(Expr::ImagLit(val))
             }
             Token::Ident(_) => {
                 let Token::Ident(name) = self.advance()? else {

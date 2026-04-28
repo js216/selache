@@ -461,7 +461,8 @@ fn collect_assigned_expr(expr: &Expr, set: &mut HashSet<String>) {
             collect_assigned_expr(then_expr, set);
             collect_assigned_expr(else_expr, set);
         }
-        Expr::IntLit(..) | Expr::FloatLit(_) | Expr::StringLit(_) | Expr::WideStringLit(_)
+        Expr::IntLit(..) | Expr::FloatLit(_) | Expr::ImagLit(_)
+        | Expr::StringLit(_) | Expr::WideStringLit(_)
         | Expr::CharLit(_) | Expr::Ident(_) => {}
         Expr::RealPart(inner) | Expr::ImagPart(inner) => collect_assigned_expr(inner, set),
         Expr::InitList(exprs) => {
@@ -643,6 +644,14 @@ pub fn lower_function_with_known(
                 | Type::Enum { .. });
         if !is_scalar && is_struct_type(ty, &ctx) {
             total_slots += type_size_words(ty, &ctx);
+        } else if ty.is_complex() {
+            // the reference C ABI passes `_Complex` values entirely on the caller's
+            // stack — no ABI register slots are consumed. The callee
+            // recovers them via `LoadStackArg(0)` / `LoadStackArg(1)`,
+            // which read the stack-arg region directly, so they do
+            // not contribute to `total_slots` (which counts the
+            // register-eligible argument slots used by the
+            // `ARG_REGS` pinning logic in `emit_asm`).
         } else {
             total_slots += 1;
         }
@@ -716,6 +725,33 @@ pub fn lower_function_with_known(
             }
             ctx.locals.insert(name.clone(), LocalStorage::Stack(base_slot));
             slot_idx += num_words as usize;
+            continue;
+        }
+
+        // Complex parameter (`_Complex float` / `_Complex double`):
+        // the reference C ABI passes complex values entirely on the
+        // caller's stack (no `R4`/`R8`/`R12` involvement). The caller
+        // pushes imag first, then real, so after `cjump`'s I6/I7 swap
+        // the callee sees real at `DM(I6+1)` and imag at `DM(I6+2)`
+        // — `LoadStackArg(0)` and `LoadStackArg(1)` respectively.
+        //
+        // Mirror that into two consecutive frame words in C99 layout
+        // order (real at the *deepest* slot, imag one shallower) so
+        // that `&z` walks upward through [real, imag] and libsel's
+        // own `(float *)&z; p[0]; p[1]` reads recover the expected
+        // components.
+        if ty.is_complex() {
+            let imag_slot = ctx.alloc_stack_slot();
+            let real_slot = ctx.alloc_stack_slot();
+            debug_assert_eq!(real_slot, imag_slot + 1);
+            let real_tmp = ctx.alloc_vreg_float();
+            let imag_tmp = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::LoadStackArg(real_tmp, 0));
+            ctx.emit(IrOp::LoadStackArg(imag_tmp, 1));
+            ctx.emit(IrOp::Store(real_tmp, 0, real_slot as i32));
+            ctx.emit(IrOp::Store(imag_tmp, 0, imag_slot as i32));
+            ctx.locals.insert(name.clone(), LocalStorage::Stack(real_slot));
+            // Complex args do not consume any ABI register slots.
             continue;
         }
 
@@ -1002,7 +1038,14 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 // subsequent loads read uninitialised stack words.
                 let is_aggregate = matches!(ty.unqualified(),
                     Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
-                let storage_slot = if is_aggregate {
+                // `_Complex T` shares the multi-word stack convention:
+                // its two real components are array-like (C99 6.2.5p13)
+                // so the recorded base must be the deepest slot — real
+                // at field 0 / lowest memory address — and the imag
+                // half lives one slot shallower (one word higher in
+                // memory).
+                let is_complex_local = ty.unqualified().is_complex();
+                let storage_slot = if is_aggregate || is_complex_local {
                     slot_offset + num_words - 1
                 } else {
                     slot_offset
@@ -1067,6 +1110,16 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         // deepest word (field 0) and walks upward.
                         ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
                         emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                    } else if ty.is_complex() {
+                        // C99 6.2.5p13 / SHARC+ downward stack: real
+                        // at the deepest slot (= storage_slot, the
+                        // lowest memory address) so `&z` walks upward
+                        // through real -> imag, matching the layout
+                        // libsel's reference-toolchain-compiled callees read via
+                        // `(float *)&z; p[0]; p[1]`.
+                        let pair = lower_complex_expr(ctx, init_expr)?;
+                        ctx.emit(IrOp::Store(pair.real, 0, storage_slot as i32));
+                        ctx.emit(IrOp::Store(pair.imag, 0, (storage_slot - 1) as i32));
                     } else if ty.is_long_long() {
                         let val = lower_expr(ctx, init_expr)?;
                         // Widen 32-bit value to 64-bit if needed.
@@ -1845,6 +1898,7 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         Expr::IntLit(val, suffix) => Some(int_literal_type(*val, *suffix)),
         Expr::CharLit(_) => Some(Type::Int),
         Expr::FloatLit(_) => Some(Type::Float),
+        Expr::ImagLit(_) => Some(Type::Complex(Box::new(Type::Float))),
         // C99 6.4.5: a narrow string literal has type `char[N+1]` where
         // N is the byte length of the encoded sequence; the trailing
         // NUL accounts for the +1. C99 6.5.3.4 then makes
@@ -2274,6 +2328,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             ctx.emit(IrOp::LoadImm(dst, bits as i64));
             Ok(dst)
         }
+        Expr::ImagLit(_) => {
+            // The scalar half of an imaginary literal is the implied
+            // real part — always zero. The imaginary half is recovered
+            // through `lower_complex_expr` when context is complex.
+            let dst = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::LoadImm(dst, 0));
+            Ok(dst)
+        }
         Expr::Ident(name) => {
             // Check locals first, then globals.
             let is_float_var = ctx.local_types.get(name)
@@ -2521,32 +2583,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     msg: format!("implicit declaration of function '{name}'"),
                 });
             }
-            let mut arg_vregs = Vec::new();
-            for arg in args {
-                let arg_ty = expr_type(arg, ctx);
-                let arg_is_struct = arg_ty.as_ref()
-                    .is_some_and(|t| is_struct_type(t, ctx));
-                if arg_is_struct {
-                    let nw = arg_ty.as_ref()
-                        .map_or(1, |t| type_size_words(t, ctx));
-                    let addr = lower_struct_expr_addr(ctx, arg)?;
-                    for w in 0..nw {
-                        // Struct word `w` lives at byte offset
-                        // `w * 4` from the struct base. `Load(val,
-                        // base, off)` with a non-zero base emits the
-                        // byte-addressable indirect form, so the
-                        // stride here must be a byte offset (not the
-                        // bare word index) or the load reads from an
-                        // unaligned address and returns a fraction
-                        // of the next field's bytes.
-                        let tmp = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(tmp, addr, (w * 4) as i32));
-                        arg_vregs.push(tmp);
-                    }
-                } else {
-                    arg_vregs.push(lower_expr(ctx, arg)?);
-                }
-            }
+            let arg_vregs = lower_call_args(ctx, args)?;
             // The destination vreg's float/int classification must match
             // the callee's return type. Without this, a function returning
             // `double` lands in a non-float vreg, and any downstream
@@ -2601,32 +2638,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::CallIndirect { func_expr, args } => {
             let func_addr = lower_expr(ctx, func_expr)?;
-            let mut arg_vregs = Vec::new();
-            for arg in args {
-                let arg_ty = expr_type(arg, ctx);
-                let arg_is_struct = arg_ty.as_ref()
-                    .is_some_and(|t| is_struct_type(t, ctx));
-                if arg_is_struct {
-                    let nw = arg_ty.as_ref()
-                        .map_or(1, |t| type_size_words(t, ctx));
-                    let addr = lower_struct_expr_addr(ctx, arg)?;
-                    for w in 0..nw {
-                        // Struct word `w` lives at byte offset
-                        // `w * 4` from the struct base. `Load(val,
-                        // base, off)` with a non-zero base emits the
-                        // byte-addressable indirect form, so the
-                        // stride here must be a byte offset (not the
-                        // bare word index) or the load reads from an
-                        // unaligned address and returns a fraction
-                        // of the next field's bytes.
-                        let tmp = ctx.alloc_vreg();
-                        ctx.emit(IrOp::Load(tmp, addr, (w * 4) as i32));
-                        arg_vregs.push(tmp);
-                    }
-                } else {
-                    arg_vregs.push(lower_expr(ctx, arg)?);
-                }
-            }
+            let arg_vregs = lower_call_args(ctx, args)?;
             // Mirror the float-vs-int classification fix from the direct
             // `Expr::Call` arm: an indirect callee whose return type is
             // `float`/`double` must yield a float vreg so downstream
@@ -3157,11 +3169,18 @@ struct ComplexPair {
 }
 
 /// Load a complex value from a stack slot, returning (real, imag) vregs.
+/// `offset` is the slot of the real half (the deepest of the two
+/// reserved slots, mirroring the struct-aggregate convention: field 0
+/// lives at the deepest slot so that increasing memory addresses
+/// correspond to increasing C99 component offsets — real at offset 0,
+/// imag at offset sizeof(real)).
 fn load_complex(ctx: &mut LowerCtx, offset: u32) -> ComplexPair {
     let real = ctx.alloc_vreg_float();
     let imag = ctx.alloc_vreg_float();
     ctx.emit(IrOp::Load(real, 0, offset as i32));
-    ctx.emit(IrOp::Load(imag, 0, (offset + 1) as i32));
+    // The imag half lives one slot shallower (one word higher in
+    // memory, matching `&z + sizeof(real)` from the C99 layout).
+    ctx.emit(IrOp::Load(imag, 0, (offset - 1) as i32));
     ComplexPair { real, imag }
 }
 
@@ -3175,6 +3194,40 @@ fn real_to_complex(ctx: &mut LowerCtx, real: VReg) -> ComplexPair {
 /// Lower an expression known to be complex, returning a ComplexPair.
 fn lower_complex_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<ComplexPair> {
     match expr {
+        // Complex-returning function call: the reference C ABI returns the value via
+        // R0 (real) and R1 (imag), the same convention used for
+        // 2-word struct returns. Pipe through `CallStruct` with
+        // num_words=2 so the existing R0/R1 unpack writes both halves
+        // to a frame buffer in the deepest-slot-first layout, then
+        // load real/imag back into vregs as a `ComplexPair`.
+        Expr::Call { name, args } => {
+            let arg_vregs = lower_call_args(ctx, args)?;
+            let slot = ctx.frame_size;
+            ctx.frame_size += 2;
+            let storage_slot = slot + 1; // deepest of the two
+            let dst_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+            ctx.emit(IrOp::CallStruct {
+                name: name.clone(),
+                args: arg_vregs,
+                dst_addr,
+                num_words: 2,
+            });
+            let real = ctx.alloc_vreg_float();
+            let imag = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::Load(real, 0, storage_slot as i32));
+            ctx.emit(IrOp::Load(imag, 0, (storage_slot - 1) as i32));
+            Ok(ComplexPair { real, imag })
+        }
+        Expr::ImagLit(val) => {
+            // GCC imaginary literal: real = 0, imag = val.
+            let bits = (*val as f32).to_bits();
+            let real = ctx.alloc_vreg_float();
+            let imag = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::LoadImm(real, 0));
+            ctx.emit(IrOp::LoadImm(imag, bits as i64));
+            Ok(ComplexPair { real, imag })
+        }
         Expr::Ident(name) => {
             let ty = ctx.local_types.get(name).cloned();
             if let Some(ref t) = ty {
@@ -5294,6 +5347,8 @@ fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
         let arg_ty = expr_type(arg, ctx);
         let arg_is_struct = arg_ty.as_ref()
             .is_some_and(|t| is_struct_type(t, ctx));
+        let arg_is_complex = arg_ty.as_ref()
+            .is_some_and(|t| t.is_complex());
         if arg_is_struct {
             let nw = arg_ty.as_ref()
                 .map_or(1, |t| type_size_words(t, ctx));
@@ -5303,6 +5358,15 @@ fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
                 ctx.emit(IrOp::Load(tmp, addr, (w * 4) as i32));
                 arg_vregs.push(tmp);
             }
+        } else if arg_is_complex {
+            // C99 6.2.5p13: a complex value is laid out as two
+            // contiguous reals. The ABI passes them as two consecutive
+            // argument slots so the callee, which receives the value
+            // by value and reads it through `&z`, sees the same
+            // [real, imag] pair its frame layout expects.
+            let pair = lower_complex_expr(ctx, arg)?;
+            arg_vregs.push(pair.real);
+            arg_vregs.push(pair.imag);
         } else {
             arg_vregs.push(lower_expr(ctx, arg)?);
         }
