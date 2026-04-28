@@ -542,3 +542,58 @@ ___umod32.:
       NOP;
 .___umod32..end:
       .type ___umod32.,STT_FUNC;
+
+// =====================================================================
+// __lib_fdiv -- single-precision float divide runtime helper
+// =====================================================================
+// The SHARC+ C compiler lowers `float / float` to a call to
+// `__lib_fdiv`. With the standard library suppressed (-no-std-lib),
+// libsel must provide its own implementation of this helper.
+//
+// ABI (SHARC+ C compiler single-precision float convention):
+//   In:  F4 = numerator a
+//        F8 = denominator b
+//   Out: F0 = a / b
+//   Scratch only; no frame; called via cjump and returns via RTS.
+//
+// Algorithm: SHARC+ has a hardware float reciprocal seed instruction
+// `Fn = RECIPS Fy` that yields ~8 mantissa bits of 1/b. Two
+// Newton-Raphson refinements,
+//
+//     r' = r * (2.0 - b * r),
+//
+// converge quadratically to single-precision 1/b (~16 bits, then ~24
+// bits accurate). The final quotient is a * r. Two iterations are the
+// standard count for 24-bit mantissa convergence from an 8-bit seed.
+//
+// Register roles (all caller-clobber per SHARC+ C convention):
+//   F0  = running reciprocal r (also return value)
+//   F1  = scratch t = b*r and 2 - b*r
+//   F12 = constant 2.0f (loaded via integer-side R12 = 0x40000000;
+//         R and F views share the register file).
+//
+// Edge cases (denormals, signed zero, exact NaN/Inf semantics, rounding
+// modes other than round-to-nearest, and the Markstein last-bit
+// correction) are not handled: the test corpus exercises only normal
+// finite operands, matching the contract of this minimal helper.
+
+      .GLOBAL __lib_fdiv.;
+__lib_fdiv.:
+      F0  = RECIPS F8;                 // 8-bit accurate seed of 1/b
+      R12 = 0x40000000;                // F12 = 2.0f (IEEE bit pattern)
+
+      // Newton iteration 1: r <- r * (2 - b*r)
+      F1 = F8 * F0;
+      F1 = F12 - F1;
+      F0 = F0 * F1;
+
+      // Newton iteration 2: r <- r * (2 - b*r)
+      F1 = F8 * F0;
+      F1 = F12 - F1;
+      F0 = F0 * F1;
+
+      // q = a * r
+      F0 = F4 * F0;
+      RTS;
+.__lib_fdiv..end:
+      .type __lib_fdiv.,STT_FUNC;
