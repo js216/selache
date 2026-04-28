@@ -480,15 +480,31 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
         next = 1;
     }
     // Anchors first: two consecutive slots each. Skip anchors that
-    // are already identity-mapped (parameter pair lo halves).
+    // are already identity-mapped (parameter pair lo halves, or the
+    // base==0 sentinel pin above).
     for &a in &anchors {
         if map.contains_key(&a) {
-            // Parameter anchor: hi half is also identity-mapped above
-            // because both ids fall below num_params. If only the lo
-            // half is below num_params and the hi half is not, the
-            // implicit hi-half mapping would still be identity since
-            // `a + 1 == num_params` in that boundary case is in
-            // `used` and will get its own slot below.
+            // The lo half is already pinned (parameter slot or the
+            // vreg-0 sentinel). The hi half must still land at
+            // `map[a] + 1` to preserve the 64-bit pair-adjacency
+            // invariant that isel relies on (`*lo as u16` and `*lo +
+            // 1 as u16` must address the two consecutive halves of
+            // the same pair after renumbering). Without this, a
+            // 64-bit anchor that happens to use vreg 0 as its lo
+            // half (e.g. a no-arg function whose first body value is
+            // a `long long` literal) would have its hi half
+            // independently renumbered to whatever single-slot id
+            // came next, breaking every Load64/Store64/arith expansion
+            // that targets the pair.
+            let lo_dense = map[&a];
+            let hi_dense = lo_dense + 1;
+            map.entry(a + 1).or_insert(hi_dense);
+            // Bump `next` past the hi-half slot so it is not handed
+            // out to a subsequent single. Skip the bump if the
+            // parameter range already accounted for both halves.
+            if next <= hi_dense {
+                next = hi_dense + 1;
+            }
             continue;
         }
         // Skip the anchor's hi-half if it was independently mapped

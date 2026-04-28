@@ -76,6 +76,17 @@ pub fn select_with_name(
     // id, replacing the old hardcoded literals 0..5.
     let s = |i: u16| -> u16 { fdiv_scratch_base + i };
 
+    // Fresh label allocator for isel-internal skip branches (e.g. the
+    // 64-bit compare lowers `IF NE skip` over the lo half compare). The
+    // base sits above any label id used by the IR so synthetic labels
+    // never collide with IR labels in `label_positions` / `label_map`.
+    // Without this, a `BranchTarget::PcRelative(N)` carrying a literal
+    // skip distance would be interpreted by `resolve_branches` as a
+    // reference to IR label N and rerouted to whatever block holds that
+    // id (e.g. the false arm of a `?:`), producing bogus control flow
+    // for any 64-bit comparison.
+    let mut next_fresh_label: Label = max_ir_label(ir).saturating_add(1);
+
     for op in ir {
         match op {
             IrOp::LoadImm(dst, val) => {
@@ -2144,49 +2155,70 @@ pub fn select_with_name(
             }
 
             IrOp::Cmp64(lhs, rhs) | IrOp::UCmp64(lhs, rhs) => {
-                // 64-bit compare: compare hi words first, if equal compare lo.
-                // This leaves the flags set correctly for signed comparisons
-                // when hi words differ, and for the lo comparison when equal.
-                // We compare hi first: if hi != equal, the hi comparison
-                // result determines the outcome. If hi are equal, the lo
-                // comparison determines the outcome.
+                // 64-bit compare: compare hi words first, branch over the
+                // lo compare when hi differ (so the hi flags decide the
+                // outcome), otherwise fall through to the lo compare.
+                //
+                // The hi comparison signedness matches the operation
+                // (signed COMP for `Cmp64`, unsigned CompU for `UCmp64`),
+                // so the LT/GT flags reflect the correct ordering when the
+                // hi halves differ. The lo comparison is *always* unsigned:
+                // once the hi halves are known equal, only the magnitude of
+                // the lo bits decides ordering, and the lo bits are pure
+                // bit patterns with no sign of their own. Using signed COMP
+                // on the lo halves gave wrong results whenever the lo half
+                // had its top bit set (e.g. `-1LL` has lo = 0xFFFFFFFF,
+                // which signed-compares as `-1` but must order *above* a
+                // value with lo = 0 once the hi halves are equal).
+                //
+                // The skip uses a freshly-allocated label rather than a
+                // raw `BranchTarget::PcRelative(N)` literal: the asm
+                // emitter routes every same-function PC-relative branch
+                // through `label_map`, so a literal `PcRelative(2)` would
+                // be resolved as a reference to IR label `2` and silently
+                // rerouted to whatever block carries that id.
                 let lhs_hi = (*lhs + 1) as u16;
                 let rhs_hi = (*rhs + 1) as u16;
                 let lhs_lo = *lhs as u16;
                 let rhs_lo = *rhs as u16;
-                // Compare hi words.
+                let signed = matches!(op, IrOp::Cmp64(..));
+                let hi_alu = if signed {
+                    AluOp::Comp { rx: lhs_hi, ry: rhs_hi }
+                } else {
+                    AluOp::CompU { rx: lhs_hi, ry: rhs_hi }
+                };
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Alu(AluOp::Comp {
-                            rx: lhs_hi, ry: rhs_hi,
-                        }),
+                        compute: ComputeOp::Alu(hi_alu),
                     },
                     reloc: None,
                 });
-                // If hi words are not equal, skip the lo comparison (the flags
-                // from the hi comparison are the result). We use a conditional
-                // branch over the lo compare.
-                // JUMP (PC+2) IF NE  -- skip 1 instruction
+                let skip_label: Label = next_fresh_label;
+                next_fresh_label += 1;
+                // If hi words differ, jump past the lo compare.
                 instrs.push(MachInstr {
                     instr: Instruction::Branch {
                         call: false,
                         cond: target::COND_NE,
                         delayed: false,
-                        target: BranchTarget::PcRelative(2),
+                        target: BranchTarget::PcRelative(skip_label as i32),
                     },
                     reloc: None,
                 });
-                // Compare lo words (only reached if hi words are equal).
+                // Compare lo words (only reached when hi halves are equal).
+                // Lo compare is unsigned for both `Cmp64` and `UCmp64`.
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Alu(AluOp::Comp {
+                        compute: ComputeOp::Alu(AluOp::CompU {
                             rx: lhs_lo, ry: rhs_lo,
                         }),
                     },
                     reloc: None,
                 });
+                // Define the skip label at the next instruction boundary.
+                label_positions.push((skip_label, instrs.len()));
             }
 
             IrOp::Load64(dst, base, offset) => {
@@ -3147,6 +3179,29 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
             | IrOp::Branch(_) | IrOp::BranchCond(_, _) | IrOp::Label(_)
             | IrOp::HardwareLoop { .. }
             | IrOp::Nop => {}
+        }
+    }
+    m
+}
+
+/// Largest label id mentioned anywhere in `ir` (definitions and
+/// references), or 0 if no label is mentioned. Used by isel to pick
+/// fresh label ids for synthetic skip branches that live entirely
+/// inside the lowering of a single IR op.
+fn max_ir_label(ir: &[IrOp]) -> Label {
+    let mut m: Label = 0;
+    let mut bump = |l: Label| {
+        if l > m {
+            m = l;
+        }
+    };
+    for op in ir {
+        match op {
+            IrOp::Label(l)
+            | IrOp::Branch(l)
+            | IrOp::BranchCond(_, l) => bump(*l),
+            IrOp::HardwareLoop { end_label, .. } => bump(*end_label),
+            _ => {}
         }
     }
     m
