@@ -2854,6 +2854,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     return Ok(ptr);
                 }
             }
+            // A long-long pointee occupies two words; emit Load64 so
+            // 64-bit semantics survive into the consumer.
+            if let Some(ref pt) = pointee {
+                if ty_is_long_long(pt, ctx) {
+                    let dst = ctx.alloc_vreg_pair();
+                    ctx.emit(IrOp::Load64(dst, ptr, 0));
+                    return Ok(dst);
+                }
+            }
             // A float pointee must land in an F-register so downstream
             // casts (e.g. `(int)*p`) see a float source and emit the
             // float->int conversion rather than a silent bit-preserving
@@ -2917,6 +2926,18 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     return Ok(emit_byte_load(ctx, addr, signed));
                 }
             }
+            // A long-long element occupies two memory words; emit a
+            // 64-bit load so downstream ops (shift, add, cast) see the
+            // full pair. A plain `Load` would read only the low word
+            // and let later 64-bit shifts treat a single word as the
+            // entire value.
+            if let Some(ref et) = elem_ty {
+                if ty_is_long_long(et, ctx) {
+                    let dst = ctx.alloc_vreg_pair();
+                    ctx.emit(IrOp::Load64(dst, addr, 0));
+                    return Ok(dst);
+                }
+            }
             // A float element type must land in an F-register so that
             // `(int)arr[i]` sees a float source and emits the float->int
             // conversion instead of passing the raw bit pattern through.
@@ -2944,6 +2965,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             if let Some(ref mty) = member_ty {
                 if is_aggregate_type(mty, ctx) {
                     return Ok(addr);
+                }
+            }
+            // A long-long member spans two words; emit Load64.
+            if let Some(ref mty) = member_ty {
+                if ty_is_long_long(mty, ctx) {
+                    let dst = ctx.alloc_vreg_pair();
+                    ctx.emit(IrOp::Load64(dst, addr, 0));
+                    return Ok(dst);
                 }
             }
             // A float-typed member (including reads through a union
