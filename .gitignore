@@ -1,6 +1,7 @@
 *.swp
 
 .claude
+.codex
 .gstack
 build
 target
