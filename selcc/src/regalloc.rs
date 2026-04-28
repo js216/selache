@@ -34,16 +34,39 @@ use selinstr::encode::{
 /// instruction lands (the slot AFTER any spill stores/loads inserted ahead of
 /// it). Labels in the input's position space must map through this so that
 /// a branch target lands on its instruction rather than on an inserted spill.
+///
+/// `label_positions` lists every label landing position in the input
+/// instruction stream. The allocator treats each label as a basic-block
+/// boundary: the fall-through predecessor flushes its live vregs to
+/// memory just before the label lands, and the register map is cleared
+/// at the label so subsequent uses reload from the spill slot. Combined
+/// with a matching flush at every Branch (the jump-source predecessor),
+/// this guarantees that whichever path control reaches the label by,
+/// every vreg's value resides in its spill slot --- the canonical
+/// merge location across control flow.
 pub fn allocate(
     instrs: &[MachInstr],
     num_params: u8,
     reserves_r1: bool,
+    label_positions: &[(u32, usize)],
 ) -> (Vec<MachInstr>, u32, Vec<usize>) {
     let mut alloc = Allocator::new(num_params, reserves_r1);
     let mut out = Vec::new();
     let mut index_map = Vec::with_capacity(instrs.len());
 
-    for mi in instrs {
+    let label_indices: BTreeSet<usize> =
+        label_positions.iter().map(|&(_, idx)| idx).collect();
+
+    for (i, mi) in instrs.iter().enumerate() {
+        // Fall-through predecessor flush: at a label landing position,
+        // store every live non-pinned vreg to its spill slot, then clear
+        // the register map so the post-merge state forces reloads. The
+        // stores precede the label landing in the output, so jumpers
+        // that target the label (which already flushed at the Branch)
+        // skip past the stores --- only the fall-through path runs them.
+        if label_indices.contains(&i) {
+            alloc.flush_all_vregs(&mut out);
+        }
         index_map.push(out.len());
         alloc.rewrite(mi, &mut out);
     }
@@ -63,6 +86,14 @@ struct Allocator {
     /// register instead of whatever register vreg 0 happens to land on
     /// after the allocator evicts it.
     pinned: BTreeSet<u8>,
+    /// Vregs whose binding to their physical register is a permanent
+    /// ABI mapping (parameter vregs and the return-value pseudo-vregs).
+    /// `flush_all_vregs` skips these so the parameter/return mapping
+    /// survives across basic-block boundaries: a parameter never gets
+    /// stored to a spill slot, so a flush followed by a reload-on-use
+    /// would read garbage. Any vreg outside this set lives in memory
+    /// across BB boundaries via its spill slot.
+    permanent_vregs: BTreeSet<u8>,
     /// Physical registers pinned for the duration of the current mach
     /// instruction's rewrite. Cleared at the start of every `rewrite`
     /// call. This prevents a later operand lookup inside the same op
@@ -94,10 +125,12 @@ impl Allocator {
         // Pinning vregs 0..n-1 to R0..R(n-1) instead would silently
         // read garbage for any argument after the zeroth.
         let arg_count = (num_params as usize).min(target::ARG_REGS.len());
+        let mut permanent_vregs = BTreeSet::new();
         for (i, &phys) in target::ARG_REGS.iter().take(arg_count).enumerate() {
             vreg_to_phys.insert(i as u8, phys);
             phys_to_vreg.insert(phys, i as u8);
             pinned.insert(phys);
+            permanent_vregs.insert(i as u8);
         }
         // Pin the return-value pseudo-vreg to physical R0 so isel's
         // `Pass { rn: RETURN_REG_VREG, rx: ... }` always resolves to
@@ -111,6 +144,7 @@ impl Allocator {
             .entry(target::RETURN_REG)
             .or_insert(target::RETURN_REG_VREG);
         pinned.insert(target::RETURN_REG);
+        permanent_vregs.insert(target::RETURN_REG_VREG);
         // Same deal for the hi half of a two-word struct return: pin a
         // pseudo-vreg to physical R1 so isel's explicit `R1 = ...` and
         // `... = R1` transfers survive regalloc remapping. Without this,
@@ -130,11 +164,13 @@ impl Allocator {
                 .entry(target::RETURN_REG_HI)
                 .or_insert(target::RETURN_REG_HI_VREG);
             pinned.insert(target::RETURN_REG_HI);
+            permanent_vregs.insert(target::RETURN_REG_HI_VREG);
         }
         Self {
             vreg_to_phys,
             phys_to_vreg,
             pinned,
+            permanent_vregs,
             transient_pins: Vec::new(),
             arg_setup_pins: Vec::new(),
             next_evict: 0,
@@ -231,6 +267,69 @@ impl Allocator {
             self.phys_to_vreg.remove(&phys);
             self.vreg_to_phys.remove(&vreg);
             self.pinned.remove(&phys);
+        }
+    }
+
+    /// Spill every live non-permanent vreg to its stack slot and clear
+    /// the register map, then release any arg-setup pins. Called at
+    /// every basic-block boundary --- both before each Branch (the
+    /// jump-source side of an outgoing edge) and at every Label landing
+    /// (the fall-through side of an incoming edge). The two flushes
+    /// together guarantee that whichever predecessor reaches the label
+    /// at runtime, every vreg's value is sitting in its spill slot and
+    /// any later use reloads from there. The lazy register-map approach
+    /// is correct only within a straight-line basic block; without this
+    /// boundary flush, spill stores emitted in one predecessor are read
+    /// by a sibling predecessor that never executed them, and the
+    /// reloaded register holds whatever the spill slot happened to
+    /// contain (zero, a stale value, or an unrelated vreg's data).
+    ///
+    /// Permanent vregs (parameter vregs and the return-value pseudo-
+    /// vregs) are skipped: they have no spill slot and the ABI keeps
+    /// their register binding live across the whole function.
+    fn flush_all_vregs(&mut self, spill: &mut Vec<MachInstr>) {
+        let to_flush: Vec<(u8, u8)> = self.vreg_to_phys.iter()
+            .filter(|(&vreg, _)| !self.permanent_vregs.contains(&vreg))
+            .map(|(&vreg, &phys)| (vreg, phys))
+            .collect();
+
+        for (vreg, phys) in to_flush {
+            let slot = *self.spill_map.entry(vreg).or_insert_with(|| {
+                let s = self.spill_slots;
+                self.spill_slots += 1;
+                s
+            });
+            // Use a positive offset so `adjust_frame_offsets` reroutes
+            // the slot into the spill region (matching the convention
+            // in `spill_caller_saved` and `get_phys`).
+            spill.push(MachInstr {
+                instr: Instruction::ComputeLoadStore {
+                    compute: None,
+                    access: MemAccess {
+                        pm: false,
+                        write: true,
+                        i_reg: target::FRAME_PTR,
+                    },
+                    dreg: phys,
+                    offset: slot as i8,
+                    cond: target::COND_TRUE,
+                },
+                reloc: None,
+            });
+            self.vreg_to_phys.remove(&vreg);
+            self.phys_to_vreg.remove(&phys);
+            // The phys may have been pinned by spill_caller_saved at an
+            // earlier CJUMP migration; release it so the next BB can
+            // re-allocate freely.
+            self.pinned.remove(&phys);
+        }
+
+        // Release any arg-setup pins still active. A Branch should not
+        // sit between an arg-setup Pass and its consuming CJUMP, but
+        // defensively release them here so a stale pin cannot leak
+        // into the next basic block.
+        for p in self.arg_setup_pins.drain(..) {
+            self.pinned.remove(&p);
         }
     }
 
@@ -465,6 +564,12 @@ impl Allocator {
             }
 
             Instruction::Branch { call, cond, target, delayed } => {
+                // Jump-source flush: a Branch ends the current basic
+                // block, so every live non-permanent vreg must be in
+                // its spill slot before control transfers. The
+                // matching label-landing flush in `allocate` handles
+                // the fall-through side of the merge.
+                self.flush_all_vregs(&mut spill_pre);
                 Instruction::Branch { call, cond, target, delayed }
             }
 
@@ -1213,7 +1318,7 @@ mod tests {
                 reloc: None,
             },
         ];
-        let (out, spills, _) = allocate(&instrs, 0, false);
+        let (out, spills, _) = allocate(&instrs, 0, false, &[]);
         assert_eq!(spills, 0);
         // Should still have a LoadImm and Return.
         assert!(out.iter().any(|m| matches!(m.instr, Instruction::LoadImm { .. })));
@@ -1256,7 +1361,7 @@ mod tests {
                 reloc: None,
             },
         ];
-        let (out, _, _) = allocate(&instrs, 0, false);
+        let (out, _, _) = allocate(&instrs, 0, false, &[]);
         // Verify all registers in the Add are in 0-15 range.
         for mi in &out {
             if let Instruction::Compute {
@@ -1295,7 +1400,7 @@ mod tests {
             },
             reloc: None,
         });
-        let (out, _, _) = allocate(&instrs, 0, false);
+        let (out, _, _) = allocate(&instrs, 0, false, &[]);
         // Collect the physical registers assigned to LoadImm instructions.
         let mut assigned = Vec::new();
         for mi in &out {
