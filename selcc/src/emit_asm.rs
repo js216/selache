@@ -343,13 +343,32 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
 
     // Data section: initialized globals and initialized static locals.
+    //
+    // C99 6.5.2.5p6: a compound literal that occurs outside the body of
+    // a function has static storage duration. When such a literal's
+    // address is taken in a file-scope initializer (e.g.
+    // `static int *p = &(int){0x99};`), selcc must allocate static
+    // storage for the unnamed object, emit its bytes into the data
+    // section, and let the parent initializer reference the synthesised
+    // symbol so the linker patches in its runtime address. We collect
+    // those synthesised entries via `extra_data` and a monotonically
+    // increasing counter so each compound literal gets a unique name.
     let mut data_entries: Vec<DataEntry> = Vec::new();
+    let mut extra_data: Vec<DataEntry> = Vec::new();
+    let mut complit_counter: u32 = 0;
     for global in &unit.globals {
         if global.is_extern {
             continue;
         }
         if let Some(init) = &global.init {
-            match build_init_words(init, crate::types::size_bytes_ctx(&global.ty, &unit_tctx), &unit_tctx, Some(&global.ty)) {
+            match build_init_words(
+                init,
+                crate::types::size_bytes_ctx(&global.ty, &unit_tctx),
+                &unit_tctx,
+                Some(&global.ty),
+                &mut extra_data,
+                &mut complit_counter,
+            ) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: global.name.clone(),
                     values,
@@ -368,7 +387,14 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
     for sl in &all_static_locals {
         if let Some(init) = &sl.init {
-            match build_init_words(init, crate::types::size_bytes_ctx(&sl.ty, &unit_tctx), &unit_tctx, Some(&sl.ty)) {
+            match build_init_words(
+                init,
+                crate::types::size_bytes_ctx(&sl.ty, &unit_tctx),
+                &unit_tctx,
+                Some(&sl.ty),
+                &mut extra_data,
+                &mut complit_counter,
+            ) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: sl.symbol.clone(),
                     values,
@@ -384,6 +410,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             }
         }
     }
+    // Append any synthesised compound-literal storage to the data
+    // section so the references emitted above resolve.
+    data_entries.extend(extra_data);
     // Deduplicate data entries (later entry wins — handles tentative then init).
     {
         let mut seen = HashSet::new();
@@ -638,6 +667,8 @@ fn build_init_words(
     size_bytes: u32,
     tctx: &dyn crate::types::TypeCtx,
     ty: Option<&crate::types::Type>,
+    extra_data: &mut Vec<DataEntry>,
+    complit_counter: &mut u32,
 ) -> Result<Vec<InitWord>> {
     use crate::types::Type;
     match init {
@@ -718,7 +749,7 @@ fn build_init_words(
                         // Recursively build the value's words and place
                         // them at the field's word offset.
                         let fsize = crate::types::size_bytes_ctx(fty, tctx);
-                        let sub = build_init_words(value, fsize, tctx, Some(fty))?;
+                        let sub = build_init_words(value, fsize, tctx, Some(fty), extra_data, complit_counter)?;
                         for (k, w) in sub.into_iter().enumerate() {
                             ensure(&mut v, woff + k);
                             v[woff + k] = w;
@@ -732,7 +763,7 @@ fn build_init_words(
                             .unwrap_or(4);
                         let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
                         let woff = i * elem_words;
-                        let sub = build_init_words(value, elem_size, tctx, array_elem)?;
+                        let sub = build_init_words(value, elem_size, tctx, array_elem, extra_data, complit_counter)?;
                         for (k, w) in sub.into_iter().enumerate() {
                             ensure(&mut v, woff + k);
                             v[woff + k] = w;
@@ -749,7 +780,7 @@ fn build_init_words(
                             }
                             let (_, woff, fty) = &field_map[field_cursor];
                             let fsize = crate::types::size_bytes_ctx(fty, tctx);
-                            let sub = build_init_words(other, fsize, tctx, Some(*fty))?;
+                            let sub = build_init_words(other, fsize, tctx, Some(*fty), extra_data, complit_counter)?;
                             let woff = *woff;
                             for (k, w) in sub.into_iter().enumerate() {
                                 ensure(&mut v, woff + k);
@@ -760,7 +791,7 @@ fn build_init_words(
                             let elem_size = crate::types::size_bytes_ctx(elem, tctx);
                             let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
                             let woff = field_cursor * elem_words;
-                            let sub = build_init_words(other, elem_size, tctx, Some(elem))?;
+                            let sub = build_init_words(other, elem_size, tctx, Some(elem), extra_data, complit_counter)?;
                             for (k, w) in sub.into_iter().enumerate() {
                                 ensure(&mut v, woff + k);
                                 v[woff + k] = w;
@@ -768,7 +799,7 @@ fn build_init_words(
                             field_cursor += 1;
                         } else {
                             ensure(&mut v, field_cursor);
-                            v[field_cursor] = eval_init_word(other, tctx)?;
+                            v[field_cursor] = eval_init_word(other, tctx, extra_data, complit_counter)?;
                             field_cursor += 1;
                         }
                     }
@@ -779,7 +810,7 @@ fn build_init_words(
         other => {
             let words = size_bytes.div_ceil(4).max(1);
             let mut v: Vec<InitWord> = vec![InitWord::Num(0); words as usize];
-            v[0] = eval_init_word(other, tctx)?;
+            v[0] = eval_init_word(other, tctx, extra_data, complit_counter)?;
             Ok(v)
         }
     }
@@ -795,14 +826,48 @@ fn build_init_words(
 fn eval_init_word(
     expr: &Expr,
     tctx: &dyn crate::types::TypeCtx,
+    extra_data: &mut Vec<DataEntry>,
+    complit_counter: &mut u32,
 ) -> Result<InitWord> {
     match expr {
         Expr::Ident(name) => Ok(InitWord::Sym(name.clone())),
         Expr::AddrOf(inner) => match inner.as_ref() {
             Expr::Ident(name) => Ok(InitWord::Sym(name.clone())),
+            // C99 6.5.2.5p6: a compound literal at file scope has
+            // static storage duration. `&(T){...}` therefore means the
+            // address of an unnamed object that we must materialise in
+            // the data section. Synthesize a fresh symbol, build its
+            // initializer words, queue it as an extra data entry, and
+            // return a symbolic reference so the linker patches in the
+            // runtime address.
+            Expr::Cast(ty, init_inner)
+                if matches!(init_inner.as_ref(), Expr::InitList(_)) =>
+            {
+                let name = format!(".complit{}", *complit_counter);
+                *complit_counter += 1;
+                let size = crate::types::size_bytes_ctx(ty, tctx);
+                let values = build_init_words(
+                    init_inner, size, tctx, Some(ty), extra_data, complit_counter,
+                )?;
+                extra_data.push(DataEntry { name: name.clone(), values });
+                Ok(InitWord::Sym(name))
+            }
+            // Bare compound literal without an explicit cast (rare,
+            // only seen via implicit type inference). Treat the same
+            // way but with no known element type — fall back to flat
+            // word slots.
+            Expr::InitList(_) => {
+                let name = format!(".complit{}", *complit_counter);
+                *complit_counter += 1;
+                let values = build_init_words(
+                    inner, 4, tctx, None, extra_data, complit_counter,
+                )?;
+                extra_data.push(DataEntry { name: name.clone(), values });
+                Ok(InitWord::Sym(name))
+            }
             _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
         },
-        Expr::Cast(_, inner) => eval_init_word(inner, tctx),
+        Expr::Cast(_, inner) => eval_init_word(inner, tctx, extra_data, complit_counter),
         _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
     }
 }
