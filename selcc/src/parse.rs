@@ -356,6 +356,31 @@ impl<'a> Parser<'a> {
                 }
             }
             Expr::Cast(_, inner) => self.eval_enum_init(inner),
+            Expr::Sizeof(arg) => match arg.as_ref() {
+                // C99 6.6/6: sizeof of a type-name is an integer
+                // constant expression and is valid inside an enum
+                // initializer. Forward-declared (empty-fields) struct
+                // and union tags have no known layout at this point;
+                // mirroring `try_const_eval`, treat them as
+                // unevaluable here and yield 0 so the caller errors
+                // visibly rather than baking in a wrong size.
+                crate::ast::SizeofArg::Type(ty) => {
+                    if matches!(
+                        ty.unqualified(),
+                        crate::types::Type::Struct { fields, .. }
+                        | crate::types::Type::Union { fields, .. }
+                        if fields.is_empty()
+                    ) {
+                        0
+                    } else {
+                        ty.size_bytes() as i64
+                    }
+                }
+                // sizeof(expr) inside an enum initializer is rare and
+                // would require full expression typing here; defer to
+                // 0 to match the existing fallback for unhandled forms.
+                crate::ast::SizeofArg::Expr(_) => 0,
+            },
             _ => 0,
         }
     }
