@@ -4614,6 +4614,43 @@ fn lower_aggregate_init(
             }
         }
 
+        // Chained designator into an aggregate element: e.g.
+        // `[i].field = v` produces ArrayDesignator { i, DesignatedInit { ... }}
+        // and `[i][j] = v` produces ArrayDesignator { i, ArrayDesignator { ... }}.
+        // The `value` is itself a designator that must be applied within the
+        // array element (which is itself an aggregate).  Recurse into
+        // lower_aggregate_init for that element with a single-item slice
+        // containing the inner designator so its own designator/offset logic
+        // runs against the element's type.  Skip the per-element zero-fill
+        // (preserving sibling writes from earlier items targeting the same
+        // index) by inlining the designator dispatch via a single-item list
+        // — `lower_aggregate_init` would zero the element first, but multiple
+        // designators referencing the same outer index (e.g. `[0].x` then
+        // `[0].y`) need to coexist.  Use a dedicated helper that bypasses
+        // the zero-fill.
+        if matches!(
+            inner_expr,
+            Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+        ) {
+            if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
+                let resolved_elem = resolve_type(elem_ty, ctx);
+                if matches!(
+                    resolved_elem.unqualified(),
+                    Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+                ) {
+                    let inner_words =
+                        crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
+                    let inner_base = elem_slot + 1 - inner_words;
+                    lower_designator_into(
+                        ctx, inner_expr, elem_ty, inner_base, inner_words,
+                    )?;
+                    cursor = next_cursor;
+                    i += consumed;
+                    continue;
+                }
+            }
+        }
+
         // Brace elision for positional items targeting a nested
         // aggregate: collect the subsequent flat items needed to fill
         // the inner aggregate and recurse.  Designators terminate the
@@ -4898,6 +4935,30 @@ fn lower_struct_init(
                 continue;
             }
         }
+        // Chained designator into an aggregate field: e.g. `.f.g = v` or
+        // `.a[3] = v`.  The field is itself aggregate and the value is
+        // another designator; recurse without zero-filling so sibling
+        // designators on the same field coexist.
+        if matches!(
+            inner,
+            Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+        ) {
+            let resolved_fty = resolve_type(fty, ctx);
+            let fty_is_aggregate = matches!(
+                resolved_fty.unqualified(),
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+            );
+            if fty_is_aggregate {
+                let inner_words =
+                    crate::types::size_words_ctx(&resolved_fty, ctx).max(1) as u32;
+                let inner_base = elem_slot + 1 - inner_words;
+                lower_designator_into(
+                    ctx, inner, fty, inner_base, inner_words,
+                )?;
+                cursor = fidx + 1;
+                continue;
+            }
+        }
         let val = lower_expr(ctx, inner)?;
         let fbytes = crate::types::size_bytes_ctx(fty, ctx);
         if fbytes == 1 {
@@ -4936,6 +4997,136 @@ fn lower_struct_init(
         cursor = fidx + 1;
     }
     Ok(())
+}
+
+/// Apply a single chained designator expression (`[i].field = v`,
+/// `.field[j] = v`, `[i][j] = v`, possibly deeper) to a sub-aggregate
+/// at `slot_base..slot_base+num_words` of type `ty`, WITHOUT zero-
+/// filling.  The non-zero-fill is essential: sibling designators
+/// targeting the same outer index (e.g. `[0].x = 1, [0].y = 2`) must
+/// coexist, and the outer `lower_aggregate_init` already zeroed the
+/// whole aggregate up front.  At each level we resolve the head
+/// designator's slot offset, then either recurse (if the value is
+/// another designator and the head's target type is itself aggregate)
+/// or fall through to the scalar store at the leaf slot.  Brace-
+/// enclosed nested init lists at the leaf delegate to
+/// `lower_aggregate_init` (which does zero-fill its own sub-aggregate,
+/// matching C99 semantics — a brace-enclosed designated initializer
+/// like `[0] = {1,2}` reinitialises the entire element).
+fn lower_designator_into(
+    ctx: &mut LowerCtx,
+    expr: &Expr,
+    ty: &Type,
+    slot_base: u32,
+    num_words: u32,
+) -> Result<()> {
+    let resolved_ty = resolve_type(ty, ctx);
+    match expr {
+        Expr::ArrayDesignator { index, value } => {
+            let idx = match index.as_ref() {
+                Expr::IntLit(v, _) => *v as u32,
+                _ => 0,
+            };
+            let elem_words = match resolved_ty.unqualified() {
+                Type::Array(elem_ty, _) => {
+                    crate::types::size_bytes_ctx(elem_ty, ctx).div_ceil(4).max(1)
+                }
+                _ => 1,
+            };
+            let word_off = idx.saturating_mul(elem_words);
+            if word_off >= num_words {
+                return Ok(());
+            }
+            let elem_slot = slot_base + num_words - 1 - word_off;
+            if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
+                let inner_base = elem_slot + 1 - elem_words;
+                lower_designator_or_scalar(
+                    ctx, value, elem_ty, inner_base, elem_slot, elem_words,
+                )?;
+            }
+            Ok(())
+        }
+        Expr::DesignatedInit { field, value } => {
+            let fields = resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
+            if let Some(fields) = fields {
+                if let Some((byte_off, fty)) = struct_field_offset(&fields, field, ctx) {
+                    let word_off = if is_union_type(&resolved_ty) {
+                        0
+                    } else {
+                        byte_off / 4
+                    };
+                    if word_off >= num_words {
+                        return Ok(());
+                    }
+                    let elem_slot = slot_base + num_words - 1 - word_off;
+                    let fty_words = crate::types::size_words_ctx(&fty, ctx).max(1);
+                    let inner_base = elem_slot + 1 - fty_words;
+                    lower_designator_or_scalar(
+                        ctx, value, &fty, inner_base, elem_slot, fty_words,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            // Should not reach here with a non-designator at the top
+            // level — caller checks before invoking.  Fall through to
+            // scalar store at slot_base + num_words - 1 to be safe.
+            let val = lower_expr(ctx, expr)?;
+            ctx.emit(IrOp::Store(val, 0, (slot_base + num_words - 1) as i32));
+            Ok(())
+        }
+    }
+}
+
+/// Helper used by `lower_designator_into` after one level of designator
+/// has been resolved to a target sub-aggregate or scalar slot.  Handles
+/// (a) further chained designators (recurse), (b) brace-enclosed nested
+/// init lists (delegate to `lower_aggregate_init`, which zero-fills the
+/// inner aggregate per C99), or (c) a leaf scalar value (direct store
+/// at `leaf_slot`).
+fn lower_designator_or_scalar(
+    ctx: &mut LowerCtx,
+    value: &Expr,
+    target_ty: &Type,
+    inner_base: u32,
+    leaf_slot: u32,
+    inner_words: u32,
+) -> Result<()> {
+    let resolved_target = resolve_type(target_ty, ctx);
+    let target_is_aggregate = matches!(
+        resolved_target.unqualified(),
+        Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+    );
+    match value {
+        Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+            if target_is_aggregate =>
+        {
+            lower_designator_into(ctx, value, target_ty, inner_base, inner_words)
+        }
+        Expr::InitList(items) if target_is_aggregate => {
+            lower_aggregate_init(
+                ctx, items, target_ty, inner_base, inner_words, true,
+            )
+        }
+        Expr::Cast(_, boxed)
+            if target_is_aggregate
+                && matches!(boxed.as_ref(), Expr::InitList(_)) =>
+        {
+            if let Expr::InitList(items) = boxed.as_ref() {
+                lower_aggregate_init(
+                    ctx, items, target_ty, inner_base, inner_words, true,
+                )?;
+            }
+            Ok(())
+        }
+        _ => {
+            let inner = strip_designator(value);
+            let val = lower_expr(ctx, inner)?;
+            ctx.emit(IrOp::Store(val, 0, leaf_slot as i32));
+            Ok(())
+        }
+    }
 }
 
 /// Peel a designator wrapper, returning the inner value expression.
