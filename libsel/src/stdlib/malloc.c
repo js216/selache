@@ -10,10 +10,10 @@
    ADSP-21569 boot ROM corrupts inits larger than ~32 KiB. The
    l2_bss region in libsel/link.ldf already maps seg_l2_bss to L2 with
    NO_INIT, so the heap costs no boot-image bytes there. */
-#pragma section("seg_l2_bss")
+#pragma section("seg_l2_bss", NO_INIT)
 unsigned char sel_heap[HEAP_SIZE];
-
-int sel_heap_initialized;
+#pragma section("seg_dmda")
+int sel_heap_initialized = 0;
 
 void sel_heap_init(void)
 {
