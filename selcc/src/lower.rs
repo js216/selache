@@ -2009,6 +2009,30 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
                 _ => tt.or(et),
             }
         }
+        // The result of a call has the callee's return type. Reporting
+        // it here lets nested arithmetic (e.g. `f() - pi/4.0`) classify
+        // the call as a float operand and apply the usual arithmetic
+        // conversions on the other side, instead of treating the call's
+        // type as unknown and falling back on operand-by-operand vreg
+        // inspection.
+        Expr::Call { name, .. } => ctx.function_return_types.get(name).cloned()
+            .or_else(|| {
+                ctx.local_types.get(name).or_else(|| ctx.globals.get(name))
+                    .and_then(function_ptr_ret_type)
+            })
+            .or_else(|| {
+                // Forward-declared external functions: parser records
+                // the return type directly in `globals`. See the
+                // matching note in the `Expr::Call` lowering arm.
+                if ctx.known_functions.contains(name) {
+                    ctx.globals.get(name).cloned()
+                } else {
+                    None
+                }
+            }),
+        Expr::CallIndirect { func_expr, .. } => {
+            expr_function_ptr_ret_type(func_expr, ctx)
+        }
         _ => None,
     }
 }
@@ -2304,7 +2328,18 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         Ok(dst)
                     }
                     LocalStorage::Static(ref sym) => {
-                        let dst = ctx.alloc_vreg();
+                        // Float-typed `static` locals must yield a float
+                        // vreg so downstream binary-op coercion sees the
+                        // value as already-floating-point. Without this,
+                        // a `static const double PI = ...` read gets an
+                        // int vreg, and later `q - PI` triggers a bogus
+                        // IntToFloat that reinterprets the IEEE-754 bit
+                        // pattern as an integer.
+                        let dst = if is_float_var {
+                            ctx.alloc_vreg_float()
+                        } else {
+                            ctx.alloc_vreg()
+                        };
                         ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
                         Ok(dst)
                     }
@@ -2336,8 +2371,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 // instead of dereferencing through the pointer.
                 let is_global_ptr = ctx.globals.get(name)
                     .is_some_and(|t| pointee_type_resolved(t, ctx).is_some());
+                let is_global_float = ctx.globals.get(name)
+                    .is_some_and(|t| t.is_float());
                 let dst = if is_global_ptr {
                     ctx.alloc_vreg_ptr()
+                } else if is_global_float {
+                    // See the matching note on the static-local branch:
+                    // a float-typed global must yield a float vreg or
+                    // mixed arithmetic with another float operand will
+                    // insert a bogus IntToFloat coercion.
+                    ctx.alloc_vreg_float()
                 } else {
                     ctx.alloc_vreg()
                 };
@@ -2504,7 +2547,47 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     arg_vregs.push(lower_expr(ctx, arg)?);
                 }
             }
-            let dst = ctx.alloc_vreg();
+            // The destination vreg's float/int classification must match
+            // the callee's return type. Without this, a function returning
+            // `double` lands in a non-float vreg, and any downstream
+            // arithmetic (`q1 - pi/4.0`) sees `is_float_vreg(l) == false`
+            // and inserts a bogus IntToFloat that reinterprets the IEEE-754
+            // bit pattern as a signed integer. The single-call test
+            // `cctest_atan2_fn` accidentally compares two values that both
+            // suffer the same FLOAT mis-conversion (the static PI_2 constant
+            // is also reinterpreted as int via FLOAT) and so the bug
+            // cancels; the four-quadrant test compares against runtime
+            // expressions like `pi / 4.0` that do not, so the score stays
+            // 0.
+            // Resolve the callee's return type so we can mark the
+            // destination vreg as float-class when appropriate. Three
+            // possible sources, in priority order:
+            //   1. `function_return_types` -- functions defined in this
+            //      translation unit.
+            //   2. A `FunctionPtr` in locals/globals -- function pointer
+            //      variables.
+            //   3. A bare return type stored in `globals` -- forward
+            //      declarations of external functions, which the parser
+            //      records as `GlobalDecl { ty: <return type>, ... }`
+            //      (params and variadic-ness are tracked separately, so
+            //      `ty` here is the return type only, not a `FunctionPtr`).
+            let ret_ty = ctx.function_return_types.get(name).cloned()
+                .or_else(|| {
+                    ctx.local_types.get(name).or_else(|| ctx.globals.get(name))
+                        .and_then(function_ptr_ret_type)
+                })
+                .or_else(|| {
+                    if ctx.known_functions.contains(name) {
+                        ctx.globals.get(name).cloned()
+                    } else {
+                        None
+                    }
+                });
+            let dst = if ret_ty.as_ref().is_some_and(|t| t.is_float()) {
+                ctx.alloc_vreg_float()
+            } else {
+                ctx.alloc_vreg()
+            };
             let callee_ty = ctx.local_types.get(name)
                 .or_else(|| ctx.globals.get(name));
             let is_fnptr = callee_ty.is_some_and(|t| is_function_ptr_type(t, ctx));
@@ -2544,7 +2627,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     arg_vregs.push(lower_expr(ctx, arg)?);
                 }
             }
-            let dst = ctx.alloc_vreg();
+            // Mirror the float-vs-int classification fix from the direct
+            // `Expr::Call` arm: an indirect callee whose return type is
+            // `float`/`double` must yield a float vreg so downstream
+            // arithmetic does not insert a spurious IntToFloat coercion.
+            let ret_ty = expr_function_ptr_ret_type(func_expr, ctx);
+            let dst = if ret_ty.as_ref().is_some_and(|t| t.is_float()) {
+                ctx.alloc_vreg_float()
+            } else {
+                ctx.alloc_vreg()
+            };
             ctx.emit(IrOp::CallIndirect(dst, func_addr, arg_vregs));
             Ok(dst)
         }

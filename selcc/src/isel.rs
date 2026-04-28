@@ -8,7 +8,7 @@
 //! `selinstr::encode` instruction types. Virtual register numbers are
 //! passed through verbatim -- the register allocator resolves them later.
 
-use crate::ir::{Cond, IrOp, Label};
+use crate::ir::{Cond, IrOp, Label, VReg};
 use crate::mach::{MachInstr, Reloc, RelocKind};
 use crate::target;
 
@@ -50,6 +50,29 @@ pub fn select_with_name(
     let mut label_positions = Vec::new();
     let mut call_return_labels: Vec<(usize, String)> = Vec::new();
     let mut call_site_counter = 0u32;
+
+    // Reserve six scratch vregs for the inline FDiv expansion. The
+    // RECIPS / Newton-Raphson / Markstein sequence uses fixed vreg
+    // ids 0..5 internally as scratch slots; if any of those happens to
+    // alias a live IR vreg the regalloc may map both names to the same
+    // physical register and the FDiv silently overwrites the live
+    // value. Picking a base above the IR's own max vreg guarantees no
+    // collision with live IR-vreg ids. The vreg id space after the
+    // pre-isel compression pass is capped at 0x80, so we need
+    // `max_ir_vreg + 6 < 0x80`.
+    let max_ir_vreg = max_ir_vreg(ir);
+    let fdiv_scratch_base: u8 = {
+        let base = max_ir_vreg.saturating_add(1);
+        assert!(
+            base + 5 < 0x80,
+            "function uses too many vregs to fit FDiv scratch slots; \
+             max_ir_vreg={max_ir_vreg}",
+        );
+        base as u8
+    };
+    // Convenience: scratch_vreg(i) gives the i-th FDiv scratch vreg
+    // id, replacing the old hardcoded literals 0..5.
+    let s = |i: u8| -> u8 { fdiv_scratch_base + i };
 
     for op in ir {
         match op {
@@ -1371,49 +1394,63 @@ pub fn select_with_name(
                 // rounding mode beyond the default round-to-nearest).
                 // Those would require the substantially longer library
                 // routine that SHARC C runtimes ship for `fdiv`.
-                if *lhs as u8 != 0 {
-                    instrs.push(MachInstr::compute_pass(0, *lhs as u8));
+                // The six scratch slots (a, b, two-point-zero, y, t, a_save)
+                // live at vreg ids `s(0)..s(5)` -- strictly above the IR's
+                // own max vreg, so they cannot alias any live value the
+                // surrounding code holds. The previous fixed ids 0..5
+                // collided with IR vregs assigned the same low ids; when an
+                // IR variable mapped to physical R3, the FDiv expansion
+                // overwrote it during the Newton-Raphson refinement and
+                // returned a corrupt quotient.
+                let s_a = s(0);
+                let s_b = s(1);
+                let s_two = s(2);
+                let s_y = s(3);
+                let s_t = s(4);
+                let s_a_save = s(5);
+                if *lhs as u8 != s_a {
+                    instrs.push(MachInstr::compute_pass(s_a, *lhs as u8));
                 }
-                if *rhs as u8 != 1 {
-                    instrs.push(MachInstr::compute_pass(1, *rhs as u8));
+                if *rhs as u8 != s_b {
+                    instrs.push(MachInstr::compute_pass(s_b, *rhs as u8));
                 }
-                // R2 = 2.0f (IEEE single-precision bit pattern).
+                // s_two = 2.0f (IEEE single-precision bit pattern).
                 instrs.push(MachInstr {
                     instr: Instruction::LoadImm {
-                        ureg: target::ureg_r(2),
+                        ureg: s_two,
                         value: 0x4000_0000,
                     },
                     reloc: None,
                 });
-                // F3 = RECIPS F1  (initial seed for 1 / b).
+                // s_y = RECIPS s_b  (initial seed for 1 / b).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Recips { rn: 3, rx: 1 }),
+                        compute: ComputeOp::Falu(FaluOp::Recips { rn: s_y, rx: s_b }),
                     },
                     reloc: None,
                 });
-                // F4 = F1 * F3  (b * y_0).
+                // s_t = s_b * s_y  (b * y_0).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 1, ry: 3 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_b, ry: s_y }),
                     },
                     reloc: None,
                 });
-                // F4 = F2 - F4  (2.0 - b*y_0).
+                // s_t = s_two - s_t  (2.0 - b*y_0).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Sub { rn: 4, rx: 2, ry: 4 }),
+                        compute: ComputeOp::Falu(FaluOp::Sub { rn: s_t, rx: s_two, ry: s_t }),
                     },
                     reloc: None,
                 });
-                // F3 = F3 * F4  (y_1 = y_0 * (2 - b*y_0)).
+                // s_y = s_y * s_t  (y_1 = y_0 * (2 - b*y_0)).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 3, rx: 3, ry: 4 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_y, rx: s_y, ry: s_t }),
                     },
                     reloc: None,
                 });
@@ -1421,70 +1458,70 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 1, ry: 3 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_b, ry: s_y }),
                     },
                     reloc: None,
                 });
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Sub { rn: 4, rx: 2, ry: 4 }),
+                        compute: ComputeOp::Falu(FaluOp::Sub { rn: s_t, rx: s_two, ry: s_t }),
                     },
                     reloc: None,
                 });
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 3, rx: 3, ry: 4 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_y, rx: s_y, ry: s_t }),
                     },
                     reloc: None,
                 });
-                // F5 = F0  (save numerator a; the next FMul clobbers F0).
-                instrs.push(MachInstr::compute_pass(5, 0));
-                // F0 = F0 * F3  (initial quotient q_0 = a * y_2).
+                // s_a_save = s_a  (save numerator a; the next FMul clobbers s_a).
+                instrs.push(MachInstr::compute_pass(s_a_save, s_a));
+                // s_a = s_a * s_y  (initial quotient q_0 = a * y_2).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 0, rx: 0, ry: 3 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_a, rx: s_a, ry: s_y }),
                     },
                     reloc: None,
                 });
                 // Markstein residual correction: r = a - b*q_0,
                 //                                q = q_0 + r * y_2.
-                // F4 = F1 * F0  (b * q_0).
+                // s_t = s_b * s_a  (b * q_0).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 1, ry: 0 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_b, ry: s_a }),
                     },
                     reloc: None,
                 });
-                // F4 = F5 - F4  (residual r = a - b*q_0).
+                // s_t = s_a_save - s_t  (residual r = a - b*q_0).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Sub { rn: 4, rx: 5, ry: 4 }),
+                        compute: ComputeOp::Falu(FaluOp::Sub { rn: s_t, rx: s_a_save, ry: s_t }),
                     },
                     reloc: None,
                 });
-                // F4 = F4 * F3  (r * y_2).
+                // s_t = s_t * s_y  (r * y_2).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: 4, rx: 4, ry: 3 }),
+                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_t, ry: s_y }),
                     },
                     reloc: None,
                 });
-                // F0 = F0 + F4  (corrected quotient).
+                // s_a = s_a + s_t  (corrected quotient).
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Add { rn: 0, rx: 0, ry: 4 }),
+                        compute: ComputeOp::Falu(FaluOp::Add { rn: s_a, rx: s_a, ry: s_t }),
                     },
                     reloc: None,
                 });
-                if *dst as u8 != 0 {
-                    instrs.push(MachInstr::compute_pass(*dst as u8, 0));
+                if *dst as u8 != s_a {
+                    instrs.push(MachInstr::compute_pass(*dst as u8, s_a));
                 }
             }
 
@@ -2903,6 +2940,120 @@ fn emit_runtime_call_32_divmod(
 }
 
 /// Map IR condition to SHARC condition code.
+/// Largest vreg id referenced anywhere in `ir`, or 0 if no vreg is
+/// referenced. Used by inline-expansion helpers (e.g. `IrOp::FDiv`'s
+/// Newton-Raphson scratch slots) to pick scratch vreg ids strictly
+/// above the IR's own range, so they cannot alias a live IR vreg and
+/// be silently coalesced onto the same physical register by regalloc.
+fn max_ir_vreg(ir: &[IrOp]) -> u32 {
+    let mut m = 0u32;
+    let mut bump = |v: VReg| {
+        if v > m {
+            m = v;
+        }
+    };
+    for op in ir {
+        match op {
+            IrOp::LoadImm(a, _) | IrOp::LoadImm64(a, _)
+            | IrOp::LoadGlobal(a, _) | IrOp::ReadGlobal(a, _)
+            | IrOp::ReadGlobal64(a, _)
+            | IrOp::LoadString(a, _) | IrOp::LoadWideString(a, _)
+            | IrOp::FrameAddr(a, _)
+            | IrOp::LoadStackArg(a, _) | IrOp::StackArgAddr(a, _)
+            | IrOp::StackSave(a) => bump(*a),
+            IrOp::StoreGlobal(a, _) | IrOp::WriteGlobal64(a, _)
+            | IrOp::StackRestore(a) => bump(*a),
+            IrOp::Copy(a, b)
+            | IrOp::Copy64(a, b)
+            | IrOp::Neg(a, b)
+            | IrOp::Neg64(a, b)
+            | IrOp::BitNot(a, b)
+            | IrOp::BitNot64(a, b)
+            | IrOp::FNeg(a, b)
+            | IrOp::IntToFloat(a, b)
+            | IrOp::FloatToInt(a, b)
+            | IrOp::IntToLongLong(a, b)
+            | IrOp::SExtToLongLong(a, b)
+            | IrOp::LongLongToInt(a, b)
+            | IrOp::StackAlloc(a, b) => {
+                bump(*a);
+                bump(*b);
+            }
+            IrOp::Add(a, b, c) | IrOp::Sub(a, b, c) | IrOp::Mul(a, b, c)
+            | IrOp::Div(a, b, c) | IrOp::UDiv(a, b, c)
+            | IrOp::Mod(a, b, c) | IrOp::UMod(a, b, c)
+            | IrOp::BitAnd(a, b, c) | IrOp::BitOr(a, b, c)
+            | IrOp::BitXor(a, b, c)
+            | IrOp::Shl(a, b, c) | IrOp::Shr(a, b, c) | IrOp::Lshr(a, b, c)
+            | IrOp::FAdd(a, b, c) | IrOp::FSub(a, b, c)
+            | IrOp::FMul(a, b, c) | IrOp::FDiv(a, b, c)
+            | IrOp::Add64(a, b, c) | IrOp::Sub64(a, b, c)
+            | IrOp::Mul64(a, b, c) | IrOp::Div64(a, b, c)
+            | IrOp::UDiv64(a, b, c) | IrOp::Mod64(a, b, c)
+            | IrOp::UMod64(a, b, c)
+            | IrOp::BitAnd64(a, b, c) | IrOp::BitOr64(a, b, c)
+            | IrOp::BitXor64(a, b, c)
+            | IrOp::Shl64(a, b, c) | IrOp::Shr64(a, b, c)
+            | IrOp::UShr64(a, b, c) => {
+                bump(*a);
+                bump(*b);
+                bump(*c);
+            }
+            IrOp::FCmp(a, b) | IrOp::Cmp(a, b) | IrOp::Cmp64(a, b)
+            | IrOp::UCmp(a, b) | IrOp::UCmp64(a, b) => {
+                bump(*a);
+                bump(*b);
+            }
+            IrOp::Load(a, b, _) | IrOp::Load64(a, b, _) => {
+                bump(*a);
+                if *b != 0 {
+                    bump(*b);
+                }
+            }
+            IrOp::Store(a, b, _) | IrOp::Store64(a, b, _) => {
+                bump(*a);
+                if *b != 0 {
+                    bump(*b);
+                }
+            }
+            IrOp::Call(dst, _, args)
+            | IrOp::CallStruct { dst_addr: dst, args, .. } => {
+                bump(*dst);
+                for a in args {
+                    bump(*a);
+                }
+            }
+            IrOp::CallIndirect(dst, addr, args) => {
+                bump(*dst);
+                bump(*addr);
+                for a in args {
+                    bump(*a);
+                }
+            }
+            IrOp::CallIndirectStruct { addr, args, dst_addr, .. } => {
+                bump(*addr);
+                bump(*dst_addr);
+                for a in args {
+                    bump(*a);
+                }
+            }
+            IrOp::Ret(Some(v)) => bump(*v),
+            IrOp::RetStruct { src_addr, dst_addr, .. } => {
+                bump(*src_addr);
+                if let Some(d) = dst_addr {
+                    bump(*d);
+                }
+            }
+            IrOp::LoadStructRetPtr(v) => bump(*v),
+            IrOp::Ret(None)
+            | IrOp::Branch(_) | IrOp::BranchCond(_, _) | IrOp::Label(_)
+            | IrOp::HardwareLoop { .. }
+            | IrOp::Nop => {}
+        }
+    }
+    m
+}
+
 fn ir_cond_to_sharc(cond: Cond) -> u8 {
     match cond {
         Cond::Eq => target::COND_EQ,
