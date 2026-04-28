@@ -356,22 +356,29 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     let mut data_entries: Vec<DataEntry> = Vec::new();
     let mut extra_data: Vec<DataEntry> = Vec::new();
     let mut complit_counter: u32 = 0;
+    let mut interior_reqs: Vec<InteriorReq> = Vec::new();
     for global in &unit.globals {
         if global.is_extern {
             continue;
         }
         if let Some(init) = &global.init {
+            let mut ictx = InitCtx {
+                extra_data: &mut extra_data,
+                complit_counter: &mut complit_counter,
+                global_types: &global_types,
+                interior_reqs: &mut interior_reqs,
+            };
             match build_init_words(
                 init,
                 crate::types::size_bytes_ctx(&global.ty, &unit_tctx),
                 &unit_tctx,
                 Some(&global.ty),
-                &mut extra_data,
-                &mut complit_counter,
+                &mut ictx,
             ) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: global.name.clone(),
                     values,
+                    interior: Vec::new(),
                 }),
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", global.name);
@@ -380,6 +387,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                     data_entries.push(DataEntry {
                         name: global.name.clone(),
                         values: vec![InitWord::Num(0); words as usize],
+                        interior: Vec::new(),
                     });
                 }
             }
@@ -387,17 +395,23 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
     for sl in &all_static_locals {
         if let Some(init) = &sl.init {
+            let mut ictx = InitCtx {
+                extra_data: &mut extra_data,
+                complit_counter: &mut complit_counter,
+                global_types: &global_types,
+                interior_reqs: &mut interior_reqs,
+            };
             match build_init_words(
                 init,
                 crate::types::size_bytes_ctx(&sl.ty, &unit_tctx),
                 &unit_tctx,
                 Some(&sl.ty),
-                &mut extra_data,
-                &mut complit_counter,
+                &mut ictx,
             ) {
                 Ok(values) => data_entries.push(DataEntry {
                     name: sl.symbol.clone(),
                     values,
+                    interior: Vec::new(),
                 }),
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", sl.symbol);
@@ -405,6 +419,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                     data_entries.push(DataEntry {
                         name: sl.symbol.clone(),
                         values: vec![InitWord::Num(0); words as usize],
+                        interior: Vec::new(),
                     });
                 }
             }
@@ -425,12 +440,30 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         deduped.reverse();
         data_entries = deduped;
     }
+    // Plant any synthetic interior labels requested by file-scope
+    // `&array[N]` / `&obj.field` initialisers. Each request adds an
+    // alias symbol at the named word offset of the target entry; the
+    // emitter resolves multiple symbols on the same word via `.SET`.
+    for req in &interior_reqs {
+        if let Some(entry) = data_entries.iter_mut().find(|e| e.name == req.target_global) {
+            // Pad the entry's word vector if the requested offset is
+            // past the materialised initialisers (e.g. trailing zero
+            // tail of a sized array). The bytes were going to be zero
+            // anyway; we just need a slot to hang the label on.
+            if req.word_offset >= entry.values.len() {
+                entry.values.resize(req.word_offset + 1, InitWord::Num(0));
+            }
+            if !entry.interior.iter().any(|(o, l)| *o == req.word_offset && l == &req.label) {
+                entry.interior.push((req.word_offset, req.label.clone()));
+            }
+        }
+    }
     if !data_entries.is_empty() {
         out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for e in &data_entries {
             let sym = with_abi_suffix(&e.name);
             let _ = writeln!(out, ".GLOBAL {sym};");
-            emit_var_bytes(&mut out, &sym, &e.values);
+            emit_var_bytes(&mut out, &sym, &e.values, &e.interior);
         }
         out.push_str(".ENDSEG;\n\n");
     }
@@ -460,7 +493,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let _ = writeln!(out, ".GLOBAL {sym};");
             let words = sz.div_ceil(4).max(1);
             let zero = vec![InitWord::Num(0); words as usize];
-            emit_var_bytes(&mut out, &sym, &zero);
+            emit_var_bytes(&mut out, &sym, &zero, &[]);
         }
         out.push_str(".ENDSEG;\n\n");
     }
@@ -487,7 +520,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             bytes.push(0);
             let words: Vec<InitWord> =
                 pack_bytes_le(&bytes).into_iter().map(InitWord::Num).collect();
-            emit_var_bytes(&mut out, &name, &words);
+            emit_var_bytes(&mut out, &name, &words, &[]);
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".wstr{i}"));
@@ -495,7 +528,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let mut words: Vec<u32> = ws.clone();
             words.push(0);
             let words: Vec<InitWord> = words.into_iter().map(InitWord::Num).collect();
-            emit_var_bytes(&mut out, &name, &words);
+            emit_var_bytes(&mut out, &name, &words, &[]);
         }
         out.push_str(".ENDSEG;\n");
     }
@@ -549,35 +582,72 @@ enum InitWord {
 /// Emit a `.VAR name = v0, v1, ...;` initializer line. Using `.VAR`
 /// keeps each logical word at 4 bytes regardless of char-size, which
 /// matches what the previous byte-level emitter produced.
-fn emit_var_bytes(out: &mut String, sym: &str, values: &[InitWord]) {
-    let render = |w: &InitWord| -> String {
-        match w {
-            InitWord::Num(v) => format!("0x{v:08X}"),
-            InitWord::Sym(name) => with_abi_suffix(name),
-        }
-    };
+///
+/// `interior` lists synthetic labels to drop on words at given indices,
+/// produced for `&array[N]` / `&obj.field` file-scope initialisers so
+/// the linker can resolve those addresses by symbol rather than by an
+/// (unsupported) `sym + offset` relocation.
+fn emit_var_bytes(
+    out: &mut String,
+    sym: &str,
+    values: &[InitWord],
+    interior: &[(usize, String)],
+) {
     if values.is_empty() {
         let _ = writeln!(out, ".VAR {sym};");
         return;
     }
-    if values.len() == 1 {
-        let _ = writeln!(out, ".VAR {sym} = {};", render(&values[0]));
-        return;
-    }
-    // Multiple words: emit one .VAR per value with a sequential helper
-    // name, then rely on the primary name to point at the first.
-    // selas does not support `.VAR name[] = {...}`, so for multi-word
-    // initialisers we just emit the first word under the real name and
-    // follow with anonymous continuation words.
-    let _ = writeln!(out, ".VAR {sym} = {};", render(&values[0]));
-    for v in &values[1..] {
-        let _ = writeln!(out, ".VAR = {};", render(v));
+    // Each word slot can carry at most one `.VAR` name (every `.VAR`
+    // directive advances the data cursor by 4 bytes). When more than
+    // one symbol must point at the same byte offset — the primary name
+    // and one or more synthetic interior labels — use `.SET` to make
+    // the extras alias the slot symbol that actually lays the bytes.
+    let render_word = |out: &mut String, idx: usize, val: &InitWord| {
+        // Pick which name owns the .VAR slot for this word. Word 0 is
+        // owned by the entry's primary name; later words use the first
+        // requested interior label (if any), with any further labels
+        // aliased via `.SET`.
+        let labels_here: Vec<&String> = interior.iter()
+            .filter(|(i, _)| *i == idx)
+            .map(|(_, l)| l)
+            .collect();
+        let v = match val {
+            InitWord::Num(n) => format!("0x{n:08X}"),
+            InitWord::Sym(name) => with_abi_suffix(name),
+        };
+        if idx == 0 {
+            // Slot owner is `sym`. Alias every interior label to it.
+            for label in &labels_here {
+                let _ = writeln!(out, ".SET {} = {};", with_abi_suffix(label), sym);
+            }
+            let _ = writeln!(out, ".VAR {sym} = {v};");
+        } else if let Some(first) = labels_here.first() {
+            // Slot owner is the first interior label; the rest alias it.
+            let owner = with_abi_suffix(first);
+            let _ = writeln!(out, ".VAR {owner} = {v};");
+            for label in &labels_here[1..] {
+                let _ = writeln!(out, ".SET {} = {};", with_abi_suffix(label), owner);
+            }
+        } else {
+            let _ = writeln!(out, ".VAR = {v};");
+        }
+    };
+    for (i, v) in values.iter().enumerate() {
+        render_word(out, i, v);
     }
 }
 
 struct DataEntry {
     name: String,
     values: Vec<InitWord>,
+    /// Synthetic labels that must point at interior words of this
+    /// entry. Produced by `&array[N]` / `&obj.field` initialisers in
+    /// other globals: each request adds an extra symbol at the named
+    /// word index so the link-time `R_SHARC_ADDR32` against that
+    /// symbol resolves to the right byte offset. selas does not
+    /// support `sym + offset` relocations, so the offset is folded
+    /// into the symbol itself instead.
+    interior: Vec<(usize, String)>,
 }
 
 /// Walk a global initializer expression, recording every function-name
@@ -667,8 +737,7 @@ fn build_init_words(
     size_bytes: u32,
     tctx: &dyn crate::types::TypeCtx,
     ty: Option<&crate::types::Type>,
-    extra_data: &mut Vec<DataEntry>,
-    complit_counter: &mut u32,
+    ictx: &mut InitCtx<'_>,
 ) -> Result<Vec<InitWord>> {
     use crate::types::Type;
     match init {
@@ -749,7 +818,7 @@ fn build_init_words(
                         // Recursively build the value's words and place
                         // them at the field's word offset.
                         let fsize = crate::types::size_bytes_ctx(fty, tctx);
-                        let sub = build_init_words(value, fsize, tctx, Some(fty), extra_data, complit_counter)?;
+                        let sub = build_init_words(value, fsize, tctx, Some(fty), ictx)?;
                         for (k, w) in sub.into_iter().enumerate() {
                             ensure(&mut v, woff + k);
                             v[woff + k] = w;
@@ -763,7 +832,7 @@ fn build_init_words(
                             .unwrap_or(4);
                         let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
                         let woff = i * elem_words;
-                        let sub = build_init_words(value, elem_size, tctx, array_elem, extra_data, complit_counter)?;
+                        let sub = build_init_words(value, elem_size, tctx, array_elem, ictx)?;
                         for (k, w) in sub.into_iter().enumerate() {
                             ensure(&mut v, woff + k);
                             v[woff + k] = w;
@@ -780,7 +849,7 @@ fn build_init_words(
                             }
                             let (_, woff, fty) = &field_map[field_cursor];
                             let fsize = crate::types::size_bytes_ctx(fty, tctx);
-                            let sub = build_init_words(other, fsize, tctx, Some(*fty), extra_data, complit_counter)?;
+                            let sub = build_init_words(other, fsize, tctx, Some(*fty), ictx)?;
                             let woff = *woff;
                             for (k, w) in sub.into_iter().enumerate() {
                                 ensure(&mut v, woff + k);
@@ -791,7 +860,7 @@ fn build_init_words(
                             let elem_size = crate::types::size_bytes_ctx(elem, tctx);
                             let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
                             let woff = field_cursor * elem_words;
-                            let sub = build_init_words(other, elem_size, tctx, Some(elem), extra_data, complit_counter)?;
+                            let sub = build_init_words(other, elem_size, tctx, Some(elem), ictx)?;
                             for (k, w) in sub.into_iter().enumerate() {
                                 ensure(&mut v, woff + k);
                                 v[woff + k] = w;
@@ -799,7 +868,7 @@ fn build_init_words(
                             field_cursor += 1;
                         } else {
                             ensure(&mut v, field_cursor);
-                            v[field_cursor] = eval_init_word(other, tctx, extra_data, complit_counter)?;
+                            v[field_cursor] = eval_init_word(other, tctx, ictx)?;
                             field_cursor += 1;
                         }
                     }
@@ -810,9 +879,99 @@ fn build_init_words(
         other => {
             let words = size_bytes.div_ceil(4).max(1);
             let mut v: Vec<InitWord> = vec![InitWord::Num(0); words as usize];
-            v[0] = eval_init_word(other, tctx, extra_data, complit_counter)?;
+            v[0] = eval_init_word(other, tctx, ictx)?;
             Ok(v)
         }
+    }
+}
+
+/// A request to plant a synthetic label on an interior word of a
+/// named data entry. Used to rewrite `&array[N]` / `&obj.field`
+/// file-scope initialisers as a bare symbol reference: selas does not
+/// support `sym + offset` relocations, so the offset is materialised
+/// into the symbol set instead, and the linker resolves the synthetic
+/// label to the correct interior byte offset.
+struct InteriorReq {
+    target_global: String,
+    word_offset: usize,
+    label: String,
+}
+
+/// Mutable + read-only state threaded through `build_init_words` and
+/// `eval_init_word`. Bundling the references here keeps each function
+/// at a sane argument count and makes the data flow explicit:
+/// `extra_data` and `interior_reqs` accumulate side effects produced
+/// by walking the initializer tree, `complit_counter` mints fresh
+/// names for synthesised compound-literal storage, and `global_types`
+/// is the read-only map used to resolve `&ident[N]` lvalue chains.
+struct InitCtx<'a> {
+    extra_data: &'a mut Vec<DataEntry>,
+    complit_counter: &'a mut u32,
+    global_types: &'a HashMap<String, crate::types::Type>,
+    interior_reqs: &'a mut Vec<InteriorReq>,
+}
+
+/// Walk a constant-address lvalue chain rooted at a named global and
+/// return `(global_name, byte_offset, leaf_type)` if every step is a
+/// constant-index array subscript or a struct/union member access.
+/// Returns `None` if the chain bottoms out in something selcc cannot
+/// fold at compile time (a non-constant index, a typedef'd aggregate
+/// without a tag, a deref, etc.); the caller falls back to its
+/// numeric `eval_const_expr` path.
+fn resolve_static_lvalue(
+    expr: &Expr,
+    tctx: &dyn crate::types::TypeCtx,
+    global_types: &HashMap<String, crate::types::Type>,
+) -> Option<(String, u32, crate::types::Type)> {
+    use crate::types::Type;
+    match expr {
+        Expr::Ident(name) => {
+            let ty = global_types.get(name)?.clone();
+            Some((name.clone(), 0, ty))
+        }
+        Expr::Index(base, idx) => {
+            let i = eval_const_expr(idx, tctx).ok()? as i64;
+            if i < 0 {
+                return None;
+            }
+            let (root, off, base_ty) = resolve_static_lvalue(base, tctx, global_types)?;
+            let elem_ty = match strip_type(&base_ty, tctx) {
+                Type::Array(elem, _) => (**elem).clone(),
+                Type::Pointer(elem) => (**elem).clone(),
+                _ => return None,
+            };
+            let elem_size = crate::types::size_bytes_ctx(&elem_ty, tctx);
+            Some((root, off + (i as u32) * elem_size, elem_ty))
+        }
+        Expr::Member(base, field) => {
+            let (root, off, base_ty) = resolve_static_lvalue(base, tctx, global_types)?;
+            let stripped = strip_type(&base_ty, tctx);
+            let fields = match stripped {
+                Type::Struct { name, fields } => {
+                    if !fields.is_empty() {
+                        fields.clone()
+                    } else if let Some(n) = name {
+                        tctx.resolve_tag(n)?.to_vec()
+                    } else {
+                        return None;
+                    }
+                }
+                Type::Union { name, fields } => {
+                    if !fields.is_empty() {
+                        fields.clone()
+                    } else if let Some(n) = name {
+                        tctx.resolve_tag(n)?.to_vec()
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            };
+            let (foff, _, _) = crate::types::struct_field_layout_ctx(&fields, field, tctx)?;
+            let fty = fields.iter().find(|(n, _)| n == field)?.1.clone();
+            Some((root, off + foff, fty))
+        }
+        _ => None,
     }
 }
 
@@ -826,8 +985,7 @@ fn build_init_words(
 fn eval_init_word(
     expr: &Expr,
     tctx: &dyn crate::types::TypeCtx,
-    extra_data: &mut Vec<DataEntry>,
-    complit_counter: &mut u32,
+    ictx: &mut InitCtx<'_>,
 ) -> Result<InitWord> {
     match expr {
         Expr::Ident(name) => Ok(InitWord::Sym(name.clone())),
@@ -843,13 +1001,13 @@ fn eval_init_word(
             Expr::Cast(ty, init_inner)
                 if matches!(init_inner.as_ref(), Expr::InitList(_)) =>
             {
-                let name = format!(".complit{}", *complit_counter);
-                *complit_counter += 1;
+                let name = format!(".complit{}", *ictx.complit_counter);
+                *ictx.complit_counter += 1;
                 let size = crate::types::size_bytes_ctx(ty, tctx);
                 let values = build_init_words(
-                    init_inner, size, tctx, Some(ty), extra_data, complit_counter,
+                    init_inner, size, tctx, Some(ty), ictx,
                 )?;
-                extra_data.push(DataEntry { name: name.clone(), values });
+                ictx.extra_data.push(DataEntry { name: name.clone(), values, interior: Vec::new() });
                 Ok(InitWord::Sym(name))
             }
             // Bare compound literal without an explicit cast (rare,
@@ -857,17 +1015,44 @@ fn eval_init_word(
             // way but with no known element type — fall back to flat
             // word slots.
             Expr::InitList(_) => {
-                let name = format!(".complit{}", *complit_counter);
-                *complit_counter += 1;
+                let name = format!(".complit{}", *ictx.complit_counter);
+                *ictx.complit_counter += 1;
                 let values = build_init_words(
-                    inner, 4, tctx, None, extra_data, complit_counter,
+                    inner, 4, tctx, None, ictx,
                 )?;
-                extra_data.push(DataEntry { name: name.clone(), values });
+                ictx.extra_data.push(DataEntry { name: name.clone(), values, interior: Vec::new() });
                 Ok(InitWord::Sym(name))
+            }
+            // `&array[N]`, `&obj.field`, `&array[N].field`, `&obj.field[N]`,
+            // ... — any constant-index lvalue chain rooted at a named
+            // global. Compile-time fold the chain into a (root, byte
+            // offset) pair, then plant a synthetic interior label on
+            // the root entry so the link-time R_SHARC_ADDR32 against
+            // that label resolves to the correct interior byte offset.
+            Expr::Index(_, _) | Expr::Member(_, _) => {
+                if let Some((root, byte_off, _leaf_ty)) =
+                    resolve_static_lvalue(inner, tctx, ictx.global_types)
+                {
+                    if byte_off % 4 != 0 {
+                        return Err(Error::Compile { msg: format!(
+                            "address-of `{root}` interior at byte {byte_off} is not \
+                             word-aligned; sub-word interior addresses in file-scope \
+                             initializers are not supported"
+                        ) });
+                    }
+                    let label = format!(".addrof_{}_{}", root, byte_off / 4);
+                    ictx.interior_reqs.push(InteriorReq {
+                        target_global: root,
+                        word_offset: (byte_off / 4) as usize,
+                        label: label.clone(),
+                    });
+                    return Ok(InitWord::Sym(label));
+                }
+                Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32))
             }
             _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
         },
-        Expr::Cast(_, inner) => eval_init_word(inner, tctx, extra_data, complit_counter),
+        Expr::Cast(_, inner) => eval_init_word(inner, tctx, ictx),
         _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
     }
 }
