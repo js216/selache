@@ -1120,7 +1120,7 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         let pair = lower_complex_expr(ctx, init_expr)?;
                         ctx.emit(IrOp::Store(pair.real, 0, storage_slot as i32));
                         ctx.emit(IrOp::Store(pair.imag, 0, (storage_slot - 1) as i32));
-                    } else if ty.is_long_long() {
+                    } else if ty_is_long_long(ty, ctx) {
                         let val = lower_expr(ctx, init_expr)?;
                         // Widen 32-bit value to 64-bit if needed.
                         let val = if !ctx.is_64bit_vreg(val) {
@@ -1514,6 +1514,20 @@ fn resolve_type_chain(ty: &Type, ctx: &LowerCtx) -> Type {
         };
         cur = next;
     }
+}
+
+/// Typedef-aware version of `Type::is_long_long`.  A `uint64_t`-style
+/// typedef (defined in `<stdint.h>` as `typedef unsigned long long
+/// uint64_t`) is a `Type::Typedef("uint64_t")` at the AST level and
+/// `Type::is_long_long` returns `false` because the method has no
+/// resolution context.  Local-variable initialization, identifier
+/// loads, and cast-target shape decisions must look through the
+/// typedef so a `uint64_t c = 0x100000000ULL;` stores both halves of
+/// the pair via `Store64` instead of falling through to the 32-bit
+/// scalar `Store` path (which silently truncates the high word and
+/// breaks every later use of `c`).
+fn ty_is_long_long(ty: &Type, ctx: &LowerCtx) -> bool {
+    resolve_type_chain(ty, ctx).is_long_long()
 }
 
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
@@ -2340,8 +2354,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // Check locals first, then globals.
             let is_float_var = ctx.local_types.get(name)
                 .is_some_and(|t| t.is_float());
-            let is_64bit_var = ctx.local_types.get(name)
-                .is_some_and(|t| t.is_long_long());
+            let is_64bit_var = ctx.local_types.get(name).cloned()
+                .is_some_and(|t| ty_is_long_long(&t, ctx));
             // C99 6.3.2.1: array-to-pointer decay.
             let is_array = ctx.local_types.get(name)
                 .is_some_and(|t| matches!(t, Type::Array(..)));
@@ -2418,8 +2432,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::LoadGlobal(dst, name.clone()));
                     return Ok(dst);
                 }
-                let is_global_64 = ctx.globals.get(name)
-                    .is_some_and(|t| t.is_long_long());
+                let is_global_64 = ctx.globals.get(name).cloned()
+                    .is_some_and(|t| ty_is_long_long(&t, ctx));
                 if is_global_64 {
                     let dst = ctx.alloc_vreg_pair();
                     ctx.emit(IrOp::ReadGlobal64(dst, name.clone()));
@@ -2670,7 +2684,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
 
             // Check for 64-bit assignment.
             let target_is_64 = target_ty.as_ref()
-                .is_some_and(|t| t.is_long_long());
+                .is_some_and(|t| ty_is_long_long(t, ctx));
 
             let val = lower_expr(ctx, value)?;
             let val_is_64 = ctx.is_64bit_vreg(val);
@@ -2992,7 +3006,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let src_is_float = ctx.is_float_vreg(val);
             let src_is_64 = ctx.is_64bit_vreg(val);
             let dst_is_float = ty.is_float();
-            let dst_is_64 = ty.is_long_long();
+            let dst_is_64 = ty_is_long_long(ty, ctx);
 
             // C99 6.3.1.2: conversion to _Bool: any scalar != 0 becomes 1, else 0
             if *ty == Type::Bool {
@@ -4248,7 +4262,7 @@ fn lower_compound_assign(
     // Detect 64-bit target: `long long x; x <<= n;` must load/op/store
     // as a two-word pair. Without this dispatch the 32-bit paths below
     // would truncate both operands and the result.
-    let target_is_64 = expr_type(target, ctx).is_some_and(|t| t.is_long_long());
+    let target_is_64 = expr_type(target, ctx).is_some_and(|t| ty_is_long_long(&t, ctx));
     if target_is_64 {
         return lower_compound_assign_64(ctx, op, target, value, is_unsigned);
     }
