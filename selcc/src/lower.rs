@@ -938,6 +938,22 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     ctx.emit(IrOp::RetStruct { src_addr, dst_addr, num_words });
                     return Ok(());
                 }
+                if ctx.return_type.is_complex() {
+                    let pair = lower_complex_expr(ctx, e)?;
+                    let slot = ctx.frame_size;
+                    ctx.frame_size += 2;
+                    let storage_slot = slot + 1;
+                    ctx.emit(IrOp::Store(pair.real, 0, storage_slot as i32));
+                    ctx.emit(IrOp::Store(pair.imag, 0, (storage_slot - 1) as i32));
+                    let src_addr = ctx.alloc_vreg_ptr();
+                    ctx.emit(IrOp::FrameAddr(src_addr, storage_slot as i32));
+                    ctx.emit(IrOp::RetStruct {
+                        src_addr,
+                        dst_addr: None,
+                        num_words: 2,
+                    });
+                    return Ok(());
+                }
             }
             let val = match expr {
                 Some(e) => Some(lower_expr(ctx, e)?),
@@ -6302,6 +6318,19 @@ mod tests {
         // Complex addition emits two FAdd ops (real + real, imag + imag).
         let fadd_count = ops.iter().filter(|op| matches!(op, IrOp::FAdd(..))).count();
         assert!(fadd_count >= 2, "expected at least 2 FAdd for complex add, got {fadd_count}");
+    }
+
+    #[test]
+    fn lower_complex_return_uses_pair_return() {
+        let src = "double _Complex f(double _Complex z) { return z; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
+        assert!(ops.iter().any(|op| matches!(
+            op,
+            IrOp::RetStruct { dst_addr: None, num_words: 2, .. }
+        )), "expected complex return to use two-word RetStruct, got: {ops:?}");
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Ret(Some(_)))),
+            "complex return must not collapse to scalar Ret: {ops:?}");
     }
 
     #[test]
