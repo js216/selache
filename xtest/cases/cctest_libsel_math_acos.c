@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define M_PI_4 0.78539816339744830962
+
 float sqrtf(float x)
 {
    union {

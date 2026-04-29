@@ -6,6 +6,7 @@
 
 static const float pi_val = 3.14159265358979323846f;
 static const float pi_over_2 = 1.5707963267948966f;
+static const float pi_over_4 = 0.7853981633974483f;
 
 float atan2f(float y, float x)
 {
@@ -22,7 +23,7 @@ float atan2f(float y, float x)
 		return y > 0.0f ? pi_over_2 : -pi_over_2;
 
 	if (isinf(x) && isinf(y)) {
-		float px = x > 0.0f ? (float)M_PI_4 : 3.0f * (float)M_PI_4;
+		float px = x > 0.0f ? pi_over_4 : 3.0f * pi_over_4;
 		return y > 0.0f ? px : -px;
 	}
 

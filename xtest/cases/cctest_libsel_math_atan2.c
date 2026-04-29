@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define M_PI_4 0.78539816339744830962
+
 static const float _af_pi_2 = 1.5707963267948966f;
 static const float _af_pi_4 = 0.7853981633974483f;
 
