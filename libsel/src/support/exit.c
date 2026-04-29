@@ -10,7 +10,7 @@
    point that exit.c, abort.c, and the assert handler all funnel
    through. */
 
-void _Exit(int status)
+__attribute__((weak)) void _Exit(int status)
 {
     (void)status;
     for (;;) {

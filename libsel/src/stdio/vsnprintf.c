@@ -116,7 +116,7 @@ enum length_mod {
 	LEN_LL
 };
 
-int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
+__attribute__((weak)) int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 {
 	size_t pos = 0;
 

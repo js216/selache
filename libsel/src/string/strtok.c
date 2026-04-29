@@ -6,7 +6,7 @@
 
 static char *saved;
 
-char *strtok(char *str, const char *delim)
+__attribute__((weak)) char *strtok(char *str, const char *delim)
 {
     char *token;
     const char *d;

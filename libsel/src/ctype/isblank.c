@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int isblank(int c)
+__attribute__((weak)) int isblank(int c)
 {
 	return c == ' ' || c == '\t';
 }

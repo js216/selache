@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int isupper(int c)
+__attribute__((weak)) int isupper(int c)
 {
 	return c >= 'A' && c <= 'Z';
 }

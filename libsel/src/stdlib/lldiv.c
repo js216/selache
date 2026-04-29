@@ -7,7 +7,7 @@ typedef struct {
     long long rem;
 } sel_lldiv_t;
 
-sel_lldiv_t lldiv(long long numer, long long denom)
+__attribute__((weak)) sel_lldiv_t lldiv(long long numer, long long denom)
 {
     sel_lldiv_t result;
     result.quot = numer / denom;

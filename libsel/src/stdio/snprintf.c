@@ -7,7 +7,7 @@
 
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 
-int snprintf(char *buf, size_t size, const char *fmt, ...)
+__attribute__((weak)) int snprintf(char *buf, size_t size, const char *fmt, ...)
 {
 	va_list ap;
 	int ret;

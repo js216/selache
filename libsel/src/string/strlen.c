@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-size_t strlen(const char *s)
+__attribute__((weak)) size_t strlen(const char *s)
 {
     const char *p = s;
 

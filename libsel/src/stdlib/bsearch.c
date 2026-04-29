@@ -4,7 +4,7 @@
 
 #include "stddef.h"
 
-void *bsearch(const void *key, const void *base, size_t nmemb,
+__attribute__((weak)) void *bsearch(const void *key, const void *base, size_t nmemb,
               size_t size, int (*cmp)(const void *, const void *))
 {
     size_t lo = 0;

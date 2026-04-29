@@ -4,7 +4,7 @@
 
 #include "complex.h"
 
-float _Complex conjf(float _Complex z)
+__attribute__((weak)) float _Complex conjf(float _Complex z)
 {
 	float _Complex r = z;
 	((float *)&r)[1] = -((float *)&r)[1];

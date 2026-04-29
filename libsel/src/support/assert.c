@@ -2,7 +2,7 @@
 /* assert.c --- Assertion failure handler */
 /* Copyright (c) 2026 Jakob Kastelic */
 
-void sel_assert_fail(const char *expr, const char *file, int line)
+__attribute__((weak)) void sel_assert_fail(const char *expr, const char *file, int line)
 {
 	(void)expr;
 	(void)file;

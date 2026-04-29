@@ -32,7 +32,7 @@ static float kernel_cos(float x)
 	return r;
 }
 
-float sinf(float x)
+__attribute__((weak)) float sinf(float x)
 {
 	float r, y;
 	int q;

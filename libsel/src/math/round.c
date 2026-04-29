@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double round(double x)
+__attribute__((weak)) double round(double x)
 {
 	return (double)roundf((float)x);
 }

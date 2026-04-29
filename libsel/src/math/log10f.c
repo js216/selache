@@ -6,7 +6,7 @@
 
 static const float inv_ln10 = 0.43429448190325182765f;
 
-float log10f(float x)
+__attribute__((weak)) float log10f(float x)
 {
 	return logf(x) * inv_ln10;
 }

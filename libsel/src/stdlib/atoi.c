@@ -4,7 +4,7 @@
 
 int isspace(int c);
 
-int atoi(const char *s)
+__attribute__((weak)) int atoi(const char *s)
 {
     int result = 0;
     int sign = 1;

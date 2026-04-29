@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double modf(double x, double *iptr)
+__attribute__((weak)) double modf(double x, double *iptr)
 {
 	float fi;
 	float r = modff((float)x, &fi);

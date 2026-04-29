@@ -17,7 +17,7 @@ static int is_int(float y)
 	return truncf(y) == y;
 }
 
-float powf(float x, float y)
+__attribute__((weak)) float powf(float x, float y)
 {
 	if (y == 0.0f)
 		return 1.0f;

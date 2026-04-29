@@ -6,7 +6,7 @@
 
 static const float half_pi = 1.57079632679489661923f;
 
-float cosf(float x)
+__attribute__((weak)) float cosf(float x)
 {
 	if (isnan(x))
 		return x;

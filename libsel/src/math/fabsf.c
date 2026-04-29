@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float fabsf(float x)
+__attribute__((weak)) float fabsf(float x)
 {
 	union { float f; unsigned int u; } conv;
 	conv.f = x;

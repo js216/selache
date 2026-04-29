@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float ldexpf(float x, int exp)
+__attribute__((weak)) float ldexpf(float x, int exp)
 {
 	union { float f; unsigned int u; } conv;
 	int e;

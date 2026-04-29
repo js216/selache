@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float asinf(float x)
+__attribute__((weak)) float asinf(float x)
 {
 	if (isnan(x))
 		return x;

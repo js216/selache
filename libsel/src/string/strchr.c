@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strchr(const char *s, int c)
+__attribute__((weak)) char *strchr(const char *s, int c)
 {
     char ch = (char)c;
 

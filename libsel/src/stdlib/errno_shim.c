@@ -7,7 +7,7 @@
 
 #include <errno.h>
 
-void sel_set_errno(int val)
+__attribute__((weak)) void sel_set_errno(int val)
 {
     errno = val;
 }

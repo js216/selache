@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int islower(int c)
+__attribute__((weak)) int islower(int c)
 {
 	return c >= 'a' && c <= 'z';
 }

@@ -4,7 +4,7 @@
 
 #include "complex.h"
 
-double cimag(double _Complex z)
+__attribute__((weak)) double cimag(double _Complex z)
 {
 	return ((double *)&z)[1];
 }

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double atan2(double y, double x)
+__attribute__((weak)) double atan2(double y, double x)
 {
 	return (double)atan2f((float)y, (float)x);
 }

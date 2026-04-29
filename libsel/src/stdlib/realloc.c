@@ -7,7 +7,7 @@
 void *malloc(size_t size);
 void free(void *ptr);
 
-void *realloc(void *ptr, size_t size)
+__attribute__((weak)) void *realloc(void *ptr, size_t size)
 {
     struct block_header *h;
     void *newp;

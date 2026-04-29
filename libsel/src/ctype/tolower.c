@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int tolower(int c)
+__attribute__((weak)) int tolower(int c)
 {
 	if (c >= 'A' && c <= 'Z')
 		return c + ('a' - 'A');

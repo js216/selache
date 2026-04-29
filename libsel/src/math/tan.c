@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double tan(double x)
+__attribute__((weak)) double tan(double x)
 {
 	return (double)tanf((float)x);
 }

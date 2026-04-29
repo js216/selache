@@ -9,8 +9,8 @@
 
 use crate::elf::{
     Endian, ELFDATA2LSB, ELF_MAGIC, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS,
-    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, SHT_SHARC_ALIGN, STB_GLOBAL, STB_LOCAL, STT_FUNC,
-    STT_NOTYPE, STT_OBJECT, STT_SECTION,
+    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, SHT_SHARC_ALIGN, STB_GLOBAL, STB_LOCAL,
+    STB_WEAK, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION,
 };
 
 const ELF_HEADER_SIZE: usize = 52;
@@ -215,6 +215,18 @@ impl ElfWriter {
         });
     }
 
+    /// Add a weak function symbol in the given section.
+    pub fn add_weak_function(&mut self, name: &str, section: u16, offset: u32, size: u32) {
+        self.symbols.push(Symbol {
+            name: name.to_string(),
+            section_idx: section,
+            value: offset,
+            size,
+            binding: STB_WEAK,
+            sym_type: STT_FUNC,
+        });
+    }
+
     /// Add a global object (data) symbol.
     pub fn add_object(&mut self, name: &str, section: u16, offset: u32, size: u32) {
         self.symbols.push(Symbol {
@@ -223,6 +235,18 @@ impl ElfWriter {
             value: offset,
             size,
             binding: STB_GLOBAL,
+            sym_type: STT_OBJECT,
+        });
+    }
+
+    /// Add a weak object symbol.
+    pub fn add_weak_object(&mut self, name: &str, section: u16, offset: u32, size: u32) {
+        self.symbols.push(Symbol {
+            name: name.to_string(),
+            section_idx: section,
+            value: offset,
+            size,
+            binding: STB_WEAK,
             sym_type: STT_OBJECT,
         });
     }

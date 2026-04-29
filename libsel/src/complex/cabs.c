@@ -5,7 +5,7 @@
 #include "complex.h"
 #include "math.h"
 
-double cabs(double _Complex z)
+__attribute__((weak)) double cabs(double _Complex z)
 {
 	double re = ((double *)&z)[0];
 	double im = ((double *)&z)[1];

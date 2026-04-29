@@ -4,7 +4,7 @@
 
 #include "complex.h"
 
-double creal(double _Complex z)
+__attribute__((weak)) double creal(double _Complex z)
 {
 	return ((double *)&z)[0];
 }

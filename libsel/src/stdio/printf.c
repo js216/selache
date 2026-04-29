@@ -133,7 +133,7 @@ static void emit_str(const char *s)
    }
 }
 
-int printf(const char *fmt, ...)
+__attribute__((weak)) int printf(const char *fmt, ...)
 {
    va_list ap;
    va_start(ap, fmt);

@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strcpy(char *dest, const char *src)
+__attribute__((weak)) char *strcpy(char *dest, const char *src)
 {
     char *ret = dest;
 

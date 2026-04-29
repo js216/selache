@@ -8,7 +8,7 @@ static const float pi_val = 3.14159265358979323846f;
 static const float pi_over_2 = 1.5707963267948966f;
 static const float pi_over_4 = 0.7853981633974483f;
 
-float atan2f(float y, float x)
+__attribute__((weak)) float atan2f(float y, float x)
 {
 	if (isnan(x) || isnan(y))
 		return NAN;

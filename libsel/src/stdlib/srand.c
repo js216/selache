@@ -4,7 +4,7 @@
 
 unsigned long *sel_rand_seed_ptr(void);
 
-void srand(unsigned int seed)
+__attribute__((weak)) void srand(unsigned int seed)
 {
     *sel_rand_seed_ptr() = seed;
 }

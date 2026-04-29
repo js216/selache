@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double frexp(double x, int *exp)
+__attribute__((weak)) double frexp(double x, int *exp)
 {
 	return (double)frexpf((float)x, exp);
 }

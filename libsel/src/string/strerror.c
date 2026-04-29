@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strerror(int errnum)
+__attribute__((weak)) char *strerror(int errnum)
 {
     (void)errnum;
     return (char *)"unknown error";

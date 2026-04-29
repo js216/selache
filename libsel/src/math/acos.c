@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double acos(double x)
+__attribute__((weak)) double acos(double x)
 {
 	return (double)acosf((float)x);
 }

@@ -4,7 +4,7 @@
 
 #include "heap_internal.h"
 
-void free(void *ptr)
+__attribute__((weak)) void free(void *ptr)
 {
     struct block_header *h;
     struct block_header *next;

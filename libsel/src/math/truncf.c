@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float truncf(float x)
+__attribute__((weak)) float truncf(float x)
 {
 	union { float f; unsigned int u; } conv;
 	int e;

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double cos(double x)
+__attribute__((weak)) double cos(double x)
 {
 	return (double)cosf((float)x);
 }

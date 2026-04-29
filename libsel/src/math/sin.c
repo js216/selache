@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double sin(double x)
+__attribute__((weak)) double sin(double x)
 {
 	return (double)sinf((float)x);
 }

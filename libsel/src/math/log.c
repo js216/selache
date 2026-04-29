@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double log(double x)
+__attribute__((weak)) double log(double x)
 {
 	return (double)logf((float)x);
 }

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double ceil(double x)
+__attribute__((weak)) double ceil(double x)
 {
 	return (double)ceilf((float)x);
 }

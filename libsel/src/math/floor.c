@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double floor(double x)
+__attribute__((weak)) double floor(double x)
 {
 	return (double)floorf((float)x);
 }

@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-void *memchr(const void *s, int c, size_t n)
+__attribute__((weak)) void *memchr(const void *s, int c, size_t n)
 {
     const unsigned char *p = s;
     unsigned char val = (unsigned char)c;

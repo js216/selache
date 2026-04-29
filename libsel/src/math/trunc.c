@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double trunc(double x)
+__attribute__((weak)) double trunc(double x)
 {
 	return (double)truncf((float)x);
 }

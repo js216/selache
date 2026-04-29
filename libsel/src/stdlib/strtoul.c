@@ -20,7 +20,7 @@ static int digit_value(char c)
 
 #define SEL_ULONG_MAX ((unsigned long)-1)
 
-unsigned long strtoul(const char *nptr, char **endptr, int base)
+__attribute__((weak)) unsigned long strtoul(const char *nptr, char **endptr, int base)
 {
     const char *s = nptr;
     int sign = 1;

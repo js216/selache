@@ -4,7 +4,7 @@
 
 #include "complex.h"
 
-float crealf(float _Complex z)
+__attribute__((weak)) float crealf(float _Complex z)
 {
 	return ((float *)&z)[0];
 }

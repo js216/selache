@@ -7,7 +7,7 @@
 atexit_func sel_atexit_funcs[ATEXIT_MAX];
 int sel_atexit_count;
 
-int atexit(void (*func)(void))
+__attribute__((weak)) int atexit(void (*func)(void))
 {
     if (sel_atexit_count >= ATEXIT_MAX)
         return -1;

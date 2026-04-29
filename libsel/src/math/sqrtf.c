@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float sqrtf(float x)
+__attribute__((weak)) float sqrtf(float x)
 {
 	union { float f; unsigned int u; } conv;
 	float guess;

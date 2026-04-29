@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strpbrk(const char *s, const char *accept)
+__attribute__((weak)) char *strpbrk(const char *s, const char *accept)
 {
     const char *a;
 

@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-void *memset(void *s, int c, size_t n)
+__attribute__((weak)) void *memset(void *s, int c, size_t n)
 {
     unsigned char *p = s;
     unsigned char val = (unsigned char)c;

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float floorf(float x)
+__attribute__((weak)) float floorf(float x)
 {
 	union { float f; unsigned int u; } conv;
 	int e;

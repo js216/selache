@@ -118,6 +118,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         // referencing an undefined symbol.
         label_insertions: HashMap<usize, Vec<String>>,
         is_static: bool,
+        is_weak: bool,
     }
     let mut compiled: Vec<CompiledFunction> = Vec::new();
     let mut skipped_functions: Vec<String> = Vec::new();
@@ -193,6 +194,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             instrs,
             label_insertions: fr.label_insertions,
             is_static: func.is_static,
+            is_weak: func.is_weak,
         });
     }
 
@@ -304,7 +306,11 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         out.push_str(".SECTION/SW seg_swco;\n");
         for cf in &compiled {
             let sym = with_abi_suffix(&cf.name);
-            let _ = writeln!(out, ".GLOBAL {sym};");
+            if cf.is_weak {
+                let _ = writeln!(out, ".WEAK {sym};");
+            } else {
+                let _ = writeln!(out, ".GLOBAL {sym};");
+            }
             let _ = writeln!(out, "{sym}:");
             for (body_idx, mi) in cf.instrs.iter().enumerate() {
                 if let Some(lbls) = cf.label_insertions.get(&body_idx) {
@@ -2498,6 +2504,14 @@ mod tests {
         let m = compile("int main() { return 42; }");
         assert!(m.text.contains(".GLOBAL main.;"));
         assert!(m.text.contains("main.:"));
+    }
+
+    #[test]
+    fn weak_attribute_emits_weak_directive() {
+        let m = compile("__attribute__((weak)) int hook(void) { return 1; }");
+        assert!(m.text.contains(".WEAK hook.;"), "asm:\n{}", m.text);
+        assert!(!m.text.contains(".GLOBAL hook.;"), "asm:\n{}", m.text);
+        assert!(m.text.contains("hook.:"));
     }
 
     #[test]

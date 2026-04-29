@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float fmaxf(float x, float y)
+__attribute__((weak)) float fmaxf(float x, float y)
 {
 	if (isnan(x))
 		return y;

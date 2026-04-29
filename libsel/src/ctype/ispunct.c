@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int ispunct(int c)
+__attribute__((weak)) int ispunct(int c)
 {
 	return (c >= '!' && c <= '/') ||
 	       (c >= ':' && c <= '@') ||

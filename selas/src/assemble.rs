@@ -367,6 +367,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
 
     let mut sections: Vec<(String, SectionData)> = Vec::new();
     let mut globals: Vec<String> = Vec::new();
+    let mut weaks: Vec<String> = Vec::new();
     let mut externs: Vec<String> = Vec::new();
     let mut aliases: HashMap<String, String> =
         HashMap::new();
@@ -399,6 +400,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
         let mut state = DirectiveState {
             sections: &mut sections,
             globals: &mut globals,
+            weaks: &mut weaks,
             externs: &mut externs,
             aliases: &mut aliases,
             current_section_idx: &mut current_section_idx,
@@ -634,7 +636,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     }
     relocs.extend(var_relocs);
 
-    Ok(emit_elf_bytes(&sections, &globals, &externs, &local_refs, &relocs))
+    Ok(emit_elf_bytes(&sections, &globals, &weaks, &externs, &local_refs, &relocs))
 }
 
 /// Mutable state threaded through directive processing. Bundling the
@@ -645,6 +647,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
 struct DirectiveState<'a> {
     sections: &'a mut Vec<(String, SectionData)>,
     globals: &'a mut Vec<String>,
+    weaks: &'a mut Vec<String>,
     externs: &'a mut Vec<String>,
     aliases: &'a mut HashMap<String, String>,
     current_section_idx: &'a mut Option<usize>,
@@ -674,6 +677,11 @@ fn process_directives(
         Directive::Global(name) => {
             if !state.globals.contains(name) {
                 state.globals.push(name.clone());
+            }
+        }
+        Directive::Weak(name) => {
+            if !state.weaks.contains(name) {
+                state.weaks.push(name.clone());
             }
         }
         Directive::Extern(name) => {
@@ -796,6 +804,7 @@ fn resolve_aliases(
 fn emit_elf_bytes(
     sections: &[(String, SectionData)],
     globals: &[String],
+    weaks: &[String],
     externs: &[String],
     local_refs: &[(String, usize, u32)],
     relocs: &[PendingReloc],
@@ -844,7 +853,7 @@ fn emit_elf_bytes(
         // word-granular label, so byte-addressed data references
         // (and even some PM cjumps) resolve to the wrong runtime
         // value.
-        if globals.iter().any(|g| g == name) {
+        if globals.iter().any(|g| g == name) || weaks.iter().any(|g| g == name) {
             continue;
         }
         let elf_idx = elf_indices[*sec_idx];
@@ -875,12 +884,21 @@ fn emit_elf_bytes(
         let mut funcs = Vec::new();
         for (sym_name, word_off) in &sec_data.symbols {
             let is_global = globals.iter().any(|g| g == sym_name);
-            if is_global {
+            let is_weak = weaks.iter().any(|g| g == sym_name);
+            if is_global || is_weak {
                 if sec_data.is_pm {
-                    writer.add_function(sym_name, elf_idx, *word_off, 0);
+                    if is_weak {
+                        writer.add_weak_function(sym_name, elf_idx, *word_off, 0);
+                    } else {
+                        writer.add_function(sym_name, elf_idx, *word_off, 0);
+                    }
                     funcs.push(sym_name.clone());
                 } else {
-                    writer.add_object(sym_name, elf_idx, *word_off, 0);
+                    if is_weak {
+                        writer.add_weak_object(sym_name, elf_idx, *word_off, 0);
+                    } else {
+                        writer.add_object(sym_name, elf_idx, *word_off, 0);
+                    }
                 }
             }
         }
@@ -897,6 +915,14 @@ fn emit_elf_bytes(
             .any(|(_, sd)| sd.symbols.iter().any(|(n, _)| n == g));
         if !found {
             writer.add_function(g, first_elf_idx, 0, 0);
+        }
+    }
+    for g in weaks {
+        let found = sections
+            .iter()
+            .any(|(_, sd)| sd.symbols.iter().any(|(n, _)| n == g));
+        if !found {
+            writer.add_weak_function(g, first_elf_idx, 0, 0);
         }
     }
 
@@ -1072,6 +1098,40 @@ mod tests {
 
         let syms = selelf::elf::extract_global_symbols(&data).unwrap();
         assert!(syms.contains(&"_main".to_string()));
+    }
+
+    #[test]
+    fn weak_directive_emits_weak_symbol() {
+        let data = assemble_str(
+            ".SECTION/SW seg_swco;\n\
+             .WEAK hook.;\n\
+             hook.:\n\
+                 RTS\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        let sections: Vec<_> = (0..hdr.e_shnum as usize)
+            .map(|i| {
+                let off = hdr.e_shoff as usize + i * hdr.e_shentsize as usize;
+                selelf::elf::parse_section_header(&data[off..], hdr.ei_data)
+            })
+            .collect();
+        let symtab = sections
+            .iter()
+            .find(|s| s.sh_type == selelf::elf::SHT_SYMTAB)
+            .expect("missing symtab");
+        let strtab = &sections[symtab.sh_link as usize];
+        let strtab_data = &data[strtab.sh_offset as usize
+            ..(strtab.sh_offset + strtab.sh_size) as usize];
+        let nsyms = symtab.sh_size as usize / symtab.sh_entsize as usize;
+        let hook = (0..nsyms)
+            .map(|i| {
+                let off = symtab.sh_offset as usize + i * symtab.sh_entsize as usize;
+                selelf::elf::parse_symbol(&data[off..], hdr.ei_data)
+            })
+            .find(|sym| selelf::elf::read_string_at(strtab_data, sym.st_name) == "hook.")
+            .expect("missing hook. symbol");
+        assert_eq!(hook.bind(), selelf::elf::STB_WEAK);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double sqrt(double x)
+__attribute__((weak)) double sqrt(double x)
 {
 	return (double)sqrtf((float)x);
 }

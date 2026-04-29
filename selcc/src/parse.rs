@@ -61,6 +61,7 @@ struct Parser<'a> {
     pending_block_enum_consts: Vec<(String, i64)>,
     /// Current function name for __func__ (C99 6.4.2.2).
     current_function: String,
+    pending_weak_attr: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -75,6 +76,7 @@ impl<'a> Parser<'a> {
             block_depth: 0,
             pending_block_enum_consts: Vec::new(),
             current_function: String::new(),
+            pending_weak_attr: false,
         })
     }
 
@@ -131,6 +133,8 @@ impl<'a> Parser<'a> {
                 has_volatile = true;
                 self.advance()?;
             } else if matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed" | "__section" | "__attribute__" | "__inline" | "__inline__" | "inline" | "__restrict" | "restrict" | "__restrict__")) {
+                let is_attribute =
+                    matches!(&self.current, Token::Ident(name) if name == "__attribute__");
                 self.advance()?;
                 // Skip __attribute__((xxx)) if present
                 if self.current == Token::LParen {
@@ -138,6 +142,11 @@ impl<'a> Parser<'a> {
                     loop {
                         if self.current == Token::LParen { depth += 1; }
                         if self.current == Token::RParen { depth -= 1; }
+                        if is_attribute
+                            && matches!(&self.current, Token::Ident(name) if name == "weak")
+                        {
+                            self.pending_weak_attr = true;
+                        }
                         self.advance()?;
                         if depth == 0 { break; }
                     }
@@ -492,6 +501,7 @@ impl<'a> Parser<'a> {
         let mut complex_arg_callees: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         while self.current != Token::Eof {
+            self.pending_weak_attr = false;
             // Handle typedef declarations.
             if self.current == Token::Typedef {
                 self.advance()?;
@@ -566,6 +576,8 @@ impl<'a> Parser<'a> {
                 self.advance()?;
             }
             let ty = self.parse_type()?;
+            let is_weak = self.pending_weak_attr;
+            self.pending_weak_attr = false;
             // Handle pointer types at top level.
             let ty = self.parse_pointer_type(ty);
             let ty = if is_volatile && !ty.is_volatile() {
@@ -794,6 +806,7 @@ impl<'a> Parser<'a> {
                         is_variadic,
                         body,
                         is_static,
+                        is_weak,
                     });
                 }
             } else {

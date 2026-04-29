@@ -40,7 +40,7 @@ static void do_qsort(unsigned char *base, size_t lo, size_t hi,
         do_qsort(base, i + 1, hi, size, cmp);
 }
 
-void qsort(void *base, size_t nmemb, size_t size,
+__attribute__((weak)) void qsort(void *base, size_t nmemb, size_t size,
             int (*cmp)(const void *, const void *))
 {
     if (nmemb < 2)

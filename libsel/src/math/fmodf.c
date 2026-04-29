@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float fmodf(float x, float y)
+__attribute__((weak)) float fmodf(float x, float y)
 {
 	float q;
 

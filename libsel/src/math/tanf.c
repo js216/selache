@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float tanf(float x)
+__attribute__((weak)) float tanf(float x)
 {
 	if (isnan(x))
 		return x;

@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strncpy(char *dest, const char *src, size_t n)
+__attribute__((weak)) char *strncpy(char *dest, const char *src, size_t n)
 {
     char *ret = dest;
     size_t i;

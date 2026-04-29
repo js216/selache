@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-size_t strcspn(const char *s, const char *reject)
+__attribute__((weak)) size_t strcspn(const char *s, const char *reject)
 {
     const char *p = s;
     const char *r;

@@ -5,7 +5,7 @@
 #include "complex.h"
 #include "math.h"
 
-float cabsf(float _Complex z)
+__attribute__((weak)) float cabsf(float _Complex z)
 {
 	float re = ((float *)&z)[0];
 	float im = ((float *)&z)[1];

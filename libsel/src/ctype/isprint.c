@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int isprint(int c)
+__attribute__((weak)) int isprint(int c)
 {
 	return c >= ' ' && c <= '~';
 }

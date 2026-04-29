@@ -6,7 +6,7 @@
 
 extern void _Exit(int);
 
-void exit(int status)
+__attribute__((weak)) void exit(int status)
 {
     int i;
     for (i = sel_atexit_count - 1; i >= 0; i--)

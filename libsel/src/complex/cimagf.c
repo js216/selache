@@ -4,7 +4,7 @@
 
 #include "complex.h"
 
-float cimagf(float _Complex z)
+__attribute__((weak)) float cimagf(float _Complex z)
 {
 	return ((float *)&z)[1];
 }

@@ -15,7 +15,7 @@ unsigned char sel_heap[HEAP_SIZE];
 #pragma section("seg_dmda")
 int sel_heap_initialized = 0;
 
-void sel_heap_init(void)
+__attribute__((weak)) void sel_heap_init(void)
 {
     struct block_header *h = (struct block_header *)sel_heap;
     h->size = HEAP_SIZE - sizeof(struct block_header);
@@ -23,7 +23,7 @@ void sel_heap_init(void)
     sel_heap_initialized = 1;
 }
 
-void *malloc(size_t size)
+__attribute__((weak)) void *malloc(size_t size)
 {
     struct block_header *h;
     unsigned char *p;

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float modff(float x, float *iptr)
+__attribute__((weak)) float modff(float x, float *iptr)
 {
 	float t;
 

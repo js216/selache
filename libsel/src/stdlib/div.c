@@ -7,7 +7,7 @@ typedef struct {
     int rem;
 } sel_div_t;
 
-sel_div_t div(int numer, int denom)
+__attribute__((weak)) sel_div_t div(int numer, int denom)
 {
     sel_div_t result;
     result.quot = numer / denom;

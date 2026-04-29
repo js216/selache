@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double fabs(double x)
+__attribute__((weak)) double fabs(double x)
 {
 	return (double)fabsf((float)x);
 }

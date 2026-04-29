@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float frexpf(float x, int *exp)
+__attribute__((weak)) float frexpf(float x, int *exp)
 {
 	union { float f; unsigned int u; } conv;
 	int e;

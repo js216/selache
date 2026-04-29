@@ -22,7 +22,7 @@ static float atan_kernel(float a)
 	return a + a * a2 * r;
 }
 
-float atanf(float x)
+__attribute__((weak)) float atanf(float x)
 {
 	float a, r, base;
 	int neg;

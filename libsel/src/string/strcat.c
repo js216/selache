@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strcat(char *dest, const char *src)
+__attribute__((weak)) char *strcat(char *dest, const char *src)
 {
     char *end = dest;
 

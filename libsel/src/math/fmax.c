@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double fmax(double x, double y)
+__attribute__((weak)) double fmax(double x, double y)
 {
 	return (double)fmaxf((float)x, (float)y);
 }

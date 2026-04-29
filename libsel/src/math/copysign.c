@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double copysign(double x, double y)
+__attribute__((weak)) double copysign(double x, double y)
 {
 	return (double)copysignf((float)x, (float)y);
 }

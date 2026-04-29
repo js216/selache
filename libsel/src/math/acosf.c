@@ -6,7 +6,7 @@
 
 static const float pi_over_2 = 1.5707963267948966f;
 
-float acosf(float x)
+__attribute__((weak)) float acosf(float x)
 {
 	if (isnan(x))
 		return x;

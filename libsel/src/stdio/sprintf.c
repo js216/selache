@@ -7,7 +7,7 @@
 
 int vsprintf(char *buf, const char *fmt, va_list ap);
 
-int sprintf(char *buf, const char *fmt, ...)
+__attribute__((weak)) int sprintf(char *buf, const char *fmt, ...)
 {
 	va_list ap;
 	int ret;

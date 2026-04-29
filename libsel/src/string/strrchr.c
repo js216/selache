@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strrchr(const char *s, int c)
+__attribute__((weak)) char *strrchr(const char *s, int c)
 {
     char ch = (char)c;
     const char *last = NULL;

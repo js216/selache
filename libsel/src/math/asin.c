@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double asin(double x)
+__attribute__((weak)) double asin(double x)
 {
 	return (double)asinf((float)x);
 }

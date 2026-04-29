@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double pow(double x, double y)
+__attribute__((weak)) double pow(double x, double y)
 {
 	return (double)powf((float)x, (float)y);
 }

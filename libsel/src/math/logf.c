@@ -6,7 +6,7 @@
 
 static const float ln2 = 0.69314718055994530942f;
 
-float logf(float x)
+__attribute__((weak)) float logf(float x)
 {
 	union { float f; unsigned int u; } conv;
 	int e;

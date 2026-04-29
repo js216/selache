@@ -31,6 +31,7 @@ pub struct ParsedLine {
 pub enum Directive {
     Section(String),
     Global(String),
+    Weak(String),
     Extern(String),
     Var(String),
     Byte(Vec<u8>),
@@ -268,6 +269,11 @@ impl<'a> AsmParser<'a> {
             let rest = &text[7..];
             let name = rest.trim().trim_end_matches(';').trim().to_string();
             return Ok(Directive::Global(name));
+        }
+        if upper.starts_with(".WEAK") {
+            let rest = &text[5..];
+            let name = rest.trim().trim_end_matches(';').trim().to_string();
+            return Ok(Directive::Weak(name));
         }
         if upper.starts_with(".EXTERN") {
             let rest = &text[7..];
@@ -4084,7 +4090,6 @@ fn is_ignored_directive(upper: &str) -> bool {
         || upper.starts_with(".LIST")
         || upper.starts_with(".NOLIST")
         || upper.starts_with(".ENTRY")
-        || upper.starts_with(".WEAK")
         || upper.starts_with(".PRIORITY")
         || upper.starts_with(".ROUND_")
         || upper.starts_with(".INC/")

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float roundf(float x)
+__attribute__((weak)) float roundf(float x)
 {
 	if (isnan(x) || isinf(x) || x == 0.0f)
 		return x;

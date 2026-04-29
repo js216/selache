@@ -2,7 +2,7 @@
 /* abs.c --- Absolute value of int */
 /* Copyright (c) 2026 Jakob Kastelic */
 
-int abs(int n)
+__attribute__((weak)) int abs(int n)
 {
     return n < 0 ? -n : n;
 }

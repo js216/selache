@@ -171,6 +171,7 @@ pub struct Function {
     pub is_variadic: bool,
     pub body: Vec<Stmt>,
     pub is_static: bool,
+    pub is_weak: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

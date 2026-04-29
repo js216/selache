@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-char *strstr(const char *haystack, const char *needle)
+__attribute__((weak)) char *strstr(const char *haystack, const char *needle)
 {
     const char *h;
     const char *n;

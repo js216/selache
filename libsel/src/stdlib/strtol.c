@@ -21,7 +21,7 @@ static int digit_value(char c)
 #define SEL_LONG_MAX  ((long)(((unsigned long)-1) >> 1))
 #define SEL_LONG_MIN  (-SEL_LONG_MAX - 1L)
 
-long strtol(const char *nptr, char **endptr, int base)
+__attribute__((weak)) long strtol(const char *nptr, char **endptr, int base)
 {
     const char *s = nptr;
     int sign = 1;

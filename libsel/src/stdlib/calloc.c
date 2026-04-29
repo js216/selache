@@ -6,7 +6,7 @@
 
 void *malloc(size_t size);
 
-void *calloc(size_t nmemb, size_t size)
+__attribute__((weak)) void *calloc(size_t nmemb, size_t size)
 {
     size_t total;
     unsigned char *p;

@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double ldexp(double x, int exp)
+__attribute__((weak)) double ldexp(double x, int exp)
 {
 	return (double)ldexpf((float)x, exp);
 }

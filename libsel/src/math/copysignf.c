@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float copysignf(float x, float y)
+__attribute__((weak)) float copysignf(float x, float y)
 {
 	union { float f; unsigned int u; } cx, cy;
 	cx.f = x;

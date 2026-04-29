@@ -7,7 +7,7 @@
 static const float ln2 = 0.69314718055994530942f;
 static const float inv_ln2 = 1.44269504088896340736f;
 
-float expf(float x)
+__attribute__((weak)) float expf(float x)
 {
 	union { float f; unsigned int u; } conv;
 	float r, y;

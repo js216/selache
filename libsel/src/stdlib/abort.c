@@ -4,7 +4,7 @@
 
 extern void _Exit(int);
 
-void abort(void)
+__attribute__((weak)) void abort(void)
 {
     _Exit(134);
 }

@@ -4,7 +4,7 @@
 
 #include "complex.h"
 
-double _Complex conj(double _Complex z)
+__attribute__((weak)) double _Complex conj(double _Complex z)
 {
 	double _Complex r = z;
 	((double *)&r)[1] = -((double *)&r)[1];

@@ -4,7 +4,7 @@
 
 #include "string.h"
 
-int strncmp(const char *s1, const char *s2, size_t n)
+__attribute__((weak)) int strncmp(const char *s1, const char *s2, size_t n)
 {
     const unsigned char *a = (const unsigned char *)s1;
     const unsigned char *b = (const unsigned char *)s2;

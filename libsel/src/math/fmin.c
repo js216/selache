@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-double fmin(double x, double y)
+__attribute__((weak)) double fmin(double x, double y)
 {
 	return (double)fminf((float)x, (float)y);
 }

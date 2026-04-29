@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int isxdigit(int c)
+__attribute__((weak)) int isxdigit(int c)
 {
 	return (c >= '0' && c <= '9') ||
 	       (c >= 'A' && c <= 'F') ||

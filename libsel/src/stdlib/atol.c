@@ -4,7 +4,7 @@
 
 int isspace(int c);
 
-long atol(const char *s)
+__attribute__((weak)) long atol(const char *s)
 {
     long result = 0;
     int sign = 1;

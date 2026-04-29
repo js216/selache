@@ -4,7 +4,7 @@
 
 #include "math.h"
 
-float ceilf(float x)
+__attribute__((weak)) float ceilf(float x)
 {
 	float f = floorf(x);
 

@@ -4,7 +4,7 @@
 
 #include "ctype.h"
 
-int isalpha(int c)
+__attribute__((weak)) int isalpha(int c)
 {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
