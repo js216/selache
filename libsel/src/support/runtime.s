@@ -415,6 +415,14 @@ ___shl64.:
 // ___div64 -- signed 64-bit division for selcc
       .GLOBAL ___div64.;
 ___div64.:
+      DM(I7, M7) = R8;
+      DM(I7, M7) = R9;
+      DM(I7, M7) = R10;
+      DM(I7, M7) = R11;
+      DM(I7, M7) = R12;
+      DM(I7, M7) = R13;
+      DM(I7, M7) = R14;
+      DM(I7, M7) = R15;
       // Move to __divrem_s64 ABI: R12:R13 = dividend, R14:R15 = divisor
       R12 = R4;
       R13 = R5;
@@ -427,6 +435,14 @@ ___div64.:
       // Quotient in R12:R13 → R0:R1
       R0 = R12;
       R1 = R13;
+      R15 = DM(1, I7);
+      R14 = DM(2, I7);
+      R13 = DM(3, I7);
+      R12 = DM(4, I7);
+      R11 = DM(5, I7);
+      R10 = DM(6, I7);
+      R9 = DM(7, I7);
+      R8 = DM(8, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
@@ -437,6 +453,14 @@ ___div64.:
 // ___mod64 -- signed 64-bit modulo for selcc
       .GLOBAL ___mod64.;
 ___mod64.:
+      DM(I7, M7) = R8;
+      DM(I7, M7) = R9;
+      DM(I7, M7) = R10;
+      DM(I7, M7) = R11;
+      DM(I7, M7) = R12;
+      DM(I7, M7) = R13;
+      DM(I7, M7) = R14;
+      DM(I7, M7) = R15;
       R12 = R4;
       R13 = R5;
       R14 = R8;
@@ -448,6 +472,14 @@ ___mod64.:
       // Remainder in R14:R15 → R0:R1
       R0 = R14;
       R1 = R15;
+      R15 = DM(1, I7);
+      R14 = DM(2, I7);
+      R13 = DM(3, I7);
+      R12 = DM(4, I7);
+      R11 = DM(5, I7);
+      R10 = DM(6, I7);
+      R9 = DM(7, I7);
+      R8 = DM(8, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
@@ -458,6 +490,14 @@ ___mod64.:
 // ___udiv64 -- unsigned 64-bit division for selcc
       .GLOBAL ___udiv64.;
 ___udiv64.:
+      DM(I7, M7) = R8;
+      DM(I7, M7) = R9;
+      DM(I7, M7) = R10;
+      DM(I7, M7) = R11;
+      DM(I7, M7) = R12;
+      DM(I7, M7) = R13;
+      DM(I7, M7) = R14;
+      DM(I7, M7) = R15;
       R12 = R4;
       R13 = R5;
       R14 = R8;
@@ -468,6 +508,14 @@ ___udiv64.:
 .___udiv64_ret:
       R0 = R12;
       R1 = R13;
+      R15 = DM(1, I7);
+      R14 = DM(2, I7);
+      R13 = DM(3, I7);
+      R12 = DM(4, I7);
+      R11 = DM(5, I7);
+      R10 = DM(6, I7);
+      R9 = DM(7, I7);
+      R8 = DM(8, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
@@ -478,6 +526,14 @@ ___udiv64.:
 // ___umod64 -- unsigned 64-bit modulo for selcc
       .GLOBAL ___umod64.;
 ___umod64.:
+      DM(I7, M7) = R8;
+      DM(I7, M7) = R9;
+      DM(I7, M7) = R10;
+      DM(I7, M7) = R11;
+      DM(I7, M7) = R12;
+      DM(I7, M7) = R13;
+      DM(I7, M7) = R14;
+      DM(I7, M7) = R15;
       R12 = R4;
       R13 = R5;
       R14 = R8;
@@ -488,6 +544,14 @@ ___umod64.:
 .___umod64_ret:
       R0 = R14;
       R1 = R15;
+      R15 = DM(1, I7);
+      R14 = DM(2, I7);
+      R13 = DM(3, I7);
+      R12 = DM(4, I7);
+      R11 = DM(5, I7);
+      R10 = DM(6, I7);
+      R9 = DM(7, I7);
+      R8 = DM(8, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;

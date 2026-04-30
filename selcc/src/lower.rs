@@ -326,6 +326,85 @@ fn assigned_vars(stmts: &[Stmt]) -> HashSet<String> {
     set
 }
 
+fn contains_call(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_contains_call)
+}
+
+fn stmt_contains_call(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => expr_contains_call(expr),
+        Stmt::Return(None) => false,
+        Stmt::VarDecl { init, vla_dim, .. } => {
+            init.as_ref().is_some_and(expr_contains_call)
+                || vla_dim.as_ref().is_some_and(expr_contains_call)
+        }
+        Stmt::If { cond, then_body, else_body } => {
+            expr_contains_call(cond)
+                || contains_call(then_body)
+                || else_body.as_ref().is_some_and(|body| contains_call(body))
+        }
+        Stmt::While { cond, body } => expr_contains_call(cond) || contains_call(body),
+        Stmt::For { init, cond, step, body } => {
+            init.as_ref().is_some_and(|stmt| stmt_contains_call(stmt))
+                || cond.as_ref().is_some_and(expr_contains_call)
+                || step.as_ref().is_some_and(expr_contains_call)
+                || contains_call(body)
+        }
+        Stmt::DoWhile { body, cond } => contains_call(body) || expr_contains_call(cond),
+        Stmt::Block(stmts) | Stmt::DeclGroup(stmts) => contains_call(stmts),
+        Stmt::Switch { expr, body } => expr_contains_call(expr) || contains_call(body),
+        Stmt::CaseLabel(expr) => expr_contains_call(expr),
+        Stmt::Label(_, inner) => stmt_contains_call(inner),
+        Stmt::DefaultLabel | Stmt::Break | Stmt::Continue | Stmt::Goto(_) | Stmt::Asm(_)
+        | Stmt::EnumDecl(_) => false,
+    }
+}
+
+fn expr_contains_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { .. } | Expr::CallIndirect { .. } => true,
+        Expr::Unary { operand, .. }
+        | Expr::Deref(operand)
+        | Expr::AddrOf(operand)
+        | Expr::Cast(_, operand)
+        | Expr::PreInc(operand)
+        | Expr::PreDec(operand)
+        | Expr::PostInc(operand)
+        | Expr::PostDec(operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => expr_contains_call(operand),
+        Expr::Binary { op, lhs, rhs } => {
+            matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                || expr_contains_call(lhs)
+                || expr_contains_call(rhs)
+        }
+        Expr::Assign { target: lhs, value: rhs }
+        | Expr::Index(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => {
+            expr_contains_call(lhs) || expr_contains_call(rhs)
+        }
+        Expr::CompoundAssign { op, target: lhs, value: rhs } => {
+            matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                || expr_contains_call(lhs)
+                || expr_contains_call(rhs)
+        }
+        Expr::Ternary { cond, then_expr, else_expr } => {
+            expr_contains_call(cond)
+                || expr_contains_call(then_expr)
+                || expr_contains_call(else_expr)
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => expr_contains_call(base),
+        Expr::InitList(exprs) => exprs.iter().any(expr_contains_call),
+        Expr::DesignatedInit { value, .. } => expr_contains_call(value),
+        Expr::ArrayDesignator { index, value } => {
+            expr_contains_call(index) || expr_contains_call(value)
+        }
+        Expr::IntLit(..) | Expr::FloatLit(_) | Expr::ImagLit(_)
+        | Expr::StringLit(_) | Expr::WideStringLit(_)
+        | Expr::CharLit(_) | Expr::Ident(_) | Expr::Sizeof(_) => false,
+    }
+}
+
 fn collect_assigned(stmt: &Stmt, set: &mut HashSet<String>) {
     match stmt {
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) => collect_assigned_expr(expr, set),
@@ -561,6 +640,7 @@ pub fn lower_function_with_known(
             reassigned.insert(name.clone());
         }
     }
+    let has_call = contains_call(&func.body);
 
     // Variadic function prologue. The SHARC+ ABI for variadic
     // callees passes the first `target::variadic_reg_named(named)`
@@ -626,9 +706,10 @@ pub fn lower_function_with_known(
     }
 
     // Bind parameters to virtual registers pre-loaded from the ABI
-    // argument registers. Scalars consume one ABI slot; struct/union
-    // parameters consume `type_size_words(ty)` consecutive slots (one
-    // word per slot). A `slot_idx` counter walks across the full
+    // argument registers. Most scalars consume one ABI slot; 64-bit
+    // integer scalars and struct/union parameters consume
+    // `type_size_words(ty)` consecutive slots (one word per slot). A
+    // `slot_idx` counter walks across the full
     // argument-slot sequence — using the parameter index `i` instead
     // aliases slot numbers whenever a multi-word struct precedes
     // another parameter: `dot(struct vec2 a, struct vec2 b)` would
@@ -644,6 +725,8 @@ pub fn lower_function_with_known(
                 | Type::Enum { .. });
         if !is_scalar && is_struct_type(ty, &ctx) {
             total_slots += type_size_words(ty, &ctx);
+        } else if ty_is_long_long(ty, &ctx) {
+            total_slots += 2;
         } else if ty.is_complex() {
             // the reference C ABI passes `_Complex` values entirely on the caller's
             // stack — no ABI register slots are consumed. The callee
@@ -755,11 +838,49 @@ pub fn lower_function_with_known(
             continue;
         }
 
+        if ty_is_long_long(ty, &ctx) {
+            let load_word = |ctx: &mut LowerCtx, src_slot_idx: usize| {
+                let tmp = ctx.alloc_vreg();
+                if src_slot_idx < target::ARG_REGS.len() {
+                    ctx.emit(IrOp::Copy(tmp, src_slot_idx as VReg));
+                } else {
+                    let stack_off = (src_slot_idx - target::ARG_REGS.len()) as u32;
+                    ctx.emit(IrOp::LoadStackArg(tmp, stack_off));
+                }
+                tmp
+            };
+            let needs_stack_snapshot = has_call || reassigned.contains(name);
+            if needs_stack_snapshot {
+                let slot_offset = ctx.frame_size;
+                ctx.frame_size += 2;
+                let param_pair = ctx.alloc_vreg_pair();
+                let lo = load_word(&mut ctx, slot_idx);
+                let hi = load_word(&mut ctx, slot_idx + 1);
+                ctx.emit(IrOp::Copy(param_pair, lo));
+                ctx.emit(IrOp::Copy(param_pair + 1, hi));
+                ctx.emit(IrOp::Store64(param_pair, 0, slot_offset as i32));
+                ctx.locals.insert(name.clone(), LocalStorage::Stack(slot_offset));
+            } else if slot_idx + 1 < target::ARG_REGS.len() {
+                let arg_vreg = slot_idx as VReg;
+                ctx.vreg_is_64bit.insert(arg_vreg);
+                ctx.locals.insert(name.clone(), LocalStorage::Reg(arg_vreg));
+            } else {
+                let param_pair = ctx.alloc_vreg_pair();
+                let lo = load_word(&mut ctx, slot_idx);
+                let hi = load_word(&mut ctx, slot_idx + 1);
+                ctx.emit(IrOp::Copy(param_pair, lo));
+                ctx.emit(IrOp::Copy(param_pair + 1, hi));
+                ctx.locals.insert(name.clone(), LocalStorage::Reg(param_pair));
+            }
+            slot_idx += 2;
+            continue;
+        }
+
         if slot_idx >= target::ARG_REGS.len() {
             // Parameters beyond the register-passed slots: loaded from
             // the caller's stack-arg area.
             let stack_offset = (slot_idx - target::ARG_REGS.len()) as u32;
-            if reassigned.contains(name) {
+            if has_call || reassigned.contains(name) {
                 let slot_offset = ctx.alloc_stack_slot();
                 let param_vreg = ctx.alloc_vreg();
                 if is_float_param {
@@ -785,7 +906,7 @@ pub fn lower_function_with_known(
         if is_float_param {
             ctx.vreg_is_float.insert(arg_vreg, true);
         }
-        if reassigned.contains(name) {
+        if has_call || reassigned.contains(name) {
             let slot_offset = ctx.alloc_stack_slot();
             let param_vreg = ctx.alloc_vreg();
             if is_float_param {
@@ -1052,15 +1173,14 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 // `slot_base + i` while member-access lowering still
                 // computes addresses from the deepest slot — so the
                 // subsequent loads read uninitialised stack words.
-                let is_aggregate = matches!(ty.unqualified(),
-                    Type::Array(..) | Type::Struct { .. } | Type::Union { .. });
+                let is_aggregate = is_aggregate_type(ty, ctx);
                 // `_Complex T` shares the multi-word stack convention:
                 // its two real components are array-like (C99 6.2.5p13)
                 // so the recorded base must be the deepest slot — real
                 // at field 0 / lowest memory address — and the imag
                 // half lives one slot shallower (one word higher in
                 // memory).
-                let is_complex_local = ty.unqualified().is_complex();
+                let is_complex_local = resolve_type_chain(ty, ctx).is_complex();
                 let storage_slot = if is_aggregate || is_complex_local {
                     slot_offset + num_words - 1
                 } else {
@@ -4256,6 +4376,49 @@ fn emit_compound_op_64(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg,
 /// rhs vregs. Returns the result vreg.
 fn emit_compound_op(ctx: &mut LowerCtx, op: BinaryOp, lhs: VReg, rhs: VReg,
                     is_unsigned: bool) -> Result<VReg> {
+    let lhs_float = ctx.is_float_vreg(lhs);
+    let rhs_float = ctx.is_float_vreg(rhs);
+    if lhs_float || rhs_float {
+        let lhs = if lhs_float {
+            lhs
+        } else {
+            let conv = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::IntToFloat(conv, lhs));
+            conv
+        };
+        let rhs = if rhs_float {
+            rhs
+        } else {
+            let conv = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::IntToFloat(conv, rhs));
+            conv
+        };
+        let result = ctx.alloc_vreg_float();
+        match op {
+            BinaryOp::Add => ctx.emit(IrOp::FAdd(result, lhs, rhs)),
+            BinaryOp::Sub => ctx.emit(IrOp::FSub(result, lhs, rhs)),
+            BinaryOp::Mul => ctx.emit(IrOp::FMul(result, lhs, rhs)),
+            BinaryOp::Div => ctx.emit(IrOp::FDiv(result, lhs, rhs)),
+            BinaryOp::Mod => {
+                let quot = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::FDiv(quot, lhs, rhs));
+                let trunc = ctx.alloc_vreg();
+                ctx.emit(IrOp::FloatToInt(trunc, quot));
+                let trunc_f = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::IntToFloat(trunc_f, trunc));
+                let prod = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::FMul(prod, rhs, trunc_f));
+                ctx.emit(IrOp::FSub(result, lhs, prod));
+            }
+            _ => {
+                return Err(Error::NotImplemented(format!(
+                    "float compound assignment op: {op:?}"
+                )));
+            }
+        }
+        return Ok(result);
+    }
+
     let result = ctx.alloc_vreg();
     match op {
         BinaryOp::Add => ctx.emit(IrOp::Add(result, lhs, rhs)),
@@ -4315,7 +4478,9 @@ fn lower_compound_assign(
     // Detect 64-bit target: `long long x; x <<= n;` must load/op/store
     // as a two-word pair. Without this dispatch the 32-bit paths below
     // would truncate both operands and the result.
-    let target_is_64 = expr_type(target, ctx).is_some_and(|t| ty_is_long_long(&t, ctx));
+    let target_ty = expr_type(target, ctx);
+    let target_is_float = target_ty.as_ref().is_some_and(|t| t.is_float());
+    let target_is_64 = target_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx));
     if target_is_64 {
         return lower_compound_assign_64(ctx, op, target, value, is_unsigned);
     }
@@ -4325,24 +4490,39 @@ fn lower_compound_assign(
             if let Some(storage) = ctx.locals.get(name).cloned() {
                 let lhs = match storage {
                     LocalStorage::Stack(offset) => {
-                        let dst = ctx.alloc_vreg();
+                        let dst = if target_is_float {
+                            ctx.alloc_vreg_float()
+                        } else {
+                            ctx.alloc_vreg()
+                        };
                         ctx.emit(IrOp::Load(dst, 0, offset as i32));
                         dst
                     }
                     LocalStorage::Reg(vreg) => {
-                        let dst = ctx.alloc_vreg();
+                        let dst = if target_is_float {
+                            ctx.alloc_vreg_float()
+                        } else {
+                            ctx.alloc_vreg()
+                        };
                         ctx.emit(IrOp::Copy(dst, vreg));
                         dst
                     }
                     LocalStorage::Static(ref sym) => {
-                        let dst = ctx.alloc_vreg();
+                        let dst = if target_is_float {
+                            ctx.alloc_vreg_float()
+                        } else {
+                            ctx.alloc_vreg()
+                        };
                         ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
                         dst
                     }
                 };
                 let rhs = lower_expr(ctx, value)?;
                 let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
-                let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
+                let mut result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
+                if let Some(ref ty) = target_ty {
+                    result = coerce_vreg(ctx, result, ty);
+                }
                 match storage {
                     LocalStorage::Stack(offset) => {
                         ctx.emit(IrOp::Store(result, 0, offset as i32));
@@ -4357,11 +4537,18 @@ fn lower_compound_assign(
                 Ok(result)
             } else if ctx.globals.contains_key(name) {
                 // Compound assignment to a global variable.
-                let lhs = ctx.alloc_vreg();
+                let lhs = if target_is_float {
+                    ctx.alloc_vreg_float()
+                } else {
+                    ctx.alloc_vreg()
+                };
                 ctx.emit(IrOp::ReadGlobal(lhs, name.clone()));
                 let rhs = lower_expr(ctx, value)?;
                 let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
-                let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
+                let mut result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
+                if let Some(ref ty) = target_ty {
+                    result = coerce_vreg(ctx, result, ty);
+                }
                 ctx.emit(IrOp::StoreGlobal(result, name.clone()));
                 Ok(result)
             } else {
@@ -4370,21 +4557,35 @@ fn lower_compound_assign(
         }
         Expr::Deref(_) | Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
             let addr = lower_lvalue_addr(ctx, target)?;
-            let lhs = ctx.alloc_vreg();
+            let lhs = if target_is_float {
+                ctx.alloc_vreg_float()
+            } else {
+                ctx.alloc_vreg()
+            };
             ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs = lower_expr(ctx, value)?;
             let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
-            let result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
+            let mut result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
+            if let Some(ref ty) = target_ty {
+                result = coerce_vreg(ctx, result, ty);
+            }
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
         }
         _ => {
             let addr = lower_lvalue_addr(ctx, target)?;
-            let lhs = ctx.alloc_vreg();
+            let lhs = if target_is_float {
+                ctx.alloc_vreg_float()
+            } else {
+                ctx.alloc_vreg()
+            };
             ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs_val = lower_expr(ctx, value)?;
             let rhs_val = maybe_scale_ptr_rhs(ctx, op, target, rhs_val);
-            let result = emit_compound_op(ctx, op, lhs, rhs_val, is_unsigned)?;
+            let mut result = emit_compound_op(ctx, op, lhs, rhs_val, is_unsigned)?;
+            if let Some(ref ty) = target_ty {
+                result = coerce_vreg(ctx, result, ty);
+            }
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
         }
@@ -5293,7 +5494,17 @@ fn lower_ternary(
     else_expr: &Expr,
 ) -> Result<VReg> {
     let cond_val = lower_expr(ctx, cond)?;
-    let result = ctx.alloc_vreg();
+    let cond_val = if ctx.is_float_vreg(cond_val) {
+        lower_to_bool(ctx, cond_val)
+    } else {
+        cond_val
+    };
+    let result_ty = ternary_scalar_result_type(ctx, then_expr, else_expr);
+    let result = if result_ty.as_ref().is_some_and(|t| t.is_float()) {
+        ctx.alloc_vreg_float()
+    } else {
+        ctx.alloc_vreg()
+    };
     let else_label = ctx.alloc_label();
     let end_label = ctx.alloc_label();
 
@@ -5303,17 +5514,46 @@ fn lower_ternary(
     ctx.emit(IrOp::BranchCond(Cond::Eq, else_label));
 
     // Then branch.
-    let then_val = lower_expr(ctx, then_expr)?;
+    let mut then_val = lower_expr(ctx, then_expr)?;
+    if let Some(ref ty) = result_ty {
+        then_val = coerce_vreg(ctx, then_val, ty);
+    }
     ctx.emit(IrOp::Copy(result, then_val));
     ctx.emit(IrOp::Branch(end_label));
 
     // Else branch.
     ctx.emit(IrOp::Label(else_label));
-    let else_val = lower_expr(ctx, else_expr)?;
+    let mut else_val = lower_expr(ctx, else_expr)?;
+    if let Some(ref ty) = result_ty {
+        else_val = coerce_vreg(ctx, else_val, ty);
+    }
     ctx.emit(IrOp::Copy(result, else_val));
     ctx.emit(IrOp::Label(end_label));
 
     Ok(result)
+}
+
+fn ternary_scalar_result_type(
+    ctx: &LowerCtx,
+    then_expr: &Expr,
+    else_expr: &Expr,
+) -> Option<Type> {
+    let tt = expr_type(then_expr, ctx)?;
+    let et = expr_type(else_expr, ctx)?;
+    if (tt.is_integer() || tt.is_float()) && (et.is_integer() || et.is_float()) {
+        let pt = tt.integer_promoted();
+        let pe = et.integer_promoted();
+        if pt.is_float() {
+            return Some(pt);
+        }
+        if pe.is_float() {
+            return Some(pe);
+        }
+        if pt.is_integer() && pe.is_integer() {
+            return Some(Type::usual_arithmetic_conversion(&pt, &pe));
+        }
+    }
+    Some(tt)
 }
 
 /// Check whether a type is an aggregate in the C99 sense (struct, union,
@@ -5596,9 +5836,9 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
     }
 }
 
-/// Lower a call's argument list into vregs using the same struct-
-/// unpack logic as `Expr::Call`: scalars are evaluated directly,
-/// struct-by-value arguments get flattened into per-word vregs.
+/// Lower a call's argument list into vregs using the same ABI flattening
+/// as parameter binding: multi-word scalars, complex values, and
+/// struct-by-value arguments become one vreg per 32-bit slot.
 fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
     let mut arg_vregs = Vec::new();
     for arg in args {
@@ -5625,6 +5865,15 @@ fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
             let pair = lower_complex_expr(ctx, arg)?;
             arg_vregs.push(pair.real);
             arg_vregs.push(pair.imag);
+        } else if arg_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx)) {
+            let pair = lower_expr(ctx, arg)?;
+            let pair = if ctx.is_64bit_vreg(pair) {
+                pair
+            } else {
+                widen_to_64(ctx, pair, arg)
+            };
+            arg_vregs.push(pair);
+            arg_vregs.push(pair + 1);
         } else {
             arg_vregs.push(lower_expr(ctx, arg)?);
         }
@@ -5728,6 +5977,25 @@ mod tests {
     }
 
     #[test]
+    fn params_in_calling_functions_are_snapshotted_to_stack() {
+        let unit = parse::parse("int g(int); int f(int x) { g(1); return x; }").unwrap();
+        let func = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let ops = lower_function(func, &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
+        assert!(matches!(ops.first(), Some(IrOp::Copy(_, 0))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Store(_, 0, _))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Call(_, name, _) if name == "g")));
+    }
+
+    #[test]
+    fn params_in_dividing_functions_are_snapshotted_to_stack() {
+        let unit = parse::parse("int f(int x, int y) { int z = x / y; return x + z; }").unwrap();
+        let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
+        assert!(matches!(ops.first(), Some(IrOp::Copy(_, 0))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Store(_, 0, _))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Div(..))));
+    }
+
+    #[test]
     fn lower_if_else() {
         let src = "int f(int x) { if (x) { return 1; } else { return 0; } }";
         let unit = parse::parse(src).unwrap();
@@ -5805,6 +6073,15 @@ mod tests {
     }
 
     #[test]
+    fn lower_float_ternary_keeps_float_result() {
+        let src = "float f(float x, int c) { float a; a = c ? -x : x; return a; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::FNeg(_, _))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::IntToFloat(_, _))));
+    }
+
+    #[test]
     fn lower_compound_assign() {
         let src = "int f() { int x = 10; x += 5; return x; }";
         let unit = parse::parse(src).unwrap();
@@ -5813,6 +6090,15 @@ mod tests {
         // Should store the result back.
         let store_count = ops.iter().filter(|op| matches!(op, IrOp::Store(_, _, _))).count();
         assert!(store_count >= 2, "expected at least 2 stores (init + compound)");
+    }
+
+    #[test]
+    fn lower_float_compound_assign_uses_float_op() {
+        let src = "float f(void) { float x = 2.0f; x *= 0.5f; return x; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::FMul(_, _, _))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Mul(_, _, _))));
     }
 
     #[test]
@@ -6099,6 +6385,24 @@ mod tests {
     }
 
     #[test]
+    fn lower_long_long_param_consumes_two_abi_slots() {
+        let src = "int f(char *out, unsigned long long val, int base, int upper) { return (int)val + base + upper; }";
+        let unit = parse::parse(src).unwrap();
+        let result = lower_function(&unit.functions[0], &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap();
+        assert_eq!(result.arg_slots, 5);
+        assert!(result.ops.iter().any(|op| matches!(op, IrOp::Copy64(_, 1))));
+    }
+
+    #[test]
+    fn lower_long_long_call_arg_flattens_to_two_slots() {
+        let src = "int g(char *, unsigned long long, int, int); int f(char *out, unsigned long long val) { return g(out, val, 10, 0); }";
+        let unit = parse::parse(src).unwrap();
+        let func = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let ops = lower_function(func, &HashMap::new(), &unit.struct_defs, &unit.enum_constants, &unit.typedefs).unwrap().ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Call(_, name, args) if name == "g" && args.len() == 5)));
+    }
+
+    #[test]
     fn lower_long_long_bitwise() {
         let src = "long long f(long long a, long long b) { return a & b; }";
         let unit = parse::parse(src).unwrap();
@@ -6331,6 +6635,31 @@ mod tests {
         )), "expected complex return to use two-word RetStruct, got: {ops:?}");
         assert!(!ops.iter().any(|op| matches!(op, IrOp::Ret(Some(_)))),
             "complex return must not collapse to scalar Ret: {ops:?}");
+    }
+
+    #[test]
+    fn lower_typedef_struct_local_uses_deepest_slot_base() {
+        let src = r#"
+            typedef struct { long long quot; long long rem; } pair_t;
+            pair_t f(void) {
+                pair_t r;
+                return r;
+            }
+        "#;
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::FrameAddr(_, 4))),
+            "typedef struct local should use the deepest word as its base, got: {ops:?}"
+        );
     }
 
     #[test]

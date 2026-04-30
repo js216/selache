@@ -18,7 +18,7 @@ use crate::mach::MachInstr;
 use crate::target;
 
 use selinstr::encode::{
-    AluOp, ComputeOp, FaluOp, Instruction, MemAccess, ShiftOp,
+    AluOp, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, ShiftOp,
 };
 
 /// Rewrite virtual register references in a list of machine instructions,
@@ -112,6 +112,62 @@ struct Allocator {
     spill_slots: u32,
     /// Spill map: virtual register -> spill slot offset.
     spill_map: BTreeMap<u16, u32>,
+}
+
+fn spill_mem_access(write: bool) -> MemAccess {
+    MemAccess {
+        pm: false,
+        write,
+        i_reg: target::FRAME_PTR,
+    }
+}
+
+fn emit_spill_access(out: &mut Vec<MachInstr>, slot: u32, dreg: u16, write: bool) {
+    if slot <= i8::MAX as u32 {
+        out.push(MachInstr {
+            instr: Instruction::ComputeLoadStore {
+                compute: None,
+                access: spill_mem_access(write),
+                dreg,
+                offset: slot as i8,
+                cond: target::COND_TRUE,
+            },
+            reloc: None,
+        });
+        return;
+    }
+
+    // Preserve the positive spill-slot marker for adjust_frame_offsets.
+    // Truncating slot 128 into the i8 offset field would wrap it to
+    // -128, which is indistinguishable from a compiler-owned local slot.
+    out.push(MachInstr {
+        instr: Instruction::Modify {
+            i_reg: target::FRAME_PTR,
+            value: slot as i32,
+            width: MemWidth::Nw,
+            bitrev: false,
+        },
+        reloc: None,
+    });
+    out.push(MachInstr {
+        instr: Instruction::ComputeLoadStore {
+            compute: None,
+            access: spill_mem_access(write),
+            dreg,
+            offset: 0,
+            cond: target::COND_TRUE,
+        },
+        reloc: None,
+    });
+    out.push(MachInstr {
+        instr: Instruction::Modify {
+            i_reg: target::FRAME_PTR,
+            value: -(slot as i32),
+            width: MemWidth::Nw,
+            bitrev: false,
+        },
+        reloc: None,
+    });
 }
 
 impl Allocator {
@@ -249,20 +305,7 @@ impl Allocator {
             // (positive evict + negative reload, or vice versa) lands
             // the spill on top of an unrelated local and the program
             // reads back the local instead of the spilled value.
-            spill.push(MachInstr {
-                instr: Instruction::ComputeLoadStore {
-                    compute: None,
-                    access: MemAccess {
-                        pm: false,
-                        write: true,
-                        i_reg: target::FRAME_PTR,
-                    },
-                    dreg: phys as u16,
-                    offset: slot as i8,
-                    cond: target::COND_TRUE,
-                },
-                reloc: None,
-            });
+            emit_spill_access(spill, slot, phys as u16, true);
             // Remove from register maps so get_phys will reload.
             self.phys_to_vreg.remove(&phys);
             self.vreg_to_phys.remove(&vreg);
@@ -302,20 +345,7 @@ impl Allocator {
             // Use a positive offset so `adjust_frame_offsets` reroutes
             // the slot into the spill region (matching the convention
             // in `spill_caller_saved` and `get_phys`).
-            spill.push(MachInstr {
-                instr: Instruction::ComputeLoadStore {
-                    compute: None,
-                    access: MemAccess {
-                        pm: false,
-                        write: true,
-                        i_reg: target::FRAME_PTR,
-                    },
-                    dreg: phys as u16,
-                    offset: slot as i8,
-                    cond: target::COND_TRUE,
-                },
-                reloc: None,
-            });
+            emit_spill_access(spill, slot, phys as u16, true);
             self.vreg_to_phys.remove(&vreg);
             self.phys_to_vreg.remove(&phys);
             // The phys may have been pinned by spill_caller_saved at an
@@ -357,20 +387,7 @@ impl Allocator {
     /// store convention (see `spill_caller_saved` for the rationale).
     fn emit_reload(&self, vreg: u16, phys: u8, spill_instrs: &mut Vec<MachInstr>) {
         if let Some(&slot) = self.spill_map.get(&vreg) {
-            spill_instrs.push(MachInstr {
-                instr: Instruction::ComputeLoadStore {
-                    compute: None,
-                    access: MemAccess {
-                        pm: false,
-                        write: false,
-                        i_reg: target::FRAME_PTR,
-                    },
-                    dreg: phys as u16,
-                    offset: slot as i8,
-                    cond: target::COND_TRUE,
-                },
-                reloc: None,
-            });
+            emit_spill_access(spill_instrs, slot, phys as u16, false);
         }
     }
 
@@ -448,20 +465,7 @@ impl Allocator {
         // region (negative offsets). The matching reload in
         // `emit_reload` uses the same positive convention, so the
         // store and load address the same memory cell.
-        spill_instrs.push(MachInstr {
-            instr: Instruction::ComputeLoadStore {
-                compute: None,
-                access: MemAccess {
-                    pm: false,
-                    write: true,
-                    i_reg: target::FRAME_PTR,
-                },
-                dreg: evict_phys as u16,
-                offset: slot as i8,
-                cond: target::COND_TRUE,
-            },
-            reloc: None,
-        });
+        emit_spill_access(spill_instrs, slot, evict_phys as u16, true);
 
         // Remove old mapping.
         self.vreg_to_phys.remove(&evicted_vreg);
@@ -875,20 +879,7 @@ impl Allocator {
                                 self.spill_slots += 1;
                                 s
                             });
-                            spill.push(MachInstr {
-                                instr: Instruction::ComputeLoadStore {
-                                    compute: None,
-                                    access: MemAccess {
-                                        pm: false,
-                                        write: true,
-                                        i_reg: target::FRAME_PTR,
-                                    },
-                                    dreg: dest_phys as u16,
-                                    offset: slot as i8,
-                                    cond: target::COND_TRUE,
-                                },
-                                reloc: None,
-                            });
+                            emit_spill_access(spill, slot, dest_phys as u16, true);
                             self.vreg_to_phys.remove(&v);
                             self.phys_to_vreg.remove(&dest_phys);
                         }
@@ -1432,5 +1423,39 @@ mod tests {
             n_caller >= n_callee,
             "expected more caller-saved than callee-saved, got {n_caller} vs {n_callee}"
         );
+    }
+
+    #[test]
+    fn spill_access_above_i8_max_keeps_positive_slot_marker() {
+        let mut out = Vec::new();
+        emit_spill_access(&mut out, 128, 3, true);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(
+            out[0].instr,
+            Instruction::Modify {
+                i_reg: target::FRAME_PTR,
+                value: 128,
+                width: MemWidth::Nw,
+                ..
+            }
+        ));
+        assert!(matches!(
+            out[1].instr,
+            Instruction::ComputeLoadStore {
+                access: MemAccess { write: true, i_reg, .. },
+                dreg: 3,
+                offset: 0,
+                ..
+            } if i_reg == target::FRAME_PTR
+        ));
+        assert!(matches!(
+            out[2].instr,
+            Instruction::Modify {
+                i_reg: target::FRAME_PTR,
+                value: -128,
+                width: MemWidth::Nw,
+                ..
+            }
+        ));
     }
 }

@@ -365,14 +365,13 @@ pub fn dead_code_eliminate(ops: &[IrOp]) -> Vec<IrOp> {
 
     ops.iter()
         .filter(|op| {
-            if let Some(dst) = dest_vreg(op) {
-                // Keep if the destination is used somewhere, or if the op
-                // has side effects (calls).
-                used.contains(&dst) || has_side_effects(op)
-            } else {
-                // No destination: labels, branches, stores, compares, etc.
-                true
-            }
+            let dests = dest_vregs(op);
+            // Keep destination-producing ops if any written vreg is used.
+            // Multi-word ops write adjacent vregs, so checking only the
+            // low half can delete the high-half producer.
+            dests.is_empty()
+                || dests.iter().any(|dst| used.contains(dst))
+                || has_side_effects(op)
         })
         .cloned()
         .collect()
@@ -691,6 +690,11 @@ fn analyze_loop_header(
     for idx in (body_start..back_edge_idx).rev() {
         match &ops[idx] {
             IrOp::Store(_, _, slot) if *slot == counter_slot => {
+                if ops[idx + 1..back_edge_idx].iter().any(|op| {
+                    !matches!(op, IrOp::Label(_) | IrOp::Nop)
+                }) {
+                    return None;
+                }
                 // Trace back to find the beginning of the increment sequence.
                 // Typically: Load(v, 0, slot), LoadImm(v1, 1), Add(v2, v, v1),
                 // Store(v2, 0, slot)
@@ -752,8 +756,8 @@ fn find_step_start(ops: &[IrOp], store_idx: usize, body_start: usize) -> usize {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Return the destination vreg of an op, if any.
-fn dest_vreg(op: &IrOp) -> Option<VReg> {
+/// Return the destination vregs of an op.
+fn dest_vregs(op: &IrOp) -> Vec<VReg> {
     match op {
         IrOp::LoadImm(d, _)
         | IrOp::Copy(d, _)
@@ -787,7 +791,14 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::FloatToInt(d, _)
         | IrOp::Call(d, _, _)
         | IrOp::CallIndirect(d, _, _)
-        | IrOp::LoadImm64(d, _)
+        | IrOp::LongLongToInt(d, _)
+        | IrOp::StackSave(d)
+        | IrOp::StackAlloc(d, _)
+        | IrOp::FrameAddr(d, _)
+        | IrOp::LoadStackArg(d, _)
+        | IrOp::StackArgAddr(d, _)
+        | IrOp::LoadStructRetPtr(d) => vec![*d],
+        IrOp::LoadImm64(d, _)
         | IrOp::Copy64(d, _)
         | IrOp::Add64(d, _, _)
         | IrOp::Sub64(d, _, _)
@@ -806,14 +817,7 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::BitNot64(d, _)
         | IrOp::Load64(d, _, _)
         | IrOp::IntToLongLong(d, _)
-        | IrOp::SExtToLongLong(d, _)
-        | IrOp::LongLongToInt(d, _)
-        | IrOp::StackSave(d)
-        | IrOp::StackAlloc(d, _)
-        | IrOp::FrameAddr(d, _)
-        | IrOp::LoadStackArg(d, _)
-        | IrOp::StackArgAddr(d, _)
-        | IrOp::LoadStructRetPtr(d) => Some(*d),
+        | IrOp::SExtToLongLong(d, _) => vec![*d, *d + 1],
 
         IrOp::Cmp(..)
         | IrOp::UCmp(..)
@@ -833,7 +837,7 @@ fn dest_vreg(op: &IrOp) -> Option<VReg> {
         | IrOp::WriteGlobal64(..)
         | IrOp::StackRestore(_)
         | IrOp::HardwareLoop { .. }
-        | IrOp::Nop => None,
+        | IrOp::Nop => Vec::new(),
     }
 }
 
@@ -906,14 +910,15 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         IrOp::Store(val, base, _) => vec![*val, *base],
         IrOp::LoadGlobal(..) | IrOp::ReadGlobal(..) | IrOp::ReadGlobal64(..)
         | IrOp::LoadString(..) | IrOp::LoadWideString(..) => Vec::new(),
-        IrOp::StoreGlobal(val, _) | IrOp::WriteGlobal64(val, _) => vec![*val],
+        IrOp::StoreGlobal(val, _) => vec![*val],
+        IrOp::WriteGlobal64(val, _) => vec![*val, *val + 1],
         IrOp::LoadImm64(..) => Vec::new(),
         IrOp::Copy64(_, s)
         | IrOp::Neg64(_, s)
         | IrOp::BitNot64(_, s)
-        | IrOp::IntToLongLong(_, s)
-        | IrOp::SExtToLongLong(_, s)
-        | IrOp::LongLongToInt(_, s) => vec![*s],
+        | IrOp::LongLongToInt(_, s) => vec![*s, *s + 1],
+        IrOp::IntToLongLong(_, s)
+        | IrOp::SExtToLongLong(_, s) => vec![*s],
         IrOp::Add64(_, a, b)
         | IrOp::Sub64(_, a, b)
         | IrOp::Mul64(_, a, b)
@@ -923,13 +928,13 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::UMod64(_, a, b)
         | IrOp::BitAnd64(_, a, b)
         | IrOp::BitOr64(_, a, b)
-        | IrOp::BitXor64(_, a, b)
-        | IrOp::Shl64(_, a, b)
+        | IrOp::BitXor64(_, a, b) => vec![*a, *a + 1, *b, *b + 1],
+        IrOp::Shl64(_, a, b)
         | IrOp::Shr64(_, a, b)
-        | IrOp::UShr64(_, a, b) => vec![*a, *b],
-        IrOp::Cmp64(a, b) | IrOp::UCmp64(a, b) => vec![*a, *b],
+        | IrOp::UShr64(_, a, b) => vec![*a, *a + 1, *b],
+        IrOp::Cmp64(a, b) | IrOp::UCmp64(a, b) => vec![*a, *a + 1, *b, *b + 1],
         IrOp::Load64(_, base, _) => vec![*base],
-        IrOp::Store64(val, base, _) => vec![*val, *base],
+        IrOp::Store64(val, base, _) => vec![*val, *val + 1, *base],
     }
 }
 
@@ -1036,6 +1041,21 @@ mod tests {
         ];
         let eliminated = dead_code_eliminate(&ops);
         assert_eq!(eliminated.len(), 4, "should keep all ops: {eliminated:?}");
+    }
+
+    #[test]
+    fn dce_keeps_high_half_for_store64() {
+        let ops = vec![
+            IrOp::Copy(2, 0),
+            IrOp::Copy(3, 1),
+            IrOp::Store64(2, 0, 0),
+            IrOp::Ret(None),
+        ];
+        let eliminated = dead_code_eliminate(&ops);
+        assert!(
+            eliminated.iter().any(|op| matches!(op, IrOp::Copy(3, 1))),
+            "high-half copy was incorrectly removed: {eliminated:?}"
+        );
     }
 
     #[test]

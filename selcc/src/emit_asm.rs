@@ -1292,23 +1292,25 @@ fn emit_function_instrs(
     let ir = ir_opt::dead_code_eliminate(&ir);
     let ir = ir_opt::detect_hardware_loops(&ir);
 
-    // Decide up-front whether this function participates in the
-    // struct-by-value return ABI: a callee-side `RetStruct` /
-    // `LoadStructRetPtr`, or a caller-side `CallStruct` /
-    // `CallIndirectStruct`. Only those shapes ever route data through
-    // the R0:R1 pair (or the R1 hidden-pointer slot), so only those
-    // functions need regalloc to permanently reserve R1. Permanently
-    // reserving it everywhere costs a usable scratch register and
+    // Decide up-front whether this function participates in an ABI
+    // shape that routes data through R1: struct-by-value returns use
+    // R0:R1 (or R1 as the hidden destination pointer), and 64-bit
+    // div/mod helpers return their result pair in R0:R1. Permanently
+    // reserving R1 everywhere costs a usable scratch register and
     // raises register pressure enough that nested ternary chains spill
     // a join value down a path that the merging block cannot reload --
     // a regalloc latent bug that the extra pressure would expose for
-    // every function in the TU instead of just the few that touch
-    // structs by value.
+    // every function in the TU instead of just the few that touch R1
+    // through one of these ABI paths.
     let reserves_r1 = ir.iter().any(|op| matches!(op,
         crate::ir::IrOp::RetStruct { .. }
         | crate::ir::IrOp::LoadStructRetPtr(_)
         | crate::ir::IrOp::CallStruct { .. }
         | crate::ir::IrOp::CallIndirectStruct { .. }
+        | crate::ir::IrOp::Div64(..)
+        | crate::ir::IrOp::UDiv64(..)
+        | crate::ir::IrOp::Mod64(..)
+        | crate::ir::IrOp::UMod64(..)
     ));
 
     // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
@@ -1861,8 +1863,67 @@ fn adjust_frame_offsets(
     let spill_base = shift + local_slots as i32;
     let mut result = Vec::with_capacity(instrs.len());
     let mut idx_map = Vec::with_capacity(instrs.len());
-    for mi in instrs {
+    let mut i = 0;
+    while i < instrs.len() {
+        let mi = &instrs[i];
         idx_map.push(result.len());
+        if let (
+            Instruction::Modify { i_reg, value, .. },
+            Some(MachInstr {
+                instr: Instruction::ComputeLoadStore {
+                    compute,
+                    access,
+                    dreg,
+                    offset: 0,
+                    cond,
+                },
+                reloc,
+            }),
+            Some(MachInstr {
+                instr: Instruction::Modify {
+                    i_reg: restore_i_reg,
+                    value: restore_value,
+                    ..
+                },
+                ..
+            }),
+        ) = (
+            mi.instr,
+            instrs.get(i + 1),
+            instrs.get(i + 2),
+        ) {
+            if i_reg == target::FRAME_PTR
+                && *restore_i_reg == target::FRAME_PTR
+                && value != 0
+                && *restore_value == -value
+                && access.i_reg == target::FRAME_PTR
+                && !access.pm
+            {
+                let new_offset = if value < 0 {
+                    value - shift
+                } else {
+                    // Positive frame-pointer offsets are regalloc spill
+                    // slots. Large spill slots are emitted as
+                    // MODIFY(+slot) / access(0) / MODIFY(-slot) so the
+                    // slot id does not wrap through the i8 access field.
+                    -(spill_base + value + 1)
+                };
+                let start = result.len();
+                emit_adjusted_access(
+                    &mut result,
+                    *compute,
+                    *access,
+                    *dreg,
+                    new_offset,
+                    *cond,
+                    reloc.clone(),
+                );
+                idx_map.push(start.saturating_add(1).min(result.len()));
+                idx_map.push(start.saturating_add(2).min(result.len()));
+                i += 3;
+                continue;
+            }
+        }
         match mi.instr {
             Instruction::ComputeLoadStore { compute, access, dreg, offset, cond }
                 if access.i_reg == target::FRAME_PTR && !access.pm =>
@@ -1905,6 +1966,7 @@ fn adjust_frame_offsets(
                 result.push(mi.clone());
             }
         }
+        i += 1;
     }
     (result, idx_map)
 }
@@ -2498,6 +2560,54 @@ mod tests {
     // ----------------------------------------------------------------
     // Static checks on the emitted asm text shape.
     // ----------------------------------------------------------------
+
+    #[test]
+    fn large_spill_modify_sequence_adjusts_to_spill_region() {
+        let instrs = vec![
+            MachInstr {
+                instr: Instruction::Modify {
+                    i_reg: target::FRAME_PTR,
+                    value: 128,
+                    width: MemWidth::Nw,
+                    bitrev: false,
+                },
+                reloc: None,
+            },
+            MachInstr {
+                instr: Instruction::ComputeLoadStore {
+                    compute: None,
+                    access: encode::MemAccess {
+                        pm: false,
+                        write: true,
+                        i_reg: target::FRAME_PTR,
+                    },
+                    dreg: 3,
+                    offset: 0,
+                    cond: target::COND_TRUE,
+                },
+                reloc: None,
+            },
+            MachInstr {
+                instr: Instruction::Modify {
+                    i_reg: target::FRAME_PTR,
+                    value: -128,
+                    width: MemWidth::Nw,
+                    bitrev: false,
+                },
+                reloc: None,
+            },
+        ];
+        let (adjusted, _) = adjust_frame_offsets(&instrs, 8, 128);
+        assert!(matches!(
+            adjusted.first().map(|mi| mi.instr),
+            Some(Instruction::Modify {
+                i_reg: target::FRAME_PTR,
+                value: -267,
+                width: MemWidth::Nw,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn has_global_and_label() {
