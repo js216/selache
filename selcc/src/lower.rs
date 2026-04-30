@@ -2409,7 +2409,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 Type::Array(elem, None) => Type::Array(elem, Some(init_len)),
                 other => other,
             };
-            let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1) as u32;
+            let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1);
             let slot = ctx.frame_size;
             ctx.frame_size += num_words;
             // See note in Stmt::Decl: aggregate compound literals
@@ -4870,8 +4870,7 @@ fn lower_aggregate_init(
                 resolved_elem.unqualified(),
                 Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
             ) {
-                let inner_words =
-                    crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
+                let inner_words = crate::types::size_words_ctx(&resolved_elem, ctx).max(1);
                 let inner_base = elem_slot + 1 - inner_words;
                 lower_aggregate_init(
                     ctx, inner_items, elem_ty, inner_base, inner_words, true,
@@ -4907,7 +4906,7 @@ fn lower_aggregate_init(
                     Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
                 ) {
                     let inner_words =
-                        crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
+                        crate::types::size_words_ctx(&resolved_elem, ctx).max(1);
                     let inner_base = elem_slot + 1 - inner_words;
                     lower_designator_into(
                         ctx, inner_expr, elem_ty, inner_base, inner_words,
@@ -4935,8 +4934,7 @@ fn lower_aggregate_init(
         {
             if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
                 let resolved_elem = resolve_type(elem_ty, ctx);
-                let inner_words =
-                    crate::types::size_words_ctx(&resolved_elem, ctx).max(1) as u32;
+                let inner_words = crate::types::size_words_ctx(&resolved_elem, ctx).max(1);
                 let inner_base = elem_slot + 1 - inner_words;
                 // Gather subsequent flat (non-designator, non-brace)
                 // items: the inner aggregate's own recursive call will
@@ -5187,8 +5185,7 @@ fn lower_struct_init(
                 Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
             );
             if fty_is_aggregate {
-                let inner_words =
-                    crate::types::size_words_ctx(&resolved_fty, ctx).max(1) as u32;
+                let inner_words = crate::types::size_words_ctx(&resolved_fty, ctx).max(1);
                 // Inner's deepest slot must coincide with the outer
                 // field's deepest slot (`elem_slot`).  With the inner
                 // call laying out word `i` at
@@ -5217,8 +5214,7 @@ fn lower_struct_init(
                 Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
             );
             if fty_is_aggregate {
-                let inner_words =
-                    crate::types::size_words_ctx(&resolved_fty, ctx).max(1) as u32;
+                let inner_words = crate::types::size_words_ctx(&resolved_fty, ctx).max(1);
                 let inner_base = elem_slot + 1 - inner_words;
                 lower_designator_into(
                     ctx, inner, fty, inner_base, inner_words,
@@ -5430,7 +5426,7 @@ fn lower_compound_literal(
         Type::Array(elem, None) => Type::Array(elem, Some(items.len())),
         other => other,
     };
-    let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1) as u32;
+    let num_words = crate::types::size_words_ctx(&resolved_ty, ctx).max(1);
     let slot = ctx.frame_size;
     ctx.frame_size += num_words;
 

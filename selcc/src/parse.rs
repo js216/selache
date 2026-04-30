@@ -330,9 +330,12 @@ impl<'a> Parser<'a> {
             }
             Expr::Unary { op: UnaryOp::Neg, operand } => -self.eval_enum_init(operand),
             Expr::Unary { op: UnaryOp::BitNot, operand } => !self.eval_enum_init(operand),
-            Expr::Unary { op: UnaryOp::LogNot, operand } => {
-                if self.eval_enum_init(operand) == 0 { 1 } else { 0 }
+            Expr::Unary { op: UnaryOp::LogNot, operand }
+                if self.eval_enum_init(operand) == 0 =>
+            {
+                1
             }
+            Expr::Unary { op: UnaryOp::LogNot, .. } => 0,
             Expr::Binary { op, lhs, rhs } => {
                 let l = self.eval_enum_init(lhs);
                 let r = self.eval_enum_init(rhs);

@@ -119,20 +119,12 @@ fn eval_expr(
                 BinOp::Add => Ok(l.wrapping_add(r)),
                 BinOp::Sub => Ok(l.wrapping_sub(r)),
                 BinOp::Mul => Ok(l.wrapping_mul(r)),
-                BinOp::Div => {
-                    if r == 0 {
-                        Err(EvalErr::Hard("division by zero".into()))
-                    } else {
-                        Ok(l / r)
-                    }
-                }
-                BinOp::Mod => {
-                    if r == 0 {
-                        Err(EvalErr::Hard("modulo by zero".into()))
-                    } else {
-                        Ok(l % r)
-                    }
-                }
+                BinOp::Div => l
+                    .checked_div(r)
+                    .ok_or_else(|| EvalErr::Hard("division by zero".into())),
+                BinOp::Mod => l
+                    .checked_rem(r)
+                    .ok_or_else(|| EvalErr::Hard("modulo by zero".into())),
                 BinOp::Shl => Ok(l.wrapping_shl(r)),
                 BinOp::Shr => Ok(l.wrapping_shr(r)),
                 BinOp::And => Ok(l & r),

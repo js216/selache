@@ -592,17 +592,13 @@ fn format_attr_value(
             };
             format!("{val:#018x}")
         }
-        0x01 | 0x10 => {
+        0x01 | 0x10 if address_size == 4 => {
             // DW_FORM_addr / DW_FORM_ref_addr
-            if address_size == 4 {
-                if pos + 4 > data.len() {
-                    return "???".to_string();
-                }
-                let val = endian.read_u32(&data[pos..]);
-                format!("{val:#010x}")
-            } else {
-                "???".to_string()
+            if pos + 4 > data.len() {
+                return "???".to_string();
             }
+            let val = endian.read_u32(&data[pos..]);
+            format!("{val:#010x}")
         }
         0x0c => {
             // DW_FORM_flag

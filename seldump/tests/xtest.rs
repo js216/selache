@@ -28,7 +28,15 @@ fn seldump_bin() -> std::path::PathBuf {
 }
 
 fn write_temp_file(data: &[u8], name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("seldump_test");
+    let dir = option_env!("CARGO_TARGET_TMPDIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("CARGO_TARGET_TMPDIR").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("target")
+        })
+        .join("seldump_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     let mut f = std::fs::File::create(&path).unwrap();

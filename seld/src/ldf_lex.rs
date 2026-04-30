@@ -188,11 +188,9 @@ impl<'a> Lexer<'a> {
                         start.line, start.col
                     ));
                 }
-                Some(b'*') => {
-                    if self.peek() == Some(b'/') {
-                        self.advance();
-                        return Ok(());
-                    }
+                Some(b'*') if self.peek() == Some(b'/') => {
+                    self.advance();
+                    return Ok(());
                 }
                 _ => {}
             }

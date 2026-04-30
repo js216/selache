@@ -668,10 +668,8 @@ fn collect_init_symbol_refs(
     worklist: &mut Vec<String>,
 ) {
     match expr {
-        Expr::Ident(name) => {
-            if fn_names.contains(name) && reachable.insert(name.clone()) {
-                worklist.push(name.clone());
-            }
+        Expr::Ident(name) if fn_names.contains(name) && reachable.insert(name.clone()) => {
+            worklist.push(name.clone());
         }
         Expr::AddrOf(inner) => {
             collect_init_symbol_refs(inner, fn_names, reachable, worklist);

@@ -2219,10 +2219,8 @@ fn find_comma_outside_parens(text: &str) -> Option<usize> {
     for (i, c) in text.char_indices() {
         match c {
             '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            ')' if depth > 0 => {
+                depth -= 1;
             }
             ',' if depth == 0 => return Some(i),
             _ => {}
@@ -2238,10 +2236,8 @@ fn find_all_commas_outside_parens(text: &str) -> Vec<usize> {
     for (i, c) in text.char_indices() {
         match c {
             '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            ')' if depth > 0 => {
+                depth -= 1;
             }
             ',' if depth == 0 => result.push(i),
             _ => {}
@@ -4148,10 +4144,8 @@ fn find_eq_outside_parens(text: &str) -> Option<usize> {
     for (i, c) in text.char_indices() {
         match c {
             '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            ')' if depth > 0 => {
+                depth -= 1;
             }
             '=' if depth == 0 => return Some(i),
             _ => {}
