@@ -8,8 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-int errno = 0;
-
 int test_main(void)
 {
 
