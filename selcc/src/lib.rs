@@ -80,10 +80,12 @@ pub fn compile_to_asm(src: &str, filename: &str, opts: &cli::Options) -> Result<
 /// against.
 fn prune_unused_static_fns(unit: &mut ast::TranslationUnit) {
     use std::collections::{HashMap, HashSet};
-    let fn_names: HashSet<String> =
-        unit.functions.iter().map(|f| f.name.clone()).collect();
-    let by_name: HashMap<&str, &ast::Function> =
-        unit.functions.iter().map(|f| (f.name.as_str(), f)).collect();
+    let fn_names: HashSet<String> = unit.functions.iter().map(|f| f.name.clone()).collect();
+    let by_name: HashMap<&str, &ast::Function> = unit
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f))
+        .collect();
     let mut reachable: HashSet<String> = unit
         .functions
         .iter()
@@ -99,7 +101,9 @@ fn prune_unused_static_fns(unit: &mut ast::TranslationUnit) {
     }
     let mut worklist: Vec<String> = reachable.iter().cloned().collect();
     while let Some(name) = worklist.pop() {
-        let Some(f) = by_name.get(name.as_str()) else { continue };
+        let Some(f) = by_name.get(name.as_str()) else {
+            continue;
+        };
         let before = reachable.len();
         for stmt in &f.body {
             collect_stmt_refs(stmt, &fn_names, &mut reachable);
@@ -112,7 +116,8 @@ fn prune_unused_static_fns(unit: &mut ast::TranslationUnit) {
             }
         }
     }
-    unit.functions.retain(|f| !f.is_static || reachable.contains(&f.name));
+    unit.functions
+        .retain(|f| !f.is_static || reachable.contains(&f.name));
 }
 
 fn collect_stmt_refs(
@@ -136,7 +141,11 @@ fn collect_stmt_refs(
                 collect_expr_refs(e, fns, out);
             }
         }
-        If { cond, then_body, else_body } => {
+        If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             collect_expr_refs(cond, fns, out);
             for s in then_body {
                 collect_stmt_refs(s, fns, out);
@@ -153,7 +162,12 @@ fn collect_stmt_refs(
                 collect_stmt_refs(s, fns, out);
             }
         }
-        For { init, cond, step, body } => {
+        For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
             if let Some(s) = init {
                 collect_stmt_refs(s, fns, out);
             }
@@ -219,8 +233,15 @@ fn collect_expr_refs(
             collect_expr_refs(target, fns, out);
             collect_expr_refs(value, fns, out);
         }
-        Deref(e) | AddrOf(e) | Cast(_, e) | PreInc(e) | PreDec(e)
-        | PostInc(e) | PostDec(e) | RealPart(e) | ImagPart(e) => {
+        Deref(e)
+        | AddrOf(e)
+        | Cast(_, e)
+        | PreInc(e)
+        | PreDec(e)
+        | PostInc(e)
+        | PostDec(e)
+        | RealPart(e)
+        | ImagPart(e) => {
             collect_expr_refs(e, fns, out);
         }
         Index(a, b) => {
@@ -228,7 +249,11 @@ fn collect_expr_refs(
             collect_expr_refs(b, fns, out);
         }
         Member(e, _) | Arrow(e, _) => collect_expr_refs(e, fns, out),
-        Ternary { cond, then_expr, else_expr } => {
+        Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
             collect_expr_refs(cond, fns, out);
             collect_expr_refs(then_expr, fns, out);
             collect_expr_refs(else_expr, fns, out);
@@ -247,7 +272,7 @@ fn collect_expr_refs(
             collect_expr_refs(index, fns, out);
             collect_expr_refs(value, fns, out);
         }
-        Sizeof(_) | IntLit(..) | FloatLit(_) | ImagLit(_)
-        | StringLit(_) | WideStringLit(_) | CharLit(_) => {}
+        Sizeof(_) | IntLit(..) | FloatLit(_) | ImagLit(_) | StringLit(_) | WideStringLit(_)
+        | CharLit(_) => {}
     }
 }

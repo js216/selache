@@ -83,7 +83,10 @@ fn main() {
     print_banner();
 
     let result = seld::link(&opts).and_then(|out| {
-        let output_path = opts.output_file.as_ref().ok_or(seld::error::Error::NoOutput)?;
+        let output_path = opts
+            .output_file
+            .as_ref()
+            .ok_or(seld::error::Error::NoOutput)?;
         std::fs::write(output_path, &out.image)?;
         if opts.verbose {
             eprintln!("Written {} bytes to {output_path}", out.image.len());

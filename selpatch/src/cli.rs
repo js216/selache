@@ -37,9 +37,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         match args[i].as_str() {
             "-get" | "-replace" => {
                 if action.is_some() {
-                    return Err(Error::Usage(
-                        "only one of -get or -replace allowed".into(),
-                    ));
+                    return Err(Error::Usage("only one of -get or -replace allowed".into()));
                 }
                 let act = if args[i] == "-get" {
                     Action::Get
@@ -102,9 +100,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         });
     }
 
-    let action = action.ok_or_else(|| {
-        Error::Usage("must specify -get or -replace".into())
-    })?;
+    let action = action.ok_or_else(|| Error::Usage("must specify -get or -replace".into()))?;
 
     if positionals.is_empty() {
         return Err(Error::Usage("missing input ELF filename".into()));

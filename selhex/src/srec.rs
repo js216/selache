@@ -71,11 +71,7 @@ pub fn write_s3(records: &[DataRecord], w: &mut dyn Write) -> Result<()> {
     write_srec(records, w, AddrWidth::Four)
 }
 
-fn write_srec(
-    records: &[DataRecord],
-    w: &mut dyn Write,
-    width: AddrWidth,
-) -> Result<()> {
+fn write_srec(records: &[DataRecord], w: &mut dyn Write, width: AddrWidth) -> Result<()> {
     write_header(w)?;
 
     let mut addr_buf = [0u8; 4];
@@ -256,10 +252,7 @@ mod tests {
 
     #[test]
     fn test_binary_with_gap() {
-        let records = vec![
-            make_record(0, &[0xAA]),
-            make_record(3, &[0xBB]),
-        ];
+        let records = vec![make_record(0, &[0xAA]), make_record(3, &[0xBB])];
         let mut buf = Vec::new();
         write_binary(&records, &mut buf).unwrap();
         assert_eq!(buf, vec![0xAA, 0xFF, 0xFF, 0xBB]);
@@ -280,10 +273,7 @@ mod tests {
         let mut buf = Vec::new();
         write_s3(&records, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        let s3_lines: Vec<&str> = output
-            .lines()
-            .filter(|l| l.starts_with("S3"))
-            .collect();
+        let s3_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("S3")).collect();
         assert_eq!(s3_lines.len(), 2);
     }
 }

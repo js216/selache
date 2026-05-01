@@ -15,7 +15,11 @@ pub enum Error {
     NoLdf,
     Parse(String),
     UnresolvedSymbol(String),
-    DuplicateSymbol { name: String, first: String, second: String },
+    DuplicateSymbol {
+        name: String,
+        first: String,
+        second: String,
+    },
     Relocation(String),
     LayoutOverflow {
         section: String,

@@ -326,8 +326,18 @@ fn decode_alu(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
         0xCA => format!("{} = FLOAT {}", r(rn), dreg(rx, false)),
         0xCD => format!("{} = TRUNC {}", dreg(rn, false), r(rx)),
         0xD9 => format!("{} = FIX {} BY {}", dreg(rn, false), r(rx), dreg(ry, false)),
-        0xDA => format!("{} = FLOAT {} BY {}", r(rn), dreg(rx, false), dreg(ry, false)),
-        0xDD => format!("{} = TRUNC {} BY {}", dreg(rn, false), r(rx), dreg(ry, false)),
+        0xDA => format!(
+            "{} = FLOAT {} BY {}",
+            r(rn),
+            dreg(rx, false),
+            dreg(ry, false)
+        ),
+        0xDD => format!(
+            "{} = TRUNC {} BY {}",
+            dreg(rn, false),
+            r(rx),
+            dreg(ry, false)
+        ),
         0xE0 => format!("{} = {} COPYSIGN {}", r(rn), r(rx), r(ry)),
         0xE1 => format!("{} = MIN({}, {})", r(rn), r(rx), r(ry)),
         0xE2 => format!("{} = MAX({}, {})", r(rn), r(rx), r(ry)),
@@ -430,7 +440,11 @@ fn decode_multifunction(field: u32) -> String {
 }
 
 fn mf_mul_mod(fp: bool) -> &'static str {
-    if fp { "" } else { " (SSF)" }
+    if fp {
+        ""
+    } else {
+        " (SSF)"
+    }
 }
 
 fn decode_mf_mul_alu(field: u32, mf_op: u32, fp: bool) -> String {
@@ -1387,7 +1401,10 @@ fn decode_type12a(word: u64) -> String {
 fn decode_type12b(word: u64) -> String {
     let ureg_field = bits(word, 39, 32);
     let addr24 = bits(word, 23, 0);
-    format!("LCNTR = {}, DO 0x{addr24:06X} UNTIL LCE", ureg_name(ureg_field))
+    format!(
+        "LCNTR = {}, DO 0x{addr24:06X} UNTIL LCE",
+        ureg_name(ureg_field)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,8 +1422,8 @@ fn decode_type13(word: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn decode_type14(word: u64) -> String {
-    let g = bit(word, 41);   // 0=DM, 1=PM
-    let d = bit(word, 40);   // 0=read, 1=write
+    let g = bit(word, 41); // 0=DM, 1=PM
+    let d = bit(word, 40); // 0=read, 1=write
     let ureg_field = bits(word, 39, 32);
     let addr32 = bits(word, 31, 0);
 
@@ -1425,10 +1442,10 @@ fn decode_type14(word: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn decode_type15(word: u64) -> String {
-    let g = bit(word, 44);           // 0=DM, 1=PM
+    let g = bit(word, 44); // 0=DM, 1=PM
     let i_field = bits(word, 43, 41); // 3-bit I register index
-    let d = bit(word, 40);           // 0=read, 1=write
-    let lw = bit(word, 39);          // long-word access flag
+    let d = bit(word, 40); // 0=read, 1=write
+    let lw = bit(word, 39); // long-word access flag
     let ureg_code = bits(word, 38, 32); // 7-bit VISA ureg code
     let offset32 = bits(word, 31, 0);
 
@@ -1585,12 +1602,24 @@ fn decode_type20(word: u64) -> String {
     //   bit2 (0x04) = PUSH PCSTK
     //   bit1 (0x02) = POP PCSTK
     let mut ops = Vec::new();
-    if sub & 0x40 != 0 { ops.push("PUSH LOOP"); }
-    if sub & 0x20 != 0 { ops.push("POP LOOP"); }
-    if sub & 0x10 != 0 { ops.push("PUSH STS"); }
-    if sub & 0x08 != 0 { ops.push("POP STS"); }
-    if sub & 0x04 != 0 { ops.push("PUSH PCSTK"); }
-    if sub & 0x02 != 0 { ops.push("POP PCSTK"); }
+    if sub & 0x40 != 0 {
+        ops.push("PUSH LOOP");
+    }
+    if sub & 0x20 != 0 {
+        ops.push("POP LOOP");
+    }
+    if sub & 0x10 != 0 {
+        ops.push("PUSH STS");
+    }
+    if sub & 0x08 != 0 {
+        ops.push("POP STS");
+    }
+    if sub & 0x04 != 0 {
+        ops.push("PUSH PCSTK");
+    }
+    if sub & 0x02 != 0 {
+        ops.push("POP PCSTK");
+    }
 
     if ops.is_empty() {
         return format!("STACK OP 0x{sub:02X} ; 0x{word:012X}");
@@ -1990,8 +2019,8 @@ mod tests {
     #[test]
     fn test_indirect_call_type9a() {
         // CALL (M9, I10) — pmm=1(M9) at bits[29:27], pmi=2(I10) at bits[26:24]
-        let word: u64 = (0x08u64 << 40) | (1u64 << 39) | (31u64 << 33)
-            | (1u64 << 27) | (2u64 << 24);
+        let word: u64 =
+            (0x08u64 << 40) | (1u64 << 39) | (31u64 << 33) | (1u64 << 27) | (2u64 << 24);
         assert_eq!(dis(word), "CALL (M9,I10)");
     }
 

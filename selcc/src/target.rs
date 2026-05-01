@@ -154,10 +154,13 @@ mod tests {
         assert_eq!(RETURN_REG, 0);
         assert_eq!(NUM_REGS, 16);
         assert_eq!(ARG_REGS, &[4, 8, 12]);
-        assert_eq!(CALLER_SAVED.len(), 7);    // R2 reserved for frame link
+        assert_eq!(CALLER_SAVED.len(), 7); // R2 reserved for frame link
         assert_eq!(CALLEE_SAVED.len(), 8);
         // Caller-saved + callee-saved + 1 reserved (R2) = 16 registers.
-        assert_eq!(CALLER_SAVED.len() + CALLEE_SAVED.len() + 1, NUM_REGS as usize);
+        assert_eq!(
+            CALLER_SAVED.len() + CALLEE_SAVED.len() + 1,
+            NUM_REGS as usize
+        );
     }
 
     #[test]

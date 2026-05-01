@@ -107,12 +107,8 @@ fn print_usage() {
     eprintln!("       selpatch -replace section-name [-o output-filename] [-bits input-bits-filename] [-text] input-elf-filename");
     eprintln!("       selpatch [-help | -version]");
     eprintln!("Examples:");
-    eprintln!(
-        "       selpatch -get _ov_os_overlay_1 -o bytes_bin o1.ovl(overlay1.elf)"
-    );
+    eprintln!("       selpatch -get _ov_os_overlay_1 -o bytes_bin o1.ovl(overlay1.elf)");
     eprintln!("       selpatch -get L1_code -o bytes_txt -text p0.dxe");
     eprintln!("       selpatch -replace _ov_os_overlay_1 -o o1_new_from_txt.ovl -bits bytes_txt -text o1.ovl(overlay1.elf)");
-    eprintln!(
-        "       selpatch -replace L1_code -o p0_new.dxe -bits bytes_bin p0.dxe"
-    );
+    eprintln!("       selpatch -replace L1_code -o p0_new.dxe -bits bytes_bin p0.dxe");
 }

@@ -11,9 +11,7 @@ pub mod visa_encode;
 /// selas assembler parses. Implemented as `encode_word` followed by
 /// `decode_instruction` so callers automatically stay in sync with the
 /// round-trip boundary used by selas's asm parser.
-pub fn instruction_to_text(
-    instr: &encode::Instruction,
-) -> Result<String, encode::EncodeError> {
+pub fn instruction_to_text(instr: &encode::Instruction) -> Result<String, encode::EncodeError> {
     // Instructions whose 48-bit ISA encoding is not modelled by this
     // toolchain need direct text output: the encode-then-decode round
     // trip would lose them. Currently only RFRAME falls in this bucket.

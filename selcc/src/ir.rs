@@ -191,7 +191,6 @@ pub enum IrOp {
     // ---- 64-bit integer operations (hi/lo register pairs) ----
     // Each 64-bit value occupies two consecutive vregs: (lo, hi).
     // The first VReg of each pair is the "lo" word, hi = lo + 1.
-
     /// Load a 64-bit immediate into a register pair (lo, hi).
     /// dst_lo = low 32 bits, dst_lo+1 = high 32 bits.
     LoadImm64(VReg, i64),
@@ -289,9 +288,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
     let record_used = |v: VReg, used: &mut BTreeSet<VReg>| {
         used.insert(v);
     };
-    let record_anchor = |v: VReg,
-                         anchors: &mut BTreeSet<VReg>,
-                         used: &mut BTreeSet<VReg>| {
+    let record_anchor = |v: VReg, anchors: &mut BTreeSet<VReg>, used: &mut BTreeSet<VReg>| {
         anchors.insert(v);
         used.insert(v);
         used.insert(v + 1);
@@ -367,20 +364,32 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
                     record_used(*a, &mut used);
                 }
             }
-            IrOp::CallStruct { name: _, args, dst_addr, .. } => {
+            IrOp::CallStruct {
+                name: _,
+                args,
+                dst_addr,
+                ..
+            } => {
                 record_used(*dst_addr, &mut used);
                 for a in args {
                     record_used(*a, &mut used);
                 }
             }
-            IrOp::CallIndirectStruct { addr, args, dst_addr, .. } => {
+            IrOp::CallIndirectStruct {
+                addr,
+                args,
+                dst_addr,
+                ..
+            } => {
                 record_used(*addr, &mut used);
                 record_used(*dst_addr, &mut used);
                 for a in args {
                     record_used(*a, &mut used);
                 }
             }
-            IrOp::RetStruct { src_addr, dst_addr, .. } => {
+            IrOp::RetStruct {
+                src_addr, dst_addr, ..
+            } => {
                 record_used(*src_addr, &mut used);
                 if let Some(v) = dst_addr {
                     record_used(*v, &mut used);
@@ -417,9 +426,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
                 record_anchor(*c, &mut anchors, &mut used);
             }
             // Shift count is a 32-bit single, not a 64-bit pair.
-            IrOp::Shl64(a, b, c)
-            | IrOp::Shr64(a, b, c)
-            | IrOp::UShr64(a, b, c) => {
+            IrOp::Shl64(a, b, c) | IrOp::Shr64(a, b, c) | IrOp::UShr64(a, b, c) => {
                 record_anchor(*a, &mut anchors, &mut used);
                 record_anchor(*b, &mut anchors, &mut used);
                 record_used(*c, &mut used);
@@ -436,8 +443,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             IrOp::ReadGlobal64(dst, _) | IrOp::WriteGlobal64(dst, _) => {
                 record_anchor(*dst, &mut anchors, &mut used);
             }
-            IrOp::IntToLongLong(dst, src)
-            | IrOp::SExtToLongLong(dst, src) => {
+            IrOp::IntToLongLong(dst, src) | IrOp::SExtToLongLong(dst, src) => {
                 record_anchor(*dst, &mut anchors, &mut used);
                 record_used(*src, &mut used);
             }
@@ -549,103 +555,125 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
     // catches any such omission early.
     let apply = |v: VReg| -> VReg { *map.get(&v).unwrap_or(&v) };
 
-    ir.iter().map(|op| match op {
-        IrOp::LoadImm(d, x) => IrOp::LoadImm(apply(*d), *x),
-        IrOp::Copy(a, b) => IrOp::Copy(apply(*a), apply(*b)),
-        IrOp::Add(a, b, c) => IrOp::Add(apply(*a), apply(*b), apply(*c)),
-        IrOp::Sub(a, b, c) => IrOp::Sub(apply(*a), apply(*b), apply(*c)),
-        IrOp::Mul(a, b, c) => IrOp::Mul(apply(*a), apply(*b), apply(*c)),
-        IrOp::Div(a, b, c) => IrOp::Div(apply(*a), apply(*b), apply(*c)),
-        IrOp::UDiv(a, b, c) => IrOp::UDiv(apply(*a), apply(*b), apply(*c)),
-        IrOp::Mod(a, b, c) => IrOp::Mod(apply(*a), apply(*b), apply(*c)),
-        IrOp::UMod(a, b, c) => IrOp::UMod(apply(*a), apply(*b), apply(*c)),
-        IrOp::BitAnd(a, b, c) => IrOp::BitAnd(apply(*a), apply(*b), apply(*c)),
-        IrOp::BitOr(a, b, c) => IrOp::BitOr(apply(*a), apply(*b), apply(*c)),
-        IrOp::BitXor(a, b, c) => IrOp::BitXor(apply(*a), apply(*b), apply(*c)),
-        IrOp::Shl(a, b, c) => IrOp::Shl(apply(*a), apply(*b), apply(*c)),
-        IrOp::Shr(a, b, c) => IrOp::Shr(apply(*a), apply(*b), apply(*c)),
-        IrOp::Lshr(a, b, c) => IrOp::Lshr(apply(*a), apply(*b), apply(*c)),
-        IrOp::Neg(a, b) => IrOp::Neg(apply(*a), apply(*b)),
-        IrOp::BitNot(a, b) => IrOp::BitNot(apply(*a), apply(*b)),
-        IrOp::Cmp(a, b) => IrOp::Cmp(apply(*a), apply(*b)),
-        IrOp::UCmp(a, b) => IrOp::UCmp(apply(*a), apply(*b)),
-        IrOp::Ret(opt) => IrOp::Ret(opt.map(apply)),
-        IrOp::LoadStructRetPtr(d) => IrOp::LoadStructRetPtr(apply(*d)),
-        IrOp::Call(d, n, args) => IrOp::Call(
-            apply(*d), n.clone(), args.iter().map(|a| apply(*a)).collect()),
-        IrOp::CallIndirect(d, addr, args) => IrOp::CallIndirect(
-            apply(*d), apply(*addr),
-            args.iter().map(|a| apply(*a)).collect()),
-        IrOp::CallStruct { name, args, dst_addr, num_words } => IrOp::CallStruct {
-            name: name.clone(),
-            args: args.iter().map(|a| apply(*a)).collect(),
-            dst_addr: apply(*dst_addr),
-            num_words: *num_words,
-        },
-        IrOp::CallIndirectStruct { addr, args, dst_addr, num_words } => IrOp::CallIndirectStruct {
-            addr: apply(*addr),
-            args: args.iter().map(|a| apply(*a)).collect(),
-            dst_addr: apply(*dst_addr),
-            num_words: *num_words,
-        },
-        IrOp::RetStruct { src_addr, dst_addr, num_words } => IrOp::RetStruct {
-            src_addr: apply(*src_addr),
-            dst_addr: dst_addr.map(apply),
-            num_words: *num_words,
-        },
-        IrOp::Branch(l) => IrOp::Branch(*l),
-        IrOp::BranchCond(c, l) => IrOp::BranchCond(*c, *l),
-        IrOp::Label(l) => IrOp::Label(*l),
-        IrOp::Load(d, b, off) => IrOp::Load(apply(*d), apply(*b), *off),
-        IrOp::Store(s, b, off) => IrOp::Store(apply(*s), apply(*b), *off),
-        IrOp::LoadGlobal(d, n) => IrOp::LoadGlobal(apply(*d), n.clone()),
-        IrOp::ReadGlobal(d, n) => IrOp::ReadGlobal(apply(*d), n.clone()),
-        IrOp::StoreGlobal(s, n) => IrOp::StoreGlobal(apply(*s), n.clone()),
-        IrOp::ReadGlobal64(d, n) => IrOp::ReadGlobal64(apply(*d), n.clone()),
-        IrOp::WriteGlobal64(s, n) => IrOp::WriteGlobal64(apply(*s), n.clone()),
-        IrOp::LoadString(d, idx) => IrOp::LoadString(apply(*d), *idx),
-        IrOp::LoadWideString(d, idx) => IrOp::LoadWideString(apply(*d), *idx),
-        IrOp::FAdd(a, b, c) => IrOp::FAdd(apply(*a), apply(*b), apply(*c)),
-        IrOp::FSub(a, b, c) => IrOp::FSub(apply(*a), apply(*b), apply(*c)),
-        IrOp::FMul(a, b, c) => IrOp::FMul(apply(*a), apply(*b), apply(*c)),
-        IrOp::FDiv(a, b, c) => IrOp::FDiv(apply(*a), apply(*b), apply(*c)),
-        IrOp::FNeg(a, b) => IrOp::FNeg(apply(*a), apply(*b)),
-        IrOp::IntToFloat(a, b) => IrOp::IntToFloat(apply(*a), apply(*b)),
-        IrOp::FloatToInt(a, b) => IrOp::FloatToInt(apply(*a), apply(*b)),
-        IrOp::FCmp(a, b) => IrOp::FCmp(apply(*a), apply(*b)),
-        IrOp::HardwareLoop { count, end_label } => IrOp::HardwareLoop {
-            count: *count, end_label: *end_label,
-        },
-        IrOp::StackSave(d) => IrOp::StackSave(apply(*d)),
-        IrOp::StackRestore(d) => IrOp::StackRestore(apply(*d)),
-        IrOp::StackAlloc(a, b) => IrOp::StackAlloc(apply(*a), apply(*b)),
-        IrOp::Nop => IrOp::Nop,
-        IrOp::FrameAddr(d, off) => IrOp::FrameAddr(apply(*d), *off),
-        IrOp::LoadStackArg(d, k) => IrOp::LoadStackArg(apply(*d), *k),
-        IrOp::StackArgAddr(d, k) => IrOp::StackArgAddr(apply(*d), *k),
-        IrOp::LoadImm64(d, x) => IrOp::LoadImm64(apply(*d), *x),
-        IrOp::Copy64(a, b) => IrOp::Copy64(apply(*a), apply(*b)),
-        IrOp::Add64(a, b, c) => IrOp::Add64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Sub64(a, b, c) => IrOp::Sub64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Mul64(a, b, c) => IrOp::Mul64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Div64(a, b, c) => IrOp::Div64(apply(*a), apply(*b), apply(*c)),
-        IrOp::UDiv64(a, b, c) => IrOp::UDiv64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Mod64(a, b, c) => IrOp::Mod64(apply(*a), apply(*b), apply(*c)),
-        IrOp::UMod64(a, b, c) => IrOp::UMod64(apply(*a), apply(*b), apply(*c)),
-        IrOp::BitAnd64(a, b, c) => IrOp::BitAnd64(apply(*a), apply(*b), apply(*c)),
-        IrOp::BitOr64(a, b, c) => IrOp::BitOr64(apply(*a), apply(*b), apply(*c)),
-        IrOp::BitXor64(a, b, c) => IrOp::BitXor64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Shl64(a, b, c) => IrOp::Shl64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Shr64(a, b, c) => IrOp::Shr64(apply(*a), apply(*b), apply(*c)),
-        IrOp::UShr64(a, b, c) => IrOp::UShr64(apply(*a), apply(*b), apply(*c)),
-        IrOp::Neg64(a, b) => IrOp::Neg64(apply(*a), apply(*b)),
-        IrOp::BitNot64(a, b) => IrOp::BitNot64(apply(*a), apply(*b)),
-        IrOp::Cmp64(a, b) => IrOp::Cmp64(apply(*a), apply(*b)),
-        IrOp::UCmp64(a, b) => IrOp::UCmp64(apply(*a), apply(*b)),
-        IrOp::Load64(d, b, off) => IrOp::Load64(apply(*d), apply(*b), *off),
-        IrOp::Store64(s, b, off) => IrOp::Store64(apply(*s), apply(*b), *off),
-        IrOp::IntToLongLong(d, s) => IrOp::IntToLongLong(apply(*d), apply(*s)),
-        IrOp::SExtToLongLong(d, s) => IrOp::SExtToLongLong(apply(*d), apply(*s)),
-        IrOp::LongLongToInt(d, s) => IrOp::LongLongToInt(apply(*d), apply(*s)),
-    }).collect()
+    ir.iter()
+        .map(|op| match op {
+            IrOp::LoadImm(d, x) => IrOp::LoadImm(apply(*d), *x),
+            IrOp::Copy(a, b) => IrOp::Copy(apply(*a), apply(*b)),
+            IrOp::Add(a, b, c) => IrOp::Add(apply(*a), apply(*b), apply(*c)),
+            IrOp::Sub(a, b, c) => IrOp::Sub(apply(*a), apply(*b), apply(*c)),
+            IrOp::Mul(a, b, c) => IrOp::Mul(apply(*a), apply(*b), apply(*c)),
+            IrOp::Div(a, b, c) => IrOp::Div(apply(*a), apply(*b), apply(*c)),
+            IrOp::UDiv(a, b, c) => IrOp::UDiv(apply(*a), apply(*b), apply(*c)),
+            IrOp::Mod(a, b, c) => IrOp::Mod(apply(*a), apply(*b), apply(*c)),
+            IrOp::UMod(a, b, c) => IrOp::UMod(apply(*a), apply(*b), apply(*c)),
+            IrOp::BitAnd(a, b, c) => IrOp::BitAnd(apply(*a), apply(*b), apply(*c)),
+            IrOp::BitOr(a, b, c) => IrOp::BitOr(apply(*a), apply(*b), apply(*c)),
+            IrOp::BitXor(a, b, c) => IrOp::BitXor(apply(*a), apply(*b), apply(*c)),
+            IrOp::Shl(a, b, c) => IrOp::Shl(apply(*a), apply(*b), apply(*c)),
+            IrOp::Shr(a, b, c) => IrOp::Shr(apply(*a), apply(*b), apply(*c)),
+            IrOp::Lshr(a, b, c) => IrOp::Lshr(apply(*a), apply(*b), apply(*c)),
+            IrOp::Neg(a, b) => IrOp::Neg(apply(*a), apply(*b)),
+            IrOp::BitNot(a, b) => IrOp::BitNot(apply(*a), apply(*b)),
+            IrOp::Cmp(a, b) => IrOp::Cmp(apply(*a), apply(*b)),
+            IrOp::UCmp(a, b) => IrOp::UCmp(apply(*a), apply(*b)),
+            IrOp::Ret(opt) => IrOp::Ret(opt.map(apply)),
+            IrOp::LoadStructRetPtr(d) => IrOp::LoadStructRetPtr(apply(*d)),
+            IrOp::Call(d, n, args) => IrOp::Call(
+                apply(*d),
+                n.clone(),
+                args.iter().map(|a| apply(*a)).collect(),
+            ),
+            IrOp::CallIndirect(d, addr, args) => IrOp::CallIndirect(
+                apply(*d),
+                apply(*addr),
+                args.iter().map(|a| apply(*a)).collect(),
+            ),
+            IrOp::CallStruct {
+                name,
+                args,
+                dst_addr,
+                num_words,
+            } => IrOp::CallStruct {
+                name: name.clone(),
+                args: args.iter().map(|a| apply(*a)).collect(),
+                dst_addr: apply(*dst_addr),
+                num_words: *num_words,
+            },
+            IrOp::CallIndirectStruct {
+                addr,
+                args,
+                dst_addr,
+                num_words,
+            } => IrOp::CallIndirectStruct {
+                addr: apply(*addr),
+                args: args.iter().map(|a| apply(*a)).collect(),
+                dst_addr: apply(*dst_addr),
+                num_words: *num_words,
+            },
+            IrOp::RetStruct {
+                src_addr,
+                dst_addr,
+                num_words,
+            } => IrOp::RetStruct {
+                src_addr: apply(*src_addr),
+                dst_addr: dst_addr.map(apply),
+                num_words: *num_words,
+            },
+            IrOp::Branch(l) => IrOp::Branch(*l),
+            IrOp::BranchCond(c, l) => IrOp::BranchCond(*c, *l),
+            IrOp::Label(l) => IrOp::Label(*l),
+            IrOp::Load(d, b, off) => IrOp::Load(apply(*d), apply(*b), *off),
+            IrOp::Store(s, b, off) => IrOp::Store(apply(*s), apply(*b), *off),
+            IrOp::LoadGlobal(d, n) => IrOp::LoadGlobal(apply(*d), n.clone()),
+            IrOp::ReadGlobal(d, n) => IrOp::ReadGlobal(apply(*d), n.clone()),
+            IrOp::StoreGlobal(s, n) => IrOp::StoreGlobal(apply(*s), n.clone()),
+            IrOp::ReadGlobal64(d, n) => IrOp::ReadGlobal64(apply(*d), n.clone()),
+            IrOp::WriteGlobal64(s, n) => IrOp::WriteGlobal64(apply(*s), n.clone()),
+            IrOp::LoadString(d, idx) => IrOp::LoadString(apply(*d), *idx),
+            IrOp::LoadWideString(d, idx) => IrOp::LoadWideString(apply(*d), *idx),
+            IrOp::FAdd(a, b, c) => IrOp::FAdd(apply(*a), apply(*b), apply(*c)),
+            IrOp::FSub(a, b, c) => IrOp::FSub(apply(*a), apply(*b), apply(*c)),
+            IrOp::FMul(a, b, c) => IrOp::FMul(apply(*a), apply(*b), apply(*c)),
+            IrOp::FDiv(a, b, c) => IrOp::FDiv(apply(*a), apply(*b), apply(*c)),
+            IrOp::FNeg(a, b) => IrOp::FNeg(apply(*a), apply(*b)),
+            IrOp::IntToFloat(a, b) => IrOp::IntToFloat(apply(*a), apply(*b)),
+            IrOp::FloatToInt(a, b) => IrOp::FloatToInt(apply(*a), apply(*b)),
+            IrOp::FCmp(a, b) => IrOp::FCmp(apply(*a), apply(*b)),
+            IrOp::HardwareLoop { count, end_label } => IrOp::HardwareLoop {
+                count: *count,
+                end_label: *end_label,
+            },
+            IrOp::StackSave(d) => IrOp::StackSave(apply(*d)),
+            IrOp::StackRestore(d) => IrOp::StackRestore(apply(*d)),
+            IrOp::StackAlloc(a, b) => IrOp::StackAlloc(apply(*a), apply(*b)),
+            IrOp::Nop => IrOp::Nop,
+            IrOp::FrameAddr(d, off) => IrOp::FrameAddr(apply(*d), *off),
+            IrOp::LoadStackArg(d, k) => IrOp::LoadStackArg(apply(*d), *k),
+            IrOp::StackArgAddr(d, k) => IrOp::StackArgAddr(apply(*d), *k),
+            IrOp::LoadImm64(d, x) => IrOp::LoadImm64(apply(*d), *x),
+            IrOp::Copy64(a, b) => IrOp::Copy64(apply(*a), apply(*b)),
+            IrOp::Add64(a, b, c) => IrOp::Add64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Sub64(a, b, c) => IrOp::Sub64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Mul64(a, b, c) => IrOp::Mul64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Div64(a, b, c) => IrOp::Div64(apply(*a), apply(*b), apply(*c)),
+            IrOp::UDiv64(a, b, c) => IrOp::UDiv64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Mod64(a, b, c) => IrOp::Mod64(apply(*a), apply(*b), apply(*c)),
+            IrOp::UMod64(a, b, c) => IrOp::UMod64(apply(*a), apply(*b), apply(*c)),
+            IrOp::BitAnd64(a, b, c) => IrOp::BitAnd64(apply(*a), apply(*b), apply(*c)),
+            IrOp::BitOr64(a, b, c) => IrOp::BitOr64(apply(*a), apply(*b), apply(*c)),
+            IrOp::BitXor64(a, b, c) => IrOp::BitXor64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Shl64(a, b, c) => IrOp::Shl64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Shr64(a, b, c) => IrOp::Shr64(apply(*a), apply(*b), apply(*c)),
+            IrOp::UShr64(a, b, c) => IrOp::UShr64(apply(*a), apply(*b), apply(*c)),
+            IrOp::Neg64(a, b) => IrOp::Neg64(apply(*a), apply(*b)),
+            IrOp::BitNot64(a, b) => IrOp::BitNot64(apply(*a), apply(*b)),
+            IrOp::Cmp64(a, b) => IrOp::Cmp64(apply(*a), apply(*b)),
+            IrOp::UCmp64(a, b) => IrOp::UCmp64(apply(*a), apply(*b)),
+            IrOp::Load64(d, b, off) => IrOp::Load64(apply(*d), apply(*b), *off),
+            IrOp::Store64(s, b, off) => IrOp::Store64(apply(*s), apply(*b), *off),
+            IrOp::IntToLongLong(d, s) => IrOp::IntToLongLong(apply(*d), apply(*s)),
+            IrOp::SExtToLongLong(d, s) => IrOp::SExtToLongLong(apply(*d), apply(*s)),
+            IrOp::LongLongToInt(d, s) => IrOp::LongLongToInt(apply(*d), apply(*s)),
+        })
+        .collect()
 }

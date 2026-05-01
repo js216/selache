@@ -73,7 +73,11 @@ pub fn write_hex(data: &[u8], breaks: &HashSet<usize>, out: &mut dyn Write) -> R
 fn write_hex_extended_address(out: &mut dyn Write, upper: u16) -> Result<()> {
     let bytes = upper.to_be_bytes();
     let checksum = ext_addr_checksum(bytes[0], bytes[1]);
-    write!(out, ":02000004{:02X}{:02X}{:02X}\r\n", bytes[0], bytes[1], checksum)?;
+    write!(
+        out,
+        ":02000004{:02X}{:02X}{:02X}\r\n",
+        bytes[0], bytes[1], checksum
+    )?;
     Ok(())
 }
 
@@ -88,11 +92,13 @@ fn write_hex_data_record(out: &mut dyn Write, offset: u16, data: &[u8]) -> Resul
     let count = data.len() as u8;
     let off_bytes = offset.to_be_bytes();
 
-    let mut sum: u16 = u16::from(count)
-        + u16::from(off_bytes[0])
-        + u16::from(off_bytes[1]);
+    let mut sum: u16 = u16::from(count) + u16::from(off_bytes[0]) + u16::from(off_bytes[1]);
 
-    write!(out, ":{:02X}{:02X}{:02X}00", count, off_bytes[0], off_bytes[1])?;
+    write!(
+        out,
+        ":{:02X}{:02X}{:02X}00",
+        count, off_bytes[0], off_bytes[1]
+    )?;
     for &byte in data {
         write!(out, "{:02X}", byte)?;
         sum += u16::from(byte);

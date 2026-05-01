@@ -64,9 +64,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "-BeginInit" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Error::Usage(
-                        "missing symbol name after -BeginInit".into(),
-                    ));
+                    return Err(Error::Usage("missing symbol name after -BeginInit".into()));
                 }
                 begin_init = args[i].clone();
             }
@@ -82,18 +80,14 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "-Init" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Error::Usage(
-                        "missing filename after -Init".into(),
-                    ));
+                    return Err(Error::Usage("missing filename after -Init".into()));
                 }
                 init_files.push(args[i].clone());
             }
             "-Section" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Error::Usage(
-                        "missing section name after -Section".into(),
-                    ));
+                    return Err(Error::Usage("missing section name after -Section".into()));
                 }
                 extra_sections.push(args[i].clone());
             }
@@ -109,9 +103,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                     return Err(Error::Usage(format!("unknown option: {other}")));
                 }
                 if input_file.is_some() {
-                    return Err(Error::Usage(
-                        "multiple input files not supported".into(),
-                    ));
+                    return Err(Error::Usage("multiple input files not supported".into()));
                 }
                 input_file = Some(args[i].clone());
             }

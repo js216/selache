@@ -52,9 +52,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
 
     let mut set_format = |fmt: OutputFormat| -> Result<()> {
         if format.is_some() {
-            return Err(Error::Usage(
-                "only one format switch allowed".to_string(),
-            ));
+            return Err(Error::Usage("only one format switch allowed".to_string()));
         }
         format = Some(fmt);
         Ok(())
@@ -75,18 +73,14 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         } else if arg.eq_ignore_ascii_case("-o") {
             i += 1;
             if i >= args.len() {
-                return Err(Error::Usage(
-                    "-o requires an output filename".to_string(),
-                ));
+                return Err(Error::Usage("-o requires an output filename".to_string()));
             }
             output_file = Some(args[i].clone());
         } else if arg.starts_with('-') {
             return Err(Error::Usage(format!("unknown option: {arg}")));
         } else {
             if input_file.is_some() {
-                return Err(Error::Usage(
-                    "only one input file allowed".to_string(),
-                ));
+                return Err(Error::Usage("only one input file allowed".to_string()));
             }
             input_file = Some(arg.clone());
         }
@@ -144,15 +138,13 @@ mod tests {
 
     #[test]
     fn test_output_file() {
-        let opts =
-            parse_args(&["test.ldr".into(), "-o".into(), "out.s19".into()]).unwrap();
+        let opts = parse_args(&["test.ldr".into(), "-o".into(), "out.s19".into()]).unwrap();
         assert_eq!(opts.output_path(), "out.s19");
     }
 
     #[test]
     fn test_duplicate_format_rejected() {
-        let err = parse_args(&["test.ldr".into(), "-s1".into(), "-s2".into()])
-            .unwrap_err();
+        let err = parse_args(&["test.ldr".into(), "-s1".into(), "-s2".into()]).unwrap_err();
         assert!(matches!(err, Error::Usage(_)));
     }
 

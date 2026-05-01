@@ -9,7 +9,7 @@
 
 use crate::elf::{
     Endian, ELFDATA2LSB, ELF_MAGIC, SHF_ALLOC, SHF_EXECINSTR, SHF_WRITE, SHN_UNDEF, SHT_NOBITS,
-    SHT_PROGBITS, SHT_RELA, SHT_STRTAB, SHT_SYMTAB, SHT_SHARC_ALIGN, STB_GLOBAL, STB_LOCAL,
+    SHT_PROGBITS, SHT_RELA, SHT_SHARC_ALIGN, SHT_STRTAB, SHT_SYMTAB, STB_GLOBAL, STB_LOCAL,
     STB_WEAK, STT_FUNC, STT_NOTYPE, STT_OBJECT, STT_SECTION,
 };
 
@@ -347,8 +347,8 @@ impl ElfWriter {
 
         // Build .strtab (symbol name string table)
         let mut strtab = vec![0u8]; // leading null byte
-        // We need name offsets for all user symbols. Section symbols use st_name=0.
-        // Build a map: symbol name -> strtab offset (dedup names for relocations too)
+                                    // We need name offsets for all user symbols. Section symbols use st_name=0.
+                                    // Build a map: symbol name -> strtab offset (dedup names for relocations too)
         let mut strtab_lookup = std::collections::HashMap::new();
         for sym in local_syms.iter().chain(global_syms.iter()) {
             if !strtab_lookup.contains_key(&sym.name) {
@@ -391,27 +391,37 @@ impl ElfWriter {
         // Local user symbols
         for (i, sym) in local_syms.iter().enumerate() {
             let idx = 1 + num_section_syms + i;
-            write_sym_entry(&mut symtab_data, idx, &SymEntryFields {
-                st_name: strtab_lookup[&sym.name],
-                st_value: sym.value,
-                st_size: sym.size,
-                binding: sym.binding,
-                sym_type: sym.sym_type,
-                st_shndx: sym.section_idx,
-            }, e);
+            write_sym_entry(
+                &mut symtab_data,
+                idx,
+                &SymEntryFields {
+                    st_name: strtab_lookup[&sym.name],
+                    st_value: sym.value,
+                    st_size: sym.size,
+                    binding: sym.binding,
+                    sym_type: sym.sym_type,
+                    st_shndx: sym.section_idx,
+                },
+                e,
+            );
         }
 
         // Global symbols
         for (i, sym) in global_syms.iter().enumerate() {
             let idx = first_global + i;
-            write_sym_entry(&mut symtab_data, idx, &SymEntryFields {
-                st_name: strtab_lookup[&sym.name],
-                st_value: sym.value,
-                st_size: sym.size,
-                binding: sym.binding,
-                sym_type: sym.sym_type,
-                st_shndx: sym.section_idx,
-            }, e);
+            write_sym_entry(
+                &mut symtab_data,
+                idx,
+                &SymEntryFields {
+                    st_name: strtab_lookup[&sym.name],
+                    st_value: sym.value,
+                    st_size: sym.size,
+                    binding: sym.binding,
+                    sym_type: sym.sym_type,
+                    st_shndx: sym.section_idx,
+                },
+                e,
+            );
         }
 
         // Build a map from symbol name to symtab index for relocations
@@ -446,12 +456,8 @@ impl ElfWriter {
             .map(|(&sec_idx, relas)| {
                 let mut data = Vec::with_capacity(relas.len() * RELA_ENTRY_SIZE);
                 for rela in relas {
-                    let sym_idx = sym_name_to_idx
-                        .get(&rela.symbol_name)
-                        .copied()
-                        .unwrap_or(0);
-                    let r_info =
-                        ((sym_idx as u32) << 8) | (rela.rela_type as u32);
+                    let sym_idx = sym_name_to_idx.get(&rela.symbol_name).copied().unwrap_or(0);
+                    let r_info = ((sym_idx as u32) << 8) | (rela.rela_type as u32);
                     data.extend_from_slice(&e.write_u32(rela.offset));
                     data.extend_from_slice(&e.write_u32(r_info));
                     data.extend_from_slice(&rela.addend.to_le_bytes());
@@ -561,11 +567,11 @@ impl ElfWriter {
         out[16..18].copy_from_slice(&e.write_u16(ET_REL));
         out[18..20].copy_from_slice(&e.write_u16(SHARC_MACHINE));
         out[20..24].copy_from_slice(&e.write_u32(1)); // e_version
-        // e_entry = 0, e_phoff = 0
+                                                      // e_entry = 0, e_phoff = 0
         out[32..36].copy_from_slice(&e.write_u32(shtab_off as u32)); // e_shoff
-        // e_flags = 0
+                                                                     // e_flags = 0
         out[40..42].copy_from_slice(&e.write_u16(ELF_HEADER_SIZE as u16)); // e_ehsize
-        // e_phentsize = 0, e_phnum = 0
+                                                                           // e_phentsize = 0, e_phnum = 0
         out[46..48].copy_from_slice(&e.write_u16(SHDR_SIZE as u16)); // e_shentsize
         out[48..50].copy_from_slice(&e.write_u16(total_shdrs as u16)); // e_shnum
         out[50..52].copy_from_slice(&e.write_u16(shstrtab_shidx as u16)); // e_shstrndx
@@ -620,73 +626,98 @@ impl ElfWriter {
             } else {
                 0
             };
-            write_shdr(&mut out, base, &ShdrFields {
-                sh_name: shstrtab_offsets[i],
-                sh_type: sec.sh_type,
-                sh_flags: sec.sh_flags,
-                sh_offset,
-                sh_size,
-                sh_link,
-                sh_info,
-                sh_addralign: sec.alignment,
-                sh_entsize: sec.entsize,
-            }, e);
+            write_shdr(
+                &mut out,
+                base,
+                &ShdrFields {
+                    sh_name: shstrtab_offsets[i],
+                    sh_type: sec.sh_type,
+                    sh_flags: sec.sh_flags,
+                    sh_offset,
+                    sh_size,
+                    sh_link,
+                    sh_info,
+                    sh_addralign: sec.alignment,
+                    sh_entsize: sec.entsize,
+                },
+                e,
+            );
         }
 
         // .strtab section header
-        write_shdr(&mut out, shtab_off + strtab_shidx * SHDR_SIZE, &ShdrFields {
-            sh_name: strtab_name_off,
-            sh_type: SHT_STRTAB,
-            sh_flags: 0,
-            sh_offset: strtab_file_off as u32,
-            sh_size: strtab.len() as u32,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 1,
-            sh_entsize: 0,
-        }, e);
+        write_shdr(
+            &mut out,
+            shtab_off + strtab_shidx * SHDR_SIZE,
+            &ShdrFields {
+                sh_name: strtab_name_off,
+                sh_type: SHT_STRTAB,
+                sh_flags: 0,
+                sh_offset: strtab_file_off as u32,
+                sh_size: strtab.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 1,
+                sh_entsize: 0,
+            },
+            e,
+        );
 
         // .symtab section header
-        write_shdr(&mut out, shtab_off + symtab_shidx * SHDR_SIZE, &ShdrFields {
-            sh_name: symtab_name_off,
-            sh_type: SHT_SYMTAB,
-            sh_flags: 0,
-            sh_offset: symtab_file_off as u32,
-            sh_size: symtab_data.len() as u32,
-            sh_link: strtab_shidx as u32,
-            sh_info: first_global as u32,
-            sh_addralign: 4,
-            sh_entsize: SYM_ENTRY_SIZE as u32,
-        }, e);
+        write_shdr(
+            &mut out,
+            shtab_off + symtab_shidx * SHDR_SIZE,
+            &ShdrFields {
+                sh_name: symtab_name_off,
+                sh_type: SHT_SYMTAB,
+                sh_flags: 0,
+                sh_offset: symtab_file_off as u32,
+                sh_size: symtab_data.len() as u32,
+                sh_link: strtab_shidx as u32,
+                sh_info: first_global as u32,
+                sh_addralign: 4,
+                sh_entsize: SYM_ENTRY_SIZE as u32,
+            },
+            e,
+        );
 
         // .rela.* section headers
         for (i, &(sec_idx, ref rela_data)) in rela_sections.iter().enumerate() {
             let sh_idx = rela_shidx_base + i;
-            write_shdr(&mut out, shtab_off + sh_idx * SHDR_SIZE, &ShdrFields {
-                sh_name: rela_name_offs[i],
-                sh_type: SHT_RELA,
-                sh_flags: 0,
-                sh_offset: rela_file_offs[i] as u32,
-                sh_size: rela_data.len() as u32,
-                sh_link: symtab_shidx as u32,
-                sh_info: sec_idx as u32,
-                sh_addralign: 4,
-                sh_entsize: RELA_ENTRY_SIZE as u32,
-            }, e);
+            write_shdr(
+                &mut out,
+                shtab_off + sh_idx * SHDR_SIZE,
+                &ShdrFields {
+                    sh_name: rela_name_offs[i],
+                    sh_type: SHT_RELA,
+                    sh_flags: 0,
+                    sh_offset: rela_file_offs[i] as u32,
+                    sh_size: rela_data.len() as u32,
+                    sh_link: symtab_shidx as u32,
+                    sh_info: sec_idx as u32,
+                    sh_addralign: 4,
+                    sh_entsize: RELA_ENTRY_SIZE as u32,
+                },
+                e,
+            );
         }
 
         // .shstrtab section header
-        write_shdr(&mut out, shtab_off + shstrtab_shidx * SHDR_SIZE, &ShdrFields {
-            sh_name: shstrtab_name_off,
-            sh_type: SHT_STRTAB,
-            sh_flags: 0,
-            sh_offset: shstrtab_file_off as u32,
-            sh_size: shstrtab.len() as u32,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 1,
-            sh_entsize: 0,
-        }, e);
+        write_shdr(
+            &mut out,
+            shtab_off + shstrtab_shidx * SHDR_SIZE,
+            &ShdrFields {
+                sh_name: shstrtab_name_off,
+                sh_type: SHT_STRTAB,
+                sh_flags: 0,
+                sh_offset: shstrtab_file_off as u32,
+                sh_size: shstrtab.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 1,
+                sh_entsize: 0,
+            },
+            e,
+        );
 
         out
     }
@@ -760,7 +791,11 @@ mod tests {
     }
 
     /// Helper to read the section name string table.
-    fn get_shstrtab<'a>(data: &'a [u8], hdr: &elf::Elf32Header, shdrs: &[elf::Elf32Shdr]) -> &'a [u8] {
+    fn get_shstrtab<'a>(
+        data: &'a [u8],
+        hdr: &elf::Elf32Header,
+        shdrs: &[elf::Elf32Shdr],
+    ) -> &'a [u8] {
         let shstrtab = &shdrs[hdr.e_shstrndx as usize];
         let off = shstrtab.sh_offset as usize;
         &data[off..off + shstrtab.sh_size as usize]
@@ -787,8 +822,7 @@ mod tests {
         let symtab_sec = shdrs.iter().find(|s| s.sh_type == SHT_SYMTAB).unwrap();
         let strtab_sec = &shdrs[symtab_sec.sh_link as usize];
         let strtab_off = strtab_sec.sh_offset as usize;
-        let strtab =
-            &data[strtab_off..strtab_off + strtab_sec.sh_size as usize];
+        let strtab = &data[strtab_off..strtab_off + strtab_sec.sh_size as usize];
 
         let sym_off = symtab_sec.sh_offset as usize;
         let nsyms = symtab_sec.sh_size as usize / SYM_ENTRY_SIZE;
@@ -912,18 +946,12 @@ mod tests {
         }
 
         // Check that our named locals appear before first_global
-        let local_names: Vec<&str> = syms[..first_global]
-            .iter()
-            .map(|s| s.1.as_str())
-            .collect();
+        let local_names: Vec<&str> = syms[..first_global].iter().map(|s| s.1.as_str()).collect();
         assert!(local_names.contains(&"local_a"));
         assert!(local_names.contains(&"local_b"));
 
         // Check globals
-        let global_names: Vec<&str> = syms[first_global..]
-            .iter()
-            .map(|s| s.1.as_str())
-            .collect();
+        let global_names: Vec<&str> = syms[first_global..].iter().map(|s| s.1.as_str()).collect();
         assert!(global_names.contains(&"global_func"));
         assert!(global_names.contains(&"extern_sym"));
     }

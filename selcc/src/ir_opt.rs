@@ -369,9 +369,7 @@ pub fn dead_code_eliminate(ops: &[IrOp]) -> Vec<IrOp> {
             // Keep destination-producing ops if any written vreg is used.
             // Multi-word ops write adjacent vregs, so checking only the
             // low half can delete the high-half producer.
-            dests.is_empty()
-                || dests.iter().any(|dst| used.contains(dst))
-                || has_side_effects(op)
+            dests.is_empty() || dests.iter().any(|dst| used.contains(dst)) || has_side_effects(op)
         })
         .cloned()
         .collect()
@@ -469,7 +467,8 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
         //   1. A Cmp that compares the loop variable against a known limit
         //   2. A BranchCond that exits to end_label when the condition is false
         //   3. The loop variable starts at 0 and increments by 1
-        if let Some(info) = analyze_loop_header(ops, label_top_idx, back_edge_idx, end_label, known) {
+        if let Some(info) = analyze_loop_header(ops, label_top_idx, back_edge_idx, end_label, known)
+        {
             // Validate: the loop count must fit in u16 for the SHARC LCNTR
             // immediate encoding, and must be positive.
             if info.count <= 0 || info.count > i64::from(u16::MAX) {
@@ -483,9 +482,16 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
             // SHARC+ hardware DO loops forbid all of these; violating
             // any of them desynchronises the loop-end comparator.
             let body = &ops[info.body_start..info.step_start];
-            let body_labels: std::collections::HashSet<Label> = body.iter().filter_map(|op| {
-                if let IrOp::Label(l) = op { Some(*l) } else { None }
-            }).collect();
+            let body_labels: std::collections::HashSet<Label> = body
+                .iter()
+                .filter_map(|op| {
+                    if let IrOp::Label(l) = op {
+                        Some(*l)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             let has_body_branch = body.iter().any(|op| match op {
                 // break or continue
                 IrOp::Branch(target) if *target == end_label || *target == top_label => true,
@@ -505,8 +511,10 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
             // there stays at 0 forever, which silently corrupts results
             // (e.g. `a[i] = ...` writes a[0] every iteration).
             let body_uses_counter = body.iter().any(|op| match op {
-                IrOp::Load(_, _, slot) | IrOp::Store(_, _, slot)
-                | IrOp::Load64(_, _, slot) | IrOp::Store64(_, _, slot)
+                IrOp::Load(_, _, slot)
+                | IrOp::Store(_, _, slot)
+                | IrOp::Load64(_, _, slot)
+                | IrOp::Store64(_, _, slot)
                 | IrOp::FrameAddr(_, slot) => *slot == info.counter_slot,
                 _ => false,
             });
@@ -522,9 +530,9 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
             // (or worse, a fault). Empty loops fall back to the
             // software loop form, which the optimizer can dead-code-
             // eliminate later if the trip count is also unused.
-            let body_has_real_op = body.iter().any(|op| {
-                !matches!(op, IrOp::Label(_) | IrOp::Nop)
-            });
+            let body_has_real_op = body
+                .iter()
+                .any(|op| !matches!(op, IrOp::Label(_) | IrOp::Nop));
             if !body_has_real_op {
                 continue;
             }
@@ -690,9 +698,10 @@ fn analyze_loop_header(
     for idx in (body_start..back_edge_idx).rev() {
         match &ops[idx] {
             IrOp::Store(_, _, slot) if *slot == counter_slot => {
-                if ops[idx + 1..back_edge_idx].iter().any(|op| {
-                    !matches!(op, IrOp::Label(_) | IrOp::Nop)
-                }) {
+                if ops[idx + 1..back_edge_idx]
+                    .iter()
+                    .any(|op| !matches!(op, IrOp::Label(_) | IrOp::Nop))
+                {
                     return None;
                 }
                 // Trace back to find the beginning of the increment sequence.
@@ -844,14 +853,15 @@ fn dest_vregs(op: &IrOp) -> Vec<VReg> {
 /// Return all vregs used as source operands.
 fn source_vregs(op: &IrOp) -> Vec<VReg> {
     match op {
-        IrOp::LoadImm(..) | IrOp::Label(_) | IrOp::Branch(_) | IrOp::HardwareLoop { .. }
+        IrOp::LoadImm(..)
+        | IrOp::Label(_)
+        | IrOp::Branch(_)
+        | IrOp::HardwareLoop { .. }
         | IrOp::StackSave(_)
         | IrOp::FrameAddr(..)
         | IrOp::LoadStackArg(..)
         | IrOp::StackArgAddr(..)
-        | IrOp::Nop => {
-            Vec::new()
-        }
+        | IrOp::Nop => Vec::new(),
         IrOp::Copy(_, s)
         | IrOp::Neg(_, s)
         | IrOp::BitNot(_, s)
@@ -892,13 +902,20 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
             v.push(*dst_addr);
             v
         }
-        IrOp::CallIndirectStruct { addr, args, dst_addr, .. } => {
+        IrOp::CallIndirectStruct {
+            addr,
+            args,
+            dst_addr,
+            ..
+        } => {
             let mut v = vec![*addr];
             v.extend_from_slice(args);
             v.push(*dst_addr);
             v
         }
-        IrOp::RetStruct { src_addr, dst_addr, .. } => {
+        IrOp::RetStruct {
+            src_addr, dst_addr, ..
+        } => {
             let mut v = vec![*src_addr];
             if let Some(d) = dst_addr {
                 v.push(*d);
@@ -908,8 +925,11 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         IrOp::LoadStructRetPtr(_) => Vec::new(),
         IrOp::Load(_, base, _) => vec![*base],
         IrOp::Store(val, base, _) => vec![*val, *base],
-        IrOp::LoadGlobal(..) | IrOp::ReadGlobal(..) | IrOp::ReadGlobal64(..)
-        | IrOp::LoadString(..) | IrOp::LoadWideString(..) => Vec::new(),
+        IrOp::LoadGlobal(..)
+        | IrOp::ReadGlobal(..)
+        | IrOp::ReadGlobal64(..)
+        | IrOp::LoadString(..)
+        | IrOp::LoadWideString(..) => Vec::new(),
         IrOp::StoreGlobal(val, _) => vec![*val],
         IrOp::WriteGlobal64(val, _) => vec![*val, *val + 1],
         IrOp::LoadImm64(..) => Vec::new(),
@@ -917,8 +937,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::Neg64(_, s)
         | IrOp::BitNot64(_, s)
         | IrOp::LongLongToInt(_, s) => vec![*s, *s + 1],
-        IrOp::IntToLongLong(_, s)
-        | IrOp::SExtToLongLong(_, s) => vec![*s],
+        IrOp::IntToLongLong(_, s) | IrOp::SExtToLongLong(_, s) => vec![*s],
         IrOp::Add64(_, a, b)
         | IrOp::Sub64(_, a, b)
         | IrOp::Mul64(_, a, b)
@@ -929,9 +948,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::BitAnd64(_, a, b)
         | IrOp::BitOr64(_, a, b)
         | IrOp::BitXor64(_, a, b) => vec![*a, *a + 1, *b, *b + 1],
-        IrOp::Shl64(_, a, b)
-        | IrOp::Shr64(_, a, b)
-        | IrOp::UShr64(_, a, b) => vec![*a, *a + 1, *b],
+        IrOp::Shl64(_, a, b) | IrOp::Shr64(_, a, b) | IrOp::UShr64(_, a, b) => vec![*a, *a + 1, *b],
         IrOp::Cmp64(a, b) | IrOp::UCmp64(a, b) => vec![*a, *a + 1, *b, *b + 1],
         IrOp::Load64(_, base, _) => vec![*base],
         IrOp::Store64(val, base, _) => vec![*val, *val + 1, *base],
@@ -940,14 +957,15 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
 
 /// Check if an op has side effects beyond writing to its destination vreg.
 fn has_side_effects(op: &IrOp) -> bool {
-    matches!(op,
+    matches!(
+        op,
         IrOp::Call(..)
-        | IrOp::CallIndirect(..)
-        | IrOp::CallStruct { .. }
-        | IrOp::CallIndirectStruct { .. }
-        | IrOp::StackSave(_)
-        | IrOp::StackRestore(_)
-        | IrOp::StackAlloc(..)
+            | IrOp::CallIndirect(..)
+            | IrOp::CallStruct { .. }
+            | IrOp::CallIndirectStruct { .. }
+            | IrOp::StackSave(_)
+            | IrOp::StackRestore(_)
+            | IrOp::StackAlloc(..)
     )
 }
 
@@ -978,7 +996,10 @@ mod tests {
             .iter()
             .filter(|op| matches!(op, IrOp::LoadImm(..)))
             .count();
-        assert_eq!(count_loads, 1, "expected 1 LoadImm, got {count_loads}: {folded:?}");
+        assert_eq!(
+            count_loads, 1,
+            "expected 1 LoadImm, got {count_loads}: {folded:?}"
+        );
     }
 
     #[test]
@@ -996,11 +1017,7 @@ mod tests {
 
     #[test]
     fn fold_add_zero_to_copy() {
-        let ops = vec![
-            IrOp::LoadImm(0, 0),
-            IrOp::Add(2, 1, 0),
-            IrOp::Ret(Some(2)),
-        ];
+        let ops = vec![IrOp::LoadImm(0, 0), IrOp::Add(2, 1, 0), IrOp::Ret(Some(2))];
         let folded = constant_fold(&ops);
         let has_copy = folded.iter().any(|op| matches!(op, IrOp::Copy(2, 1)));
         assert!(has_copy, "expected Copy(2, 1), got: {folded:?}");
@@ -1008,11 +1025,7 @@ mod tests {
 
     #[test]
     fn fold_mul_one_to_copy() {
-        let ops = vec![
-            IrOp::LoadImm(0, 1),
-            IrOp::Mul(2, 1, 0),
-            IrOp::Ret(Some(2)),
-        ];
+        let ops = vec![IrOp::LoadImm(0, 1), IrOp::Mul(2, 1, 0), IrOp::Ret(Some(2))];
         let folded = constant_fold(&ops);
         let has_copy = folded.iter().any(|op| matches!(op, IrOp::Copy(2, 1)));
         assert!(has_copy, "expected Copy(2, 1), got: {folded:?}");
@@ -1086,11 +1099,7 @@ mod tests {
 
     #[test]
     fn fold_sub_zero() {
-        let ops = vec![
-            IrOp::LoadImm(1, 0),
-            IrOp::Sub(2, 0, 1),
-            IrOp::Ret(Some(2)),
-        ];
+        let ops = vec![IrOp::LoadImm(1, 0), IrOp::Sub(2, 0, 1), IrOp::Ret(Some(2))];
         let folded = constant_fold(&ops);
         let has_copy = folded.iter().any(|op| matches!(op, IrOp::Copy(2, 0)));
         assert!(has_copy, "expected Copy(2, 0), got: {folded:?}");
@@ -1098,11 +1107,7 @@ mod tests {
 
     #[test]
     fn fold_neg() {
-        let ops = vec![
-            IrOp::LoadImm(0, 5),
-            IrOp::Neg(1, 0),
-            IrOp::Ret(Some(1)),
-        ];
+        let ops = vec![IrOp::LoadImm(0, 5), IrOp::Neg(1, 0), IrOp::Ret(Some(1))];
         let folded = constant_fold(&ops);
         let has_neg = folded.iter().any(|op| matches!(op, IrOp::LoadImm(1, -5)));
         assert!(has_neg, "expected LoadImm(1, -5), got: {folded:?}");
@@ -1129,47 +1134,40 @@ mod tests {
             // init: i = 0
             IrOp::LoadImm(0, 0),
             IrOp::Store(0, 0, 0), // slot 0
-
             // Label(top=0)
             IrOp::Label(0),
-
             // condition: i < 10 via lower_comparison
-            IrOp::Load(1, 0, 0),     // load i
-            IrOp::LoadImm(2, 10),    // limit
-            IrOp::LoadImm(3, 0),     // false result
-            IrOp::LoadImm(4, 1),     // true result
+            IrOp::Load(1, 0, 0),  // load i
+            IrOp::LoadImm(2, 10), // limit
+            IrOp::LoadImm(3, 0),  // false result
+            IrOp::LoadImm(4, 1),  // true result
             IrOp::Cmp(1, 2),
-            IrOp::BranchCond(Cond::Lt, 2),  // lbl_true = 2
-            IrOp::Copy(5, 3),        // cmp = false
-            IrOp::Branch(3),         // lbl_end_cmp = 3
-            IrOp::Label(2),          // lbl_true
-            IrOp::Copy(5, 4),        // cmp = true
-            IrOp::Label(3),          // lbl_end_cmp
-
+            IrOp::BranchCond(Cond::Lt, 2), // lbl_true = 2
+            IrOp::Copy(5, 3),              // cmp = false
+            IrOp::Branch(3),               // lbl_end_cmp = 3
+            IrOp::Label(2),                // lbl_true
+            IrOp::Copy(5, 4),              // cmp = true
+            IrOp::Label(3),                // lbl_end_cmp
             // exit test
             IrOp::LoadImm(6, 0),
             IrOp::Cmp(5, 6),
             IrOp::BranchCond(Cond::Eq, 1), // lbl_end_for = 1
-
             // body: a single Add to a sink slot. Hardware-loop
             // conversion now requires the body to contain at least
             // one real (non-Label, non-Nop) op so the SHARC+ DO
             // instruction has a non-trivial end-of-loop comparator.
             IrOp::LoadImm(10, 0),
             IrOp::Add(11, 10, 10),
-            IrOp::Store(11, 0, 1),  // sink slot != counter
-
+            IrOp::Store(11, 0, 1), // sink slot != counter
             // step: i++
-            IrOp::Load(7, 0, 0),    // load i
-            IrOp::LoadImm(8, 1),    // 1
-            IrOp::Add(9, 7, 8),     // i + 1
-            IrOp::Store(9, 0, 0),   // store back
-
+            IrOp::Load(7, 0, 0),  // load i
+            IrOp::LoadImm(8, 1),  // 1
+            IrOp::Add(9, 7, 8),   // i + 1
+            IrOp::Store(9, 0, 0), // store back
             // back-edge
-            IrOp::Branch(0),        // -> top
-
+            IrOp::Branch(0), // -> top
             // end
-            IrOp::Label(1),         // lbl_end_for
+            IrOp::Label(1), // lbl_end_for
             IrOp::Ret(None),
         ];
 
@@ -1182,9 +1180,7 @@ mod tests {
         assert!(has_hw_loop, "expected HardwareLoop(10), got: {result:?}");
 
         // Should NOT contain the back-edge Branch or the loop header.
-        let has_back_edge = result
-            .iter()
-            .any(|op| matches!(op, IrOp::Branch(0)));
+        let has_back_edge = result.iter().any(|op| matches!(op, IrOp::Branch(0)));
         assert!(!has_back_edge, "back-edge should be removed: {result:?}");
     }
 }

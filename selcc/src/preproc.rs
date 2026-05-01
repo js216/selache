@@ -67,15 +67,11 @@ impl Preprocessor {
             "__ADSP21000__".to_string(),
             MacroDef::Object("1".to_string()),
         );
-        pp.defines.insert(
-            "_LANGUAGE_C".to_string(),
-            MacroDef::Object("1".to_string()),
-        );
+        pp.defines
+            .insert("_LANGUAGE_C".to_string(), MacroDef::Object("1".to_string()));
         // Selache compiler identity.
-        pp.defines.insert(
-            "__SELACHE__".to_string(),
-            MacroDef::Object("1".to_string()),
-        );
+        pp.defines
+            .insert("__SELACHE__".to_string(), MacroDef::Object("1".to_string()));
         // SHARC backend identifier (used by adi_types.h and other platform headers).
         pp.defines.insert(
             "__BA_SHARC__".to_string(),
@@ -87,10 +83,8 @@ impl Preprocessor {
             MacroDef::Object("1".to_string()),
         );
         // C99 standard conformance macros.
-        pp.defines.insert(
-            "__STDC__".to_string(),
-            MacroDef::Object("1".to_string()),
-        );
+        pp.defines
+            .insert("__STDC__".to_string(), MacroDef::Object("1".to_string()));
         pp.defines.insert(
             "__STDC_VERSION__".to_string(),
             MacroDef::Object("199901L".to_string()),
@@ -140,9 +134,11 @@ impl Preprocessor {
         let normalized = proc_name.replace('-', "");
         let one = MacroDef::Object("1".to_string());
         // Define __ADSP21569__
-        self.defines.insert(format!("__{normalized}__"), one.clone());
+        self.defines
+            .insert(format!("__{normalized}__"), one.clone());
         // Define family macro: __ADSP21569_FAMILY__
-        self.defines.insert(format!("__{normalized}_FAMILY__"), one.clone());
+        self.defines
+            .insert(format!("__{normalized}_FAMILY__"), one.clone());
         // Define series wildcard: __ADSP2156x__ (last digit → 'x')
         // Used for headers shared across a processor series.
         if let Some(prefix) = normalized.strip_suffix(|c: char| c.is_ascii_digit()) {
@@ -166,12 +162,7 @@ impl Preprocessor {
         self.process_inner(source, filename, 0)
     }
 
-    fn process_inner(
-        &mut self,
-        source: &str,
-        filename: &str,
-        depth: u32,
-    ) -> Result<String> {
+    fn process_inner(&mut self, source: &str, filename: &str, depth: u32) -> Result<String> {
         if depth > MAX_INCLUDE_DEPTH {
             return Err(Error::Preprocess {
                 file: filename.to_string(),
@@ -211,7 +202,8 @@ impl Preprocessor {
             let active = cond_stack.iter().all(|c| c.active);
 
             // C99 6.4.6: %: is a digraph for #
-            if let Some(directive) = trimmed.strip_prefix('#')
+            if let Some(directive) = trimmed
+                .strip_prefix('#')
                 .or_else(|| trimmed.strip_prefix("%:"))
             {
                 let directive = directive.trim();
@@ -344,12 +336,8 @@ impl Preprocessor {
                     continue;
                 }
                 if let Some(rest) = strip_directive(directive, "include") {
-                    let included = self.handle_include(
-                        rest.trim(),
-                        &current_filename,
-                        current_line,
-                        depth,
-                    )?;
+                    let included =
+                        self.handle_include(rest.trim(), &current_filename, current_line, depth)?;
                     output.push_str(&included);
                     output.push('\n');
                     continue;
@@ -422,9 +410,7 @@ impl Preprocessor {
             // to the chosen link-time name. Blank lines and lines
             // without a candidate skip the scan so the pragma rides
             // forward to the next candidate line.
-            if pending_function_name.is_some()
-                && !line.trim().is_empty()
-            {
+            if pending_function_name.is_some() && !line.trim().is_empty() {
                 if let Some(old_ident) = scan_function_decl_ident(&line) {
                     let new_name = pending_function_name.take().unwrap();
                     // Install as an object-like macro. Self-reference
@@ -432,15 +418,13 @@ impl Preprocessor {
                     // for every real pragma: `#pragma function_name X`
                     // followed by `int X(...)` would be a no-op rename.
                     if old_ident != new_name {
-                        self.defines
-                            .insert(old_ident, MacroDef::Object(new_name));
+                        self.defines.insert(old_ident, MacroDef::Object(new_name));
                     }
                 }
             }
 
             // Regular line: expand macros and emit (use comment-stripped version).
-            let expanded =
-                self.expand_macros(&line, &current_filename, current_line)?;
+            let expanded = self.expand_macros(&line, &current_filename, current_line)?;
             output.push_str(&expanded);
             output.push('\n');
         }
@@ -464,12 +448,7 @@ impl Preprocessor {
         Ok(output)
     }
 
-    fn handle_define(
-        &mut self,
-        rest: &str,
-        filename: &str,
-        line: u32,
-    ) -> Result<()> {
+    fn handle_define(&mut self, rest: &str, filename: &str, line: u32) -> Result<()> {
         if rest.is_empty() {
             return Err(Error::Preprocess {
                 file: filename.to_string(),
@@ -496,7 +475,9 @@ impl Preprocessor {
                     .filter(|s| !s.is_empty())
                     .collect();
                 // Detect variadic: last param is "..." or ends with "..."
-                let variadic = params.last().is_some_and(|p| p == "..." || p.ends_with("..."));
+                let variadic = params
+                    .last()
+                    .is_some_and(|p| p == "..." || p.ends_with("..."));
                 if variadic {
                     let last = params.last_mut().unwrap();
                     if *last == "..." {
@@ -506,10 +487,8 @@ impl Preprocessor {
                     }
                 }
                 let body = after_name[close_idx + 1..].trim().to_string();
-                self.defines.insert(
-                    name.to_string(),
-                    MacroDef::Function(params, body, variadic),
-                );
+                self.defines
+                    .insert(name.to_string(), MacroDef::Function(params, body, variadic));
             } else {
                 return Err(Error::Preprocess {
                     file: filename.to_string(),
@@ -635,12 +614,10 @@ impl Preprocessor {
         for dir in &search_dirs {
             let path = Path::new(dir).join(&inc_file);
             if path.exists() {
-                let raw = std::fs::read(&path).map_err(|e| {
-                    Error::Preprocess {
-                        file: filename.to_string(),
-                        line,
-                        msg: format!("cannot read {}: {e}", path.display()),
-                    }
+                let raw = std::fs::read(&path).map_err(|e| Error::Preprocess {
+                    file: filename.to_string(),
+                    line,
+                    msg: format!("cannot read {}: {e}", path.display()),
                 })?;
                 let content = String::from_utf8_lossy(&raw).into_owned();
                 let path_str = path.to_string_lossy().into_owned();
@@ -662,12 +639,7 @@ impl Preprocessor {
         })
     }
 
-    fn expand_macros(
-        &self,
-        line: &str,
-        filename: &str,
-        line_num: u32,
-    ) -> Result<String> {
+    fn expand_macros(&self, line: &str, filename: &str, line_num: u32) -> Result<String> {
         let expanding: HashSet<String> = HashSet::new();
         self.expand_macros_inner(line, filename, line_num, &expanding, 0)
     }
@@ -740,9 +712,7 @@ impl Preprocessor {
             // Identifier?
             if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
                 let start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 let ident = &text[start..i];
@@ -812,15 +782,12 @@ impl Preprocessor {
                         MacroDef::Function(params, body, variadic) => {
                             // Look for '(' after optional whitespace.
                             let mut j = i;
-                            while j < bytes.len()
-                                && (bytes[j] == b' ' || bytes[j] == b'\t')
-                            {
+                            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                                 j += 1;
                             }
                             if j < bytes.len() && bytes[j] == b'(' {
                                 // Collect arguments.
-                                let (args, end) =
-                                    collect_macro_args(text, j)?;
+                                let (args, end) = collect_macro_args(text, j)?;
                                 i = end;
                                 // Pre-expand arguments for use in
                                 // parameter positions that are not
@@ -828,8 +795,7 @@ impl Preprocessor {
                                 // arguments get rescanned before
                                 // substitution unless they feed
                                 // stringification or token-paste).
-                                let mut expanded_args =
-                                    Vec::with_capacity(args.len());
+                                let mut expanded_args = Vec::with_capacity(args.len());
                                 for arg in &args {
                                     let ea = self.expand_macros_inner(
                                         arg,
@@ -883,8 +849,7 @@ impl Preprocessor {
 
         // Now expand macros in the expression.
         let empty_set = HashSet::new();
-        let expanded =
-            self.expand_macros_inner(&with_defined, filename, line, &empty_set, 0)?;
+        let expanded = self.expand_macros_inner(&with_defined, filename, line, &empty_set, 0)?;
 
         // Replace any remaining identifiers with 0 (per C spec).
         let final_expr = replace_remaining_idents(&expanded);
@@ -904,35 +869,27 @@ impl Preprocessor {
                     i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
                 let after_pos = i + 7;
                 let after_ok = after_pos >= bytes.len()
-                    || !bytes[after_pos].is_ascii_alphanumeric()
-                        && bytes[after_pos] != b'_';
+                    || !bytes[after_pos].is_ascii_alphanumeric() && bytes[after_pos] != b'_';
 
                 if before_ok && after_ok {
                     let mut j = after_pos;
                     // Skip whitespace.
-                    while j < bytes.len()
-                        && (bytes[j] == b' ' || bytes[j] == b'\t')
-                    {
+                    while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                         j += 1;
                     }
                     if j < bytes.len() && bytes[j] == b'(' {
                         j += 1;
-                        while j < bytes.len()
-                            && (bytes[j] == b' ' || bytes[j] == b'\t')
-                        {
+                        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                             j += 1;
                         }
                         let name_start = j;
                         while j < bytes.len()
-                            && (bytes[j].is_ascii_alphanumeric()
-                                || bytes[j] == b'_')
+                            && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
                         {
                             j += 1;
                         }
                         let name = &expr[name_start..j];
-                        while j < bytes.len()
-                            && (bytes[j] == b' ' || bytes[j] == b'\t')
-                        {
+                        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
                             j += 1;
                         }
                         if j < bytes.len() && bytes[j] == b')' {
@@ -952,8 +909,7 @@ impl Preprocessor {
                         // defined NAME (without parens).
                         let name_start = j;
                         while j < bytes.len()
-                            && (bytes[j].is_ascii_alphanumeric()
-                                || bytes[j] == b'_')
+                            && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_')
                         {
                             j += 1;
                         }
@@ -972,9 +928,7 @@ impl Preprocessor {
 
             if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
                 let start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 result.push_str(&expr[start..i]);
@@ -1406,7 +1360,8 @@ fn substitute_params(
             && (i + 1 >= bytes.len() || bytes[i + 1] != b'#')
             && (i == 0 || bytes[i - 1] != b'#');
         let is_stringify_digraph = bytes[i] == b'%'
-            && i + 1 < bytes.len() && bytes[i + 1] == b':'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b':'
             && !(i + 3 < bytes.len() && bytes[i + 2] == b'%' && bytes[i + 3] == b':');
         if is_stringify_hash || is_stringify_digraph {
             let hash_pos = i;
@@ -1419,9 +1374,7 @@ fn substitute_params(
             // Check if followed by an identifier.
             if i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
                 let id_start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 let ident = &body[id_start..i];
@@ -1447,9 +1400,7 @@ fn substitute_params(
 
         if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             let ident = &body[start..i];
@@ -1467,7 +1418,11 @@ fn substitute_params(
                     result.push_str(&va_args_expanded);
                 }
             } else if let Some(pos) = params.iter().position(|p| p == ident) {
-                let src = if adjacent_to_paste { args } else { expanded_args };
+                let src = if adjacent_to_paste {
+                    args
+                } else {
+                    expanded_args
+                };
                 if pos < src.len() {
                     result.push_str(&src[pos]);
                 }
@@ -1517,9 +1472,7 @@ fn substitute_params(
             if result.ends_with(',') {
                 let rest_start = i;
                 let mut j = i;
-                while j < sb.len()
-                    && (sb[j].is_ascii_alphanumeric() || sb[j] == b'_')
-                {
+                while j < sb.len() && (sb[j].is_ascii_alphanumeric() || sb[j] == b'_') {
                     j += 1;
                 }
                 let right_token = &subst[rest_start..j];
@@ -1567,9 +1520,7 @@ fn replace_remaining_idents(expr: &str) -> String {
             }
         } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             // Replace unknown identifiers with 0.
@@ -1611,7 +1562,10 @@ fn tokenize_expr(expr: &str) -> Vec<ExprToken> {
             b'0'..=b'9' => {
                 let start = i;
                 // Handle hex.
-                if bytes[i] == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
+                if bytes[i] == b'0'
+                    && i + 1 < bytes.len()
+                    && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
+                {
                     i += 2;
                     while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
                         i += 1;
@@ -1667,6 +1621,14 @@ fn tokenize_expr(expr: &str) -> Vec<ExprToken> {
             }
             b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
                 tokens.push(ExprToken::Op(">=".to_string()));
+                i += 2;
+            }
+            b'<' if i + 1 < bytes.len() && bytes[i + 1] == b'<' => {
+                tokens.push(ExprToken::Op("<<".to_string()));
+                i += 2;
+            }
+            b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
+                tokens.push(ExprToken::Op(">>".to_string()));
                 i += 2;
             }
             b'+' | b'-' | b'*' | b'/' | b'%' | b'<' | b'>' | b'!' => {
@@ -1726,12 +1688,7 @@ fn tokenize_expr(expr: &str) -> Vec<ExprToken> {
     tokens
 }
 
-fn parse_or(
-    tokens: &[ExprToken],
-    pos: &mut usize,
-    filename: &str,
-    line: u32,
-) -> Result<i64> {
+fn parse_or(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
     let mut left = parse_and(tokens, pos, filename, line)?;
     while *pos < tokens.len() {
         if matches!(&tokens[*pos], ExprToken::Op(op) if op == "||") {
@@ -1745,12 +1702,7 @@ fn parse_or(
     Ok(left)
 }
 
-fn parse_and(
-    tokens: &[ExprToken],
-    pos: &mut usize,
-    filename: &str,
-    line: u32,
-) -> Result<i64> {
+fn parse_and(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
     let mut left = parse_equality(tokens, pos, filename, line)?;
     while *pos < tokens.len() {
         if matches!(&tokens[*pos], ExprToken::Op(op) if op == "&&") {
@@ -1764,12 +1716,7 @@ fn parse_and(
     Ok(left)
 }
 
-fn parse_equality(
-    tokens: &[ExprToken],
-    pos: &mut usize,
-    filename: &str,
-    line: u32,
-) -> Result<i64> {
+fn parse_equality(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
     let mut left = parse_relational(tokens, pos, filename, line)?;
     while *pos < tokens.len() {
         match &tokens[*pos] {
@@ -1795,27 +1742,27 @@ fn parse_relational(
     filename: &str,
     line: u32,
 ) -> Result<i64> {
-    let mut left = parse_additive(tokens, pos, filename, line)?;
+    let mut left = parse_shift(tokens, pos, filename, line)?;
     while *pos < tokens.len() {
         match &tokens[*pos] {
             ExprToken::Op(op) if op == "<" => {
                 *pos += 1;
-                let right = parse_additive(tokens, pos, filename, line)?;
+                let right = parse_shift(tokens, pos, filename, line)?;
                 left = i64::from(left < right);
             }
             ExprToken::Op(op) if op == ">" => {
                 *pos += 1;
-                let right = parse_additive(tokens, pos, filename, line)?;
+                let right = parse_shift(tokens, pos, filename, line)?;
                 left = i64::from(left > right);
             }
             ExprToken::Op(op) if op == "<=" => {
                 *pos += 1;
-                let right = parse_additive(tokens, pos, filename, line)?;
+                let right = parse_shift(tokens, pos, filename, line)?;
                 left = i64::from(left <= right);
             }
             ExprToken::Op(op) if op == ">=" => {
                 *pos += 1;
-                let right = parse_additive(tokens, pos, filename, line)?;
+                let right = parse_shift(tokens, pos, filename, line)?;
                 left = i64::from(left >= right);
             }
             _ => break,
@@ -1824,25 +1771,38 @@ fn parse_relational(
     Ok(left)
 }
 
-fn parse_additive(
-    tokens: &[ExprToken],
-    pos: &mut usize,
-    filename: &str,
-    line: u32,
-) -> Result<i64> {
+fn parse_shift(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
+    let mut left = parse_additive(tokens, pos, filename, line)?;
+    while *pos < tokens.len() {
+        match &tokens[*pos] {
+            ExprToken::Op(op) if op == "<<" => {
+                *pos += 1;
+                let right = parse_additive(tokens, pos, filename, line)?;
+                left <<= right;
+            }
+            ExprToken::Op(op) if op == ">>" => {
+                *pos += 1;
+                let right = parse_additive(tokens, pos, filename, line)?;
+                left >>= right;
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_additive(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
     let mut left = parse_multiplicative(tokens, pos, filename, line)?;
     while *pos < tokens.len() {
         match &tokens[*pos] {
             ExprToken::Op(op) if op == "+" => {
                 *pos += 1;
-                let right =
-                    parse_multiplicative(tokens, pos, filename, line)?;
+                let right = parse_multiplicative(tokens, pos, filename, line)?;
                 left += right;
             }
             ExprToken::Op(op) if op == "-" => {
                 *pos += 1;
-                let right =
-                    parse_multiplicative(tokens, pos, filename, line)?;
+                let right = parse_multiplicative(tokens, pos, filename, line)?;
                 left -= right;
             }
             _ => break,
@@ -1872,8 +1832,7 @@ fn parse_multiplicative(
                     return Err(Error::Preprocess {
                         file: filename.to_string(),
                         line,
-                        msg: "division by zero in preprocessor expression"
-                            .to_string(),
+                        msg: "division by zero in preprocessor expression".to_string(),
                     });
                 }
                 left /= right;
@@ -1885,8 +1844,7 @@ fn parse_multiplicative(
                     return Err(Error::Preprocess {
                         file: filename.to_string(),
                         line,
-                        msg: "modulo by zero in preprocessor expression"
-                            .to_string(),
+                        msg: "modulo by zero in preprocessor expression".to_string(),
                     });
                 }
                 left %= right;
@@ -1897,12 +1855,7 @@ fn parse_multiplicative(
     Ok(left)
 }
 
-fn parse_unary(
-    tokens: &[ExprToken],
-    pos: &mut usize,
-    filename: &str,
-    line: u32,
-) -> Result<i64> {
+fn parse_unary(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
     if *pos < tokens.len() {
         match &tokens[*pos] {
             ExprToken::Op(op) if op == "!" => {
@@ -1925,12 +1878,7 @@ fn parse_unary(
     parse_primary(tokens, pos, filename, line)
 }
 
-fn parse_primary(
-    tokens: &[ExprToken],
-    pos: &mut usize,
-    filename: &str,
-    line: u32,
-) -> Result<i64> {
+fn parse_primary(tokens: &[ExprToken], pos: &mut usize, filename: &str, line: u32) -> Result<i64> {
     if *pos >= tokens.len() {
         return Ok(0);
     }
@@ -1970,8 +1918,7 @@ fn format_date_time(epoch_secs: u64) -> (String, String) {
     let (year, month, day) = days_to_ymd(days);
 
     let months = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
-        "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let mon_name = months[month as usize];
 
@@ -2079,18 +2026,17 @@ mod tests {
         // The shadow header defines a sentinel variable; if it is
         // included instead of the builtin, the sentinel will appear in
         // the preprocessed output.
-        std::fs::write(
-            &header,
-            "int __shadow_math_h_selcc_test_sentinel;\n",
-        )
-        .unwrap();
+        std::fs::write(&header, "int __shadow_math_h_selcc_test_sentinel;\n").unwrap();
 
         let mut pp = Preprocessor::new();
         pp.add_include_dir(dir.to_str().unwrap());
         // Reference a prototype the selache builtin math.h provides so
         // we can tell whether the builtin was actually included.
         let result = pp
-            .process("#include <math.h>\nint test_use_builtin(void) { float x = fabsf(0); return 0; }\n", "test.c")
+            .process(
+                "#include <math.h>\nint test_use_builtin(void) { float x = fabsf(0); return 0; }\n",
+                "test.c",
+            )
             .unwrap();
         assert!(
             !result.contains("__shadow_math_h_selcc_test_sentinel"),
@@ -2124,8 +2070,7 @@ mod tests {
     #[test]
     fn test_function_macro() {
         let mut pp = Preprocessor::new();
-        let src =
-            "#define MAX(a,b) ((a)>(b)?(a):(b))\nint x = MAX(3, 5);\n";
+        let src = "#define MAX(a,b) ((a)>(b)?(a):(b))\nint x = MAX(3, 5);\n";
         let result = pp.process(src, "test.c").unwrap();
         assert!(result.contains("((3)>(5)?(3):(5))"));
     }
@@ -2162,10 +2107,7 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "#define LONG_MACRO \\\n    42\nint x = LONG_MACRO;\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(
-            result.contains("int x = 42;")
-                || result.contains("int x =     42;")
-        );
+        assert!(result.contains("int x = 42;") || result.contains("int x =     42;"));
     }
 
     #[test]
@@ -2198,7 +2140,8 @@ mod tests {
     fn test_elif() {
         let mut pp = Preprocessor::new();
         pp.define("X", "2");
-        let src = "#if X == 1\nint one = 1;\n#elif X == 2\nint two = 1;\n#else\nint other = 1;\n#endif\n";
+        let src =
+            "#if X == 1\nint one = 1;\n#elif X == 2\nint two = 1;\n#else\nint other = 1;\n#endif\n";
         let result = pp.process(src, "test.c").unwrap();
         assert!(!result.contains("int one = 1;"));
         assert!(result.contains("int two = 1;"));
@@ -2350,12 +2293,19 @@ mod tests {
     }
 
     #[test]
+    fn test_if_shift_arithmetic() {
+        let mut pp = Preprocessor::new();
+        let src = "#if (1 << 4) == 16 && (32 >> 2) == 8\nint ok = 1;\n#endif\n";
+        let result = pp.process(src, "test.c").unwrap();
+        assert!(result.contains("int ok = 1;"), "got: {result}");
+    }
+
+    #[test]
     fn test_if_logical_and() {
         let mut pp = Preprocessor::new();
         pp.define("A", "1");
         pp.define("B", "1");
-        let src =
-            "#if defined(A) && defined(B)\nint both = 1;\n#endif\n";
+        let src = "#if defined(A) && defined(B)\nint both = 1;\n#endif\n";
         let result = pp.process(src, "test.c").unwrap();
         assert!(result.contains("int both = 1;"));
     }
@@ -2507,7 +2457,10 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "#define HDR <stdint.h>\n#include HDR\nint32_t x;\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(result.contains("int32_t") || result.contains("int"), "got: {result}");
+        assert!(
+            result.contains("int32_t") || result.contains("int"),
+            "got: {result}"
+        );
     }
 
     #[test]
@@ -2539,8 +2492,14 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "int stdc = __STDC__;\nlong ver = __STDC_VERSION__;\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(result.contains("int stdc = 1;"), "expected __STDC__ = 1, got: {result}");
-        assert!(result.contains("long ver = 199901L;"), "expected __STDC_VERSION__ = 199901L, got: {result}");
+        assert!(
+            result.contains("int stdc = 1;"),
+            "expected __STDC__ = 1, got: {result}"
+        );
+        assert!(
+            result.contains("long ver = 199901L;"),
+            "expected __STDC_VERSION__ = 199901L, got: {result}"
+        );
     }
 
     #[test]
@@ -2548,7 +2507,10 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "#include <iso646.h>\nint x = 1 and 0;\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(result.contains("1 && 0"), "expected 'and' expanded to '&&', got: {result}");
+        assert!(
+            result.contains("1 && 0"),
+            "expected 'and' expanded to '&&', got: {result}"
+        );
     }
 
     #[test]
@@ -2556,7 +2518,10 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "#include <errno.h>\nint x = EDOM;\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(result.contains("int x = 1;"), "expected EDOM = 1, got: {result}");
+        assert!(
+            result.contains("int x = 1;"),
+            "expected EDOM = 1, got: {result}"
+        );
     }
 
     #[test]
@@ -2564,8 +2529,10 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "#include <assert.h>\nvoid f() { assert(1); }\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(result.contains("__assert_fail") || result.contains("((void)0)"),
-                "expected assert expansion, got: {result}");
+        assert!(
+            result.contains("__assert_fail") || result.contains("((void)0)"),
+            "expected assert expansion, got: {result}"
+        );
     }
 
     #[test]
@@ -2573,6 +2540,9 @@ mod tests {
         let mut pp = Preprocessor::new();
         let src = "#include <inttypes.h>\nconst char *fmt = PRId32;\n";
         let result = pp.process(src, "test.c").unwrap();
-        assert!(result.contains("\"d\""), "expected PRId32 = \"d\", got: {result}");
+        assert!(
+            result.contains("\"d\""),
+            "expected PRId32 = \"d\", got: {result}"
+        );
     }
 }

@@ -16,17 +16,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{Error, Result};
-use crate::ldf_ast::{BinOp, Expr, ScriptAssignment, UnOp};
 use crate::layout::Layout;
+use crate::ldf_ast::{BinOp, Expr, ScriptAssignment, UnOp};
 
 /// Evaluate all script-constant assignments in the LDF against the
 /// completed memory layout. Returns a map from symbol name to 32-bit
 /// value. Ordering is not significant: every entry has been fully
 /// resolved before return.
-pub fn evaluate(
-    assignments: &[ScriptAssignment],
-    layout: &Layout,
-) -> Result<HashMap<String, u32>> {
+pub fn evaluate(assignments: &[ScriptAssignment], layout: &Layout) -> Result<HashMap<String, u32>> {
     let mut resolved: HashMap<String, u32> = HashMap::new();
     let mut pending: Vec<&ScriptAssignment> = assignments.iter().collect();
 
@@ -192,9 +189,7 @@ fn eval_call(
                 .memory_regions
                 .get(region)
                 .map(|(s, _)| *s)
-                .ok_or_else(|| {
-                    EvalErr::Hard(format!("unknown memory region `{region}`"))
-                })
+                .ok_or_else(|| EvalErr::Hard(format!("unknown memory region `{region}`")))
         }
         "MEMORY_END" | "MEMEND" | "MEMORY_BYTE_END" => {
             let region = region_arg()?;
@@ -202,9 +197,7 @@ fn eval_call(
                 .memory_regions
                 .get(region)
                 .map(|(_, e)| *e)
-                .ok_or_else(|| {
-                    EvalErr::Hard(format!("unknown memory region `{region}`"))
-                })
+                .ok_or_else(|| EvalErr::Hard(format!("unknown memory region `{region}`")))
         }
         "MEMSIZE" | "MEMORY_SIZEOF" => {
             let region = region_arg()?;
@@ -212,9 +205,7 @@ fn eval_call(
                 .memory_regions
                 .get(region)
                 .map(|(s, e)| e.saturating_sub(*s).saturating_add(1))
-                .ok_or_else(|| {
-                    EvalErr::Hard(format!("unknown memory region `{region}`"))
-                })
+                .ok_or_else(|| EvalErr::Hard(format!("unknown memory region `{region}`")))
         }
         "__RESERVE_START" => {
             let region = region_arg()?;
@@ -404,13 +395,12 @@ mod tests {
     #[test]
     fn eval_memory_start_end_size() {
         let mut layout = empty_layout();
-        layout.memory_regions.insert("mem_heap".into(), (0x1000, 0x1FFF));
+        layout
+            .memory_regions
+            .insert("mem_heap".into(), (0x1000, 0x1FFF));
         let a = ScriptAssignment {
             name: "s".into(),
-            expr: Expr::Call(
-                "MEMORY_START".into(),
-                vec![Expr::Ident("mem_heap".into())],
-            ),
+            expr: Expr::Call("MEMORY_START".into(), vec![Expr::Ident("mem_heap".into())]),
             line: 1,
         };
         let b = ScriptAssignment {

@@ -149,9 +149,10 @@ fn drive_assemble(opts: &cli::Options) -> error::Result<()> {
 }
 
 fn drive_link(opts: &cli::Options) -> error::Result<()> {
-    let ldf = opts.ldf_file.clone().ok_or_else(|| Error::MissingArgument(
-        "-T <ldf> (required when linking)".into(),
-    ))?;
+    let ldf = opts
+        .ldf_file
+        .clone()
+        .ok_or_else(|| Error::MissingArgument("-T <ldf> (required when linking)".into()))?;
 
     let tmp_dir = std::env::temp_dir().join(format!("selcc-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)?;
@@ -186,10 +187,7 @@ fn drive_link(opts: &cli::Options) -> error::Result<()> {
         }
     }
 
-    let output_file = opts
-        .output
-        .clone()
-        .unwrap_or_else(|| "a.out".to_string());
+    let output_file = opts.output.clone().unwrap_or_else(|| "a.out".to_string());
 
     let seld_opts = seld::cli::Options {
         ldf_file: Some(ldf),
@@ -250,10 +248,7 @@ fn pick_output(opts: &cli::Options, input: &str, new_ext: &str, allow_o: bool) -
 
 fn replace_ext(input: &str, new_ext: &str) -> String {
     let path = Path::new(input);
-    let stem = path
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .unwrap_or(input);
+    let stem = path.file_stem().and_then(OsStr::to_str).unwrap_or(input);
     let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
     if parent.is_empty() {
         format!("{stem}.{new_ext}")

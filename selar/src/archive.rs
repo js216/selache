@@ -134,7 +134,15 @@ pub fn write(archive: &Archive) -> Result<Vec<u8>> {
     // __version.doj member (only if version data exists)
     if let Some(ref ver_elf) = version_elf {
         debug_assert_eq!(out.len(), version_member_start);
-        write_member_header(&mut out, "__version.doj", now, 0, 0, 0o100666, ver_elf.len());
+        write_member_header(
+            &mut out,
+            "__version.doj",
+            now,
+            0,
+            0,
+            0o100666,
+            ver_elf.len(),
+        );
         out.extend_from_slice(ver_elf);
         pad_to_even(&mut out);
     }
@@ -244,8 +252,7 @@ fn write_member_header_raw(
     // ar_size[48..58]
     let size_str = format!("{size}");
     let size_bytes = size_str.as_bytes();
-    hdr[48..48 + size_bytes.len().min(10)]
-        .copy_from_slice(&size_bytes[..size_bytes.len().min(10)]);
+    hdr[48..48 + size_bytes.len().min(10)].copy_from_slice(&size_bytes[..size_bytes.len().min(10)]);
 
     // ar_fmag[58..60]
     hdr[58..60].copy_from_slice(AR_FMAG);
@@ -335,11 +342,7 @@ pub fn replace_members(archive: &mut Archive, new_members: &[Member]) -> Result<
                 existing.data = new.data.clone();
                 existing.timestamp = new.timestamp;
             }
-            None => {
-                return Err(
-                    selelf::error::Error::MemberNotFound(new.name.clone()).into(),
-                )
-            }
+            None => return Err(selelf::error::Error::MemberNotFound(new.name.clone()).into()),
         }
     }
     Ok(())

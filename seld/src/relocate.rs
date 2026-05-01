@@ -5,9 +5,8 @@
 use selelf::elf::{
     self, Elf32Rela, R_SHARC_ADDR32, R_SHARC_ADDR_VAR, R_SHARC_DATA16, R_SHARC_DATA32,
     R_SHARC_DATA6, R_SHARC_DATA7, R_SHARC_DM_ADDR32, R_SHARC_NONE, R_SHARC_PCREL, R_SHARC_PM24,
-    R_SHARC_PM32, R_SHARC_PM32_SUB, R_SHARC_PM_EXPR_ADD, R_SHARC_PM_EXPR_MARKER,
-    R_SHARC_PM_LOOP16, R_SHARC_PM_PCREL6, R_SHARC_PM_PCREL24, R_SHARC_PM_SW_BRANCHRETURN,
-    SHN_UNDEF, SHT_RELA,
+    R_SHARC_PM32, R_SHARC_PM32_SUB, R_SHARC_PM_EXPR_ADD, R_SHARC_PM_EXPR_MARKER, R_SHARC_PM_LOOP16,
+    R_SHARC_PM_PCREL24, R_SHARC_PM_PCREL6, R_SHARC_PM_SW_BRANCHRETURN, SHN_UNDEF, SHT_RELA,
 };
 
 use crate::error::{Error, Result};
@@ -416,10 +415,17 @@ pub fn apply_relocations(
                         if resolved.section_idx == 0xfff1 {
                             resolved.value
                         } else {
-                            find_symbol_address(resolved.object_idx, resolved.section_idx as usize, resolved.value, placed)
-                                .ok_or_else(|| Error::Relocation(format!(
+                            find_symbol_address(
+                                resolved.object_idx,
+                                resolved.section_idx as usize,
+                                resolved.value,
+                                placed,
+                            )
+                            .ok_or_else(|| {
+                                Error::Relocation(format!(
                                     "symbol `{sym_name}` resolved but no placed section found"
-                                )))?
+                                ))
+                            })?
                         }
                     } else {
                         return Err(Error::UnresolvedSymbol(sym_name.clone()));
@@ -427,10 +433,9 @@ pub fn apply_relocations(
                 } else {
                     // Defined in this object
                     let sec_idx = sym.st_shndx as usize;
-                    find_symbol_address(obj_idx, sec_idx, sym.st_value, placed)
-                        .ok_or_else(|| Error::Relocation(format!(
-                            "symbol `{sym_name}` section not placed"
-                        )))?
+                    find_symbol_address(obj_idx, sec_idx, sym.st_value, placed).ok_or_else(
+                        || Error::Relocation(format!("symbol `{sym_name}` section not placed")),
+                    )?
                 };
 
                 // Find the placed section containing the relocation site
@@ -453,9 +458,7 @@ pub fn apply_relocations(
                 // For PM48 and other sections: address is already in
                 // the native unit and r_offset is in those units.
                 let pc_addr = match placed[site_ps_idx].qualifier {
-                    SectionQualifier::Sw => {
-                        (placed[site_ps_idx].address + rela.r_offset * 2) / 2
-                    }
+                    SectionQualifier::Sw => (placed[site_ps_idx].address + rela.r_offset * 2) / 2,
                     _ => placed[site_ps_idx].address + rela.r_offset,
                 };
                 let section_name = obj
@@ -471,7 +474,8 @@ pub fn apply_relocations(
                     &section_name,
                     &obj.path,
                 )?;
-                let offset = reloc_byte_offset(rela_type, rela.r_offset, placed[site_ps_idx].qualifier);
+                let offset =
+                    reloc_byte_offset(rela_type, rela.r_offset, placed[site_ps_idx].qualifier);
                 patch_reloc(
                     &mut placed[site_ps_idx].data,
                     offset,
@@ -522,7 +526,11 @@ fn collect_relas(obj: &InputObject) -> Vec<(usize, Vec<Elf32Rela>)> {
         let target_sec_idx = sec.sh_info as usize;
         let off = sec.sh_offset as usize;
         let sz = sec.sh_size as usize;
-        let entsize = if sec.sh_entsize > 0 { sec.sh_entsize as usize } else { 12 };
+        let entsize = if sec.sh_entsize > 0 {
+            sec.sh_entsize as usize
+        } else {
+            12
+        };
 
         if off + sz > obj.data.len() {
             continue;
@@ -577,7 +585,12 @@ mod tests {
         compute_reloc_value(rela, sym, pc, "_unused_", "sec", "obj").map(|(v, _)| v)
     }
 
-    fn call_with_sym(rela: &Elf32Rela, sym: u32, pc: u32, name: &str) -> Result<(u32, RelocEffect)> {
+    fn call_with_sym(
+        rela: &Elf32Rela,
+        sym: u32,
+        pc: u32,
+        name: &str,
+    ) -> Result<(u32, RelocEffect)> {
         compute_reloc_value(rela, sym, pc, name, "sec", "obj")
     }
 
@@ -750,7 +763,10 @@ mod tests {
     fn reloc_byte_offset_converts_pm24_word_units() {
         assert_eq!(reloc_byte_offset(R_SHARC_PM24, 9, SectionQualifier::Sw), 18);
         assert_eq!(reloc_byte_offset(R_SHARC_PM24, 9, SectionQualifier::Pm), 54);
-        assert_eq!(reloc_byte_offset(R_SHARC_ADDR32, 9, SectionQualifier::Sw), 9);
+        assert_eq!(
+            reloc_byte_offset(R_SHARC_ADDR32, 9, SectionQualifier::Sw),
+            9
+        );
     }
 
     #[test]
@@ -767,9 +783,8 @@ mod tests {
             target_memory: "mem_code".into(),
         }];
 
-        let data = selelf::testutil::make_elf_object(
-            0x85, selelf::elf::ELFDATA2LSB, &[("_target", true)],
-        );
+        let data =
+            selelf::testutil::make_elf_object(0x85, selelf::elf::ELFDATA2LSB, &[("_target", true)]);
         let obj = crate::resolve::load_object("test.doj", data).unwrap();
         let symtab = crate::resolve::resolve(std::slice::from_ref(&obj)).unwrap();
 
@@ -800,13 +815,7 @@ mod tests {
         // the target value in big-endian byte order and leave the
         // opcode word alone.
         let mut data = vec![0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0xaa];
-        patch_reloc(
-            &mut data,
-            0,
-            R_SHARC_PM32,
-            0x001c_0906,
-            RelocEffect::Write,
-        );
+        patch_reloc(&mut data, 0, R_SHARC_PM32, 0x001c_0906, RelocEffect::Write);
         assert_eq!(&data[0..2], &[0x0f, 0x00]);
         assert_eq!(&data[2..6], &[0x00, 0x1c, 0x09, 0x06]);
         assert_eq!(&data[6..8], &[0xaa, 0xaa]);
@@ -870,13 +879,7 @@ mod tests {
         // (`0x80`) and must not be disturbed; bytes 4..5 receive
         // the 16-bit PC-relative delta in big-endian order.
         let mut data = vec![0x0c, 0x04, 0x00, 0x80, 0x00, 0x00];
-        patch_reloc(
-            &mut data,
-            0,
-            R_SHARC_PM_LOOP16,
-            0x0003,
-            RelocEffect::Write,
-        );
+        patch_reloc(&mut data, 0, R_SHARC_PM_LOOP16, 0x0003, RelocEffect::Write);
         assert_eq!(data, vec![0x0c, 0x04, 0x00, 0x80, 0x00, 0x03]);
     }
 
@@ -939,8 +942,7 @@ mod tests {
             r_info: R_SHARC_PM_PCREL6,
             r_addend: 0,
         };
-        let (val, effect) =
-            call_with_sym(&rela, 0x133, 0x12c, ".atomic_clr_mode1_bit_1").unwrap();
+        let (val, effect) = call_with_sym(&rela, 0x133, 0x12c, ".atomic_clr_mode1_bit_1").unwrap();
         assert_eq!(val, 0x07);
         assert_eq!(effect, RelocEffect::Write);
     }
@@ -983,7 +985,10 @@ mod tests {
 
     #[test]
     fn reloc_byte_offset_converts_pm_pcrel6_word_units() {
-        assert_eq!(reloc_byte_offset(R_SHARC_PM_PCREL6, 0x12c, SectionQualifier::Sw), 0x258);
+        assert_eq!(
+            reloc_byte_offset(R_SHARC_PM_PCREL6, 0x12c, SectionQualifier::Sw),
+            0x258
+        );
     }
 
     #[test]
@@ -1039,8 +1044,14 @@ mod tests {
         // `r_offset` is a plain byte offset, not a 16-bit-word
         // index. Unlike the PM-instruction relocs, the value must
         // pass through unchanged.
-        assert_eq!(reloc_byte_offset(R_SHARC_DM_ADDR32, 4, SectionQualifier::Bw), 4);
-        assert_eq!(reloc_byte_offset(R_SHARC_DM_ADDR32, 0x10, SectionQualifier::Bw), 0x10);
+        assert_eq!(
+            reloc_byte_offset(R_SHARC_DM_ADDR32, 4, SectionQualifier::Bw),
+            4
+        );
+        assert_eq!(
+            reloc_byte_offset(R_SHARC_DM_ADDR32, 0x10, SectionQualifier::Bw),
+            0x10
+        );
     }
 
     #[test]

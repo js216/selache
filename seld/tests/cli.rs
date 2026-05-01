@@ -137,8 +137,7 @@ fn make_doj(sections: &[DojSection], symbols: &[DojSymbol]) -> Vec<u8> {
 
     for (i, sym) in symbols.iter().enumerate() {
         let base = (1 + num_sec_syms + i) * SYM_SIZE;
-        symtab[base..base + 4]
-            .copy_from_slice(&(sym_name_offsets[i] as u32).to_le_bytes());
+        symtab[base..base + 4].copy_from_slice(&(sym_name_offsets[i] as u32).to_le_bytes());
         symtab[base + 4..base + 8].copy_from_slice(&sym.value.to_le_bytes());
         symtab[base + 12] = (sym.bind << 4) | sym.stype;
         let elf_shndx: u16 = if sym.section_index_1based == 0 {
@@ -330,11 +329,7 @@ fn read_cstr(data: &[u8], off: usize) -> String {
     String::from_utf8_lossy(&data[off..end]).into_owned()
 }
 
-fn get_section_names(
-    data: &[u8],
-    hdr: &ElfHeader,
-    sections: &[SectionHeader],
-) -> Vec<String> {
+fn get_section_names(data: &[u8], hdr: &ElfHeader, sections: &[SectionHeader]) -> Vec<String> {
     if (hdr.e_shstrndx as usize) >= sections.len() {
         return vec![String::new(); sections.len()];
     }
@@ -475,10 +470,7 @@ fn basic_link_single_object() {
     write_main_doj(&work, &code);
     write_text(&work, "test.ldf", LDF_SINGLE_CODE);
 
-    let (rc, _, err) = run_seld(
-        &["-T", "test.ldf", "-o", "out.dxe", "main.doj"],
-        &work,
-    );
+    let (rc, _, err) = run_seld(&["-T", "test.ldf", "-o", "out.dxe", "main.doj"], &work);
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
 
     let dxe = std::fs::read(work.join("out.dxe")).expect("out.dxe missing");
@@ -488,17 +480,11 @@ fn basic_link_single_object() {
 
     let sections = parse_section_headers(&dxe, &hdr);
     let names = get_section_names(&dxe, &hdr, &sections);
-    assert!(
-        names.iter().any(|n| n == "dxe_code"),
-        "sections: {names:?}"
-    );
+    assert!(names.iter().any(|n| n == "dxe_code"), "sections: {names:?}");
 
     for (i, name) in names.iter().enumerate() {
         if name == "dxe_code" {
-            assert_eq!(
-                sections[i].sh_addr, 0x0009_0000,
-                "code section addr"
-            );
+            assert_eq!(sections[i].sh_addr, 0x0009_0000, "code section addr");
             break;
         }
     }
@@ -610,10 +596,7 @@ fn multiple_memory_segments() {
     write_file(&work, "main.doj", &doj);
     write_text(&work, "test.ldf", LDF_CODE_AND_DATA);
 
-    let (rc, _, err) = run_seld(
-        &["-T", "test.ldf", "-o", "out.dxe", "main.doj"],
-        &work,
-    );
+    let (rc, _, err) = run_seld(&["-T", "test.ldf", "-o", "out.dxe", "main.doj"], &work);
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
 
     let dxe = std::fs::read(work.join("out.dxe")).unwrap();
@@ -670,8 +653,7 @@ fn map_file_is_written() {
     );
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
 
-    let content = std::fs::read_to_string(work.join("out.map"))
-        .expect("out.map missing");
+    let content = std::fs::read_to_string(work.join("out.map")).expect("out.map missing");
     assert!(content.contains("ADSP-21569"), "map:\n{content}");
     assert!(content.contains("mem_code"), "map:\n{content}");
     assert!(content.contains("_main"), "map:\n{content}");
@@ -721,8 +703,7 @@ PROCESSOR core0 {
         &work,
     );
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
-    let content = std::fs::read_to_string(work.join("out.map"))
-        .expect("out.map missing");
+    let content = std::fs::read_to_string(work.join("out.map")).expect("out.map missing");
     // The reserve occupies bytes [0x2403f0, 0x2443f0) -- length 0x4000
     // from the BW segment's base address. Expected derived values:
     //   stack_heap         = 0x002403f0
@@ -788,9 +769,12 @@ PROCESSOR core0 {
         &work,
     );
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
-    let content = std::fs::read_to_string(work.join("out.map"))
-        .expect("out.map missing");
-    for name in ["___ldf_pmcachesize", "___ldf_icachesize", "___ldf_dmcachesize"] {
+    let content = std::fs::read_to_string(work.join("out.map")).expect("out.map missing");
+    for name in [
+        "___ldf_pmcachesize",
+        "___ldf_icachesize",
+        "___ldf_dmcachesize",
+    ] {
         let needle = format!("{name:<32} 0xffffffff");
         assert!(
             content.contains(&needle),
@@ -840,8 +824,7 @@ PROCESSOR core0 {
         &work,
     );
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
-    let content = std::fs::read_to_string(work.join("out.map"))
-        .expect("out.map missing");
+    let content = std::fs::read_to_string(work.join("out.map")).expect("out.map missing");
     // The BW segment runs from 0x00240000 to 0x0024FFFF (inclusive),
     // a total of 0x10000 bytes. The first RESERVE claims 0x1000
     // bytes at 0x00240000. The RESERVE_EXPAND then grows the

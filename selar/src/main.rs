@@ -161,10 +161,7 @@ fn run(args: &[String]) -> error::Result<()> {
     Ok(())
 }
 
-fn apply_version_tag(
-    info: &mut VersionInfo,
-    tag: &Option<VersionTag>,
-) -> error::Result<()> {
+fn apply_version_tag(info: &mut VersionInfo, tag: &Option<VersionTag>) -> error::Result<()> {
     match tag {
         Some(VersionTag::Simple(s)) => {
             info.user_version = Some(s.clone());
@@ -216,5 +213,7 @@ fn print_usage() {
     eprintln!("    -anv      Append file(s) and clear version");
     eprintln!("    -dnv      Delete file(s) and clear version");
     eprintln!();
-    eprintln!("The -version switch, alone on the command line, will print out the version of selar");
+    eprintln!(
+        "The -version switch, alone on the command line, will print out the version of selar"
+    );
 }

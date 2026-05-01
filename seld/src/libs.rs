@@ -46,12 +46,7 @@ pub fn collect_library_refs(ldf: &Ldf) -> (Vec<String>, Vec<String>) {
     // `$VAR` references. A reference to `$COMMAND_LINE_OBJECTS`
     // terminates a branch without contributing any names: those files
     // are already on the argv and must not be pulled a second time.
-    fn expand(
-        name: &str,
-        vars: &HashMap<&str, &Vec<String>>,
-        depth: usize,
-        out: &mut Vec<String>,
-    ) {
+    fn expand(name: &str, vars: &HashMap<&str, &Vec<String>>, depth: usize, out: &mut Vec<String>) {
         if depth > 32 {
             return;
         }
@@ -129,14 +124,10 @@ pub fn load_archives(
             continue;
         }
         seen.push(name.clone());
-        let path = find_in_lib_paths(name, lib_paths).ok_or_else(|| {
-            Error::Usage(format!(
-                "library `{name}` not found on any -L path"
-            ))
-        })?;
+        let path = find_in_lib_paths(name, lib_paths)
+            .ok_or_else(|| Error::Usage(format!("library `{name}` not found on any -L path")))?;
         let data = std::fs::read(&path)?;
-        let archive = selelf::archive::read(&data)
-            .map_err(Error::Shared)?;
+        let archive = selelf::archive::read(&data).map_err(Error::Shared)?;
         let pulled = vec![false; archive.members.len()];
         out.push(LoadedArchive {
             path,
@@ -162,16 +153,10 @@ pub fn load_crt_objects(
             continue;
         }
         seen.push(name.clone());
-        let path = find_in_lib_paths(name, lib_paths).ok_or_else(|| {
-            Error::Usage(format!(
-                "CRT object `{name}` not found on any -L path"
-            ))
-        })?;
+        let path = find_in_lib_paths(name, lib_paths)
+            .ok_or_else(|| Error::Usage(format!("CRT object `{name}` not found on any -L path")))?;
         let data = std::fs::read(&path)?;
-        let obj = resolve::load_object(
-            path.to_string_lossy().as_ref(),
-            data,
-        )?;
+        let obj = resolve::load_object(path.to_string_lossy().as_ref(), data)?;
         out.push(obj);
     }
     Ok(out)
@@ -184,10 +169,7 @@ pub fn load_crt_objects(
 /// definition in compiler form (`foo.`) and vice versa. Marks the
 /// pulled member as pulled so a later symbol that happens to share
 /// the same object does not re-pull it.
-pub fn pull_member_for_symbol(
-    archives: &mut [LoadedArchive],
-    symbol: &str,
-) -> Option<InputObject> {
+pub fn pull_member_for_symbol(archives: &mut [LoadedArchive], symbol: &str) -> Option<InputObject> {
     // Build the list of name variants once per request. The same
     // archive scan then checks each variant against each archive in
     // declaration order.
@@ -217,11 +199,7 @@ pub fn pull_member_for_symbol(
         if let Some(member_idx) = matched {
             ar.pulled[member_idx] = true;
             let member = &ar.archive.members[member_idx];
-            let synthetic_path = format!(
-                "{}({})",
-                ar.path.to_string_lossy(),
-                member.name
-            );
+            let synthetic_path = format!("{}({})", ar.path.to_string_lossy(), member.name);
             let data = member.data.clone();
             if let Ok(obj) = resolve::load_object(&synthetic_path, data) {
                 return Some(obj);
@@ -272,10 +250,7 @@ mod tests {
 
     #[test]
     fn collect_skips_command_line_objects() {
-        let ldf = mk_ldf(&[(
-            "$OBJECTS",
-            &["$COMMAND_LINE_OBJECTS", "startup.doj"],
-        )]);
+        let ldf = mk_ldf(&[("$OBJECTS", &["$COMMAND_LINE_OBJECTS", "startup.doj"])]);
         let (crt, arcs) = collect_library_refs(&ldf);
         assert_eq!(crt, vec!["startup.doj".to_string()]);
         assert!(arcs.is_empty());
@@ -293,12 +268,8 @@ mod tests {
     fn collect_dedupes_implicitly_through_loader() {
         // collect_library_refs preserves duplicates; dedup happens at
         // load time.  Verify that behaviour is honoured.
-        let ldf = mk_ldf(&[(
-            "$LIBRARIES",
-            &["libprofile.dlb", "libprofile.dlb"],
-        )]);
+        let ldf = mk_ldf(&[("$LIBRARIES", &["libprofile.dlb", "libprofile.dlb"])]);
         let (_crt, arcs) = collect_library_refs(&ldf);
         assert_eq!(arcs.len(), 2);
     }
-
 }

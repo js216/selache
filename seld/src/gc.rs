@@ -68,8 +68,10 @@ pub fn compute_liveness(
     // by layout, so their liveness does not matter; the flag is set
     // to `true` uniformly so layout's orphan check never fires on
     // them.
-    let mut live: Vec<Vec<bool>> =
-        objects.iter().map(|o| vec![false; o.sections.len()]).collect();
+    let mut live: Vec<Vec<bool>> = objects
+        .iter()
+        .map(|o| vec![false; o.sections.len()])
+        .collect();
 
     // Pre-read every object's symbol table once. The same table is
     // consulted repeatedly during propagation, and re-parsing inside
@@ -109,8 +111,7 @@ pub fn compute_liveness(
     // is itself a reference: the section is wanted even if nothing
     // in the code graph points at it. Gather the union of all
     // claimed section names once, then mark every match.
-    let mut claimed_names: std::collections::HashSet<&str> =
-        std::collections::HashSet::new();
+    let mut claimed_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for proc in &ldf.processors {
         for out_sec in &proc.sections {
             for spec in &out_sec.input_sections {
@@ -169,7 +170,10 @@ pub fn compute_liveness(
     // relocation on every live section, so sections marked live
     // late still get their relocations visited.
     loop {
-        let before: usize = live.iter().map(|row| row.iter().filter(|b| **b).count()).sum();
+        let before: usize = live
+            .iter()
+            .map(|row| row.iter().filter(|b| **b).count())
+            .sum();
 
         for (obj_idx, obj) in objects.iter().enumerate() {
             let syms = &symtabs[obj_idx];
@@ -242,7 +246,10 @@ pub fn compute_liveness(
             }
         }
 
-        let after: usize = live.iter().map(|row| row.iter().filter(|b| **b).count()).sum();
+        let after: usize = live
+            .iter()
+            .map(|row| row.iter().filter(|b| **b).count())
+            .sum();
         if after == before {
             break;
         }
@@ -301,9 +308,7 @@ fn mark_symbol_live(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ldf_ast::{
-        InputSectionSpec, Ldf, OutputSection, Processor, SectionQualifier,
-    };
+    use crate::ldf_ast::{InputSectionSpec, Ldf, OutputSection, Processor, SectionQualifier};
     use crate::resolve::{ResolvedSymbol, SymbolTable};
     use selelf::elf::Elf32Shdr;
     use std::collections::HashMap;
@@ -462,12 +467,14 @@ mod tests {
         // up dead.
         let a = make_obj("a.doj", &["X"], &[]);
         let b = make_obj("b.doj", &["Y"], &[]);
-        let symtab =
-            make_symtab(&[("live_sym", 0, 1), ("dead_sym", 1, 1)]);
+        let symtab = make_symtab(&[("live_sym", 0, 1), ("dead_sym", 1, 1)]);
         let ldf = make_ldf(&[]);
         let objects = vec![a, b];
         let live = compute_liveness(&objects, 1, &ldf, &symtab, None).unwrap();
-        assert!(live.is_live(0, 1), "X in command-line object A must be live");
+        assert!(
+            live.is_live(0, 1),
+            "X in command-line object A must be live"
+        );
         assert!(!live.is_live(1, 1), "Y in archive object B must be dead");
     }
 
@@ -498,26 +505,24 @@ mod tests {
         // helper below does that.
         let (a_obj, a_syms) =
             make_obj_with_syms("a.doj", &["X"], &[("ref_y", 0)], &[(1, &[(1, 1)])]);
-        let (b_obj, b_syms) =
-            make_obj_with_syms("b.doj", &["Y"], &[("ref_y", 1), ("ref_z", 0)], &[(1, &[(2, 1)])]);
-        let (c_obj, c_syms) =
-            make_obj_with_syms("c.doj", &["Z"], &[("ref_z", 1)], &[]);
+        let (b_obj, b_syms) = make_obj_with_syms(
+            "b.doj",
+            &["Y"],
+            &[("ref_y", 1), ("ref_z", 0)],
+            &[(1, &[(2, 1)])],
+        );
+        let (c_obj, c_syms) = make_obj_with_syms("c.doj", &["Z"], &[("ref_z", 1)], &[]);
         let _ = (a_syms, b_syms, c_syms);
 
         // Global table: ref_y defined in obj1 section 1, ref_z
         // defined in obj2 section 1. The relocations cross objects
         // via SHN_UNDEF references that resolve through this map.
-        let symtab = make_symtab(&[
-            ("entry", 0, 1),
-            ("ref_y", 1, 1),
-            ("ref_z", 2, 1),
-        ]);
+        let symtab = make_symtab(&[("entry", 0, 1), ("ref_y", 1, 1), ("ref_z", 2, 1)]);
         let ldf = make_ldf(&[]);
         let objects = vec![a_obj, b_obj, c_obj];
         // Pass zero command-line objects so nothing is forced live
         // by object position; the entry symbol is the only root.
-        let live =
-            compute_liveness(&objects, 0, &ldf, &symtab, Some("entry")).unwrap();
+        let live = compute_liveness(&objects, 0, &ldf, &symtab, Some("entry")).unwrap();
         assert!(live.is_live(0, 1), "X (entry's section) must be live");
         assert!(live.is_live(1, 1), "Y (referenced from X) must be live");
         assert!(live.is_live(2, 1), "Z (referenced from Y) must be live");
@@ -546,8 +551,7 @@ mod tests {
         // anywhere references the symbol and no LDF rule claims the
         // section. The section must end up dead.
         let a = make_obj("a.doj", &["seg_ctdml"], &[]);
-        let symtab =
-            make_symtab(&[("ctor_NULL_marker", 0, 1)]);
+        let symtab = make_symtab(&[("ctor_NULL_marker", 0, 1)]);
         let ldf = make_ldf(&[]);
         let objects = vec![a];
         let live = compute_liveness(&objects, 0, &ldf, &symtab, None).unwrap();

@@ -59,11 +59,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     if let Some(ldf_parent) = ldf_path_buf.parent() {
-        if !preproc
-            .include_paths
-            .iter()
-            .any(|p| p == ldf_parent)
-        {
+        if !preproc.include_paths.iter().any(|p| p == ldf_parent) {
             preproc.include_paths.push(ldf_parent.to_path_buf());
         }
     }
@@ -133,8 +129,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
         }
         objects.push(obj);
     }
-    let mut archives =
-        libs::load_archives(&archive_basenames, &opts.lib_paths)?;
+    let mut archives = libs::load_archives(&archive_basenames, &opts.lib_paths)?;
 
     if opts.verbose {
         eprintln!(
@@ -209,9 +204,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
         // is a hard link error.
         let mut pulled_this_pass = 0usize;
         for sym in &live_undef {
-            if let Some(obj) =
-                libs::pull_member_for_symbol(&mut archives, sym)
-            {
+            if let Some(obj) = libs::pull_member_for_symbol(&mut archives, sym) {
                 if opts.trace || opts.trace_full {
                     eprintln!("  {}", obj.path);
                 }
@@ -291,8 +284,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
     if opts.verbose {
         eprintln!("Performing section layout...");
     }
-    let mut link_layout =
-        layout::layout(&ldf, &objects, &variables, entry_name, &live_sections)?;
+    let mut link_layout = layout::layout(&ldf, &objects, &variables, entry_name, &live_sections)?;
 
     if opts.verbose {
         eprintln!(
@@ -317,11 +309,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
     let mut symtab = symtab;
     install_script_symbols(&ldf, &link_layout, &mut symtab)?;
     if opts.verbose {
-        let mut names: Vec<&String> = ldf
-            .script_assignments
-            .iter()
-            .map(|a| &a.name)
-            .collect();
+        let mut names: Vec<&String> = ldf.script_assignments.iter().map(|a| &a.name).collect();
         names.sort();
         names.dedup();
         for n in names {

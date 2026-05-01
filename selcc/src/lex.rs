@@ -43,7 +43,6 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + 1).copied()
     }
 
-
     fn advance(&mut self) -> u8 {
         let ch = self.src[self.pos];
         self.pos += 1;
@@ -321,9 +320,7 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         let mut has_ucn = false;
         // Check if the first char is a UCN (\u or \U).
-        if self.peek() == Some(b'\\')
-            && matches!(self.src.get(self.pos + 1), Some(b'u' | b'U'))
-        {
+        if self.peek() == Some(b'\\') && matches!(self.src.get(self.pos + 1), Some(b'u' | b'U')) {
             has_ucn = true;
         } else {
             self.advance();
@@ -333,9 +330,7 @@ impl<'a> Lexer<'a> {
                 Some(ch) if ch.is_ascii_alphanumeric() || ch == b'_' => {
                     self.advance();
                 }
-                Some(b'\\')
-                    if matches!(self.src.get(self.pos + 1), Some(b'u' | b'U')) =>
-                {
+                Some(b'\\') if matches!(self.src.get(self.pos + 1), Some(b'u' | b'U')) => {
                     has_ucn = true;
                     break;
                 }
@@ -345,8 +340,9 @@ impl<'a> Lexer<'a> {
 
         if has_ucn {
             // Re-parse from start, building a String with resolved UCNs.
-            let ascii_prefix =
-                std::str::from_utf8(&self.src[start..self.pos]).unwrap().to_string();
+            let ascii_prefix = std::str::from_utf8(&self.src[start..self.pos])
+                .unwrap()
+                .to_string();
             return self.read_ident_with_ucn(ascii_prefix);
         }
 
@@ -397,8 +393,7 @@ impl<'a> Lexer<'a> {
     fn read_ident_with_ucn(&mut self, prefix: String) -> Token {
         let mut name = prefix;
         loop {
-            if self.peek() == Some(b'\\')
-                && matches!(self.src.get(self.pos + 1), Some(b'u' | b'U'))
+            if self.peek() == Some(b'\\') && matches!(self.src.get(self.pos + 1), Some(b'u' | b'U'))
             {
                 self.advance(); // consume '\'
                 let count = if self.peek() == Some(b'u') { 4 } else { 8 };
@@ -678,9 +673,7 @@ impl<'a> Lexer<'a> {
                     return Err(Error::Lex {
                         line,
                         col,
-                        msg: format!(
-                            "expected {count} hex digits in universal character name"
-                        ),
+                        msg: format!("expected {count} hex digits in universal character name"),
                     });
                 }
             }
@@ -717,7 +710,8 @@ impl<'a> Lexer<'a> {
         }
 
         // Identifiers and keywords (including UCN \uXXXX / \UXXXXXXXX start)
-        if ch.is_ascii_alphabetic() || ch == b'_'
+        if ch.is_ascii_alphabetic()
+            || ch == b'_'
             || (ch == b'\\' && matches!(self.src.get(self.pos + 1), Some(b'u' | b'U')))
         {
             let tok = self.read_ident_or_keyword();
@@ -1157,8 +1151,7 @@ mod tests {
 
     #[test]
     fn lex_new_operators() {
-        let tokens =
-            tokenize("-> . ++ -- += -= *= /= %= &= |= ^= <<= >>= ? : ...").unwrap();
+        let tokens = tokenize("-> . ++ -- += -= *= /= %= &= |= ^= <<= >>= ? : ...").unwrap();
         assert_eq!(
             tokens,
             vec![
@@ -1210,19 +1203,37 @@ mod tests {
     #[test]
     fn lex_line_comment() {
         let tokens = tokenize("42 // comment\n7").unwrap();
-        assert_eq!(tokens, vec![Token::IntLit(42, IntSuffix::None), Token::IntLit(7, IntSuffix::None)]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::IntLit(42, IntSuffix::None),
+                Token::IntLit(7, IntSuffix::None)
+            ]
+        );
     }
 
     #[test]
     fn lex_block_comment() {
         let tokens = tokenize("42 /* comment */ 7").unwrap();
-        assert_eq!(tokens, vec![Token::IntLit(42, IntSuffix::None), Token::IntLit(7, IntSuffix::None)]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::IntLit(42, IntSuffix::None),
+                Token::IntLit(7, IntSuffix::None)
+            ]
+        );
     }
 
     #[test]
     fn lex_multiline_block_comment() {
         let tokens = tokenize("1 /* line1\nline2\nline3 */ 2").unwrap();
-        assert_eq!(tokens, vec![Token::IntLit(1, IntSuffix::None), Token::IntLit(2, IntSuffix::None)]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::IntLit(1, IntSuffix::None),
+                Token::IntLit(2, IntSuffix::None)
+            ]
+        );
     }
 
     #[test]
@@ -1391,13 +1402,19 @@ mod tests {
     #[test]
     fn lex_complex_keyword() {
         let tokens = tokenize("float _Complex z").unwrap();
-        assert_eq!(tokens, vec![Token::Float, Token::Complex, Token::Ident("z".into())]);
+        assert_eq!(
+            tokens,
+            vec![Token::Float, Token::Complex, Token::Ident("z".into())]
+        );
     }
 
     #[test]
     fn lex_imaginary_keyword() {
         let tokens = tokenize("float _Imaginary z").unwrap();
-        assert_eq!(tokens, vec![Token::Float, Token::Imaginary, Token::Ident("z".into())]);
+        assert_eq!(
+            tokens,
+            vec![Token::Float, Token::Imaginary, Token::Ident("z".into())]
+        );
     }
 
     #[test]
@@ -1482,10 +1499,7 @@ mod tests {
     #[test]
     fn lex_wide_string_with_escape() {
         let tokens = tokenize(r#"L"a\nb""#).unwrap();
-        assert_eq!(
-            tokens,
-            vec![Token::WideStringLit(vec![97, 10, 98])]
-        );
+        assert_eq!(tokens, vec![Token::WideStringLit(vec![97, 10, 98])]);
     }
 
     #[test]
@@ -1524,7 +1538,10 @@ mod tests {
     fn lex_wide_string_vs_ident_l() {
         // L not followed by " should be an identifier
         let tokens = tokenize("L x").unwrap();
-        assert_eq!(tokens, vec![Token::Ident("L".into()), Token::Ident("x".into())]);
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("L".into()), Token::Ident("x".into())]
+        );
     }
 
     #[test]

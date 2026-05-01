@@ -3,9 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 use crate::error::{Error, Result};
-use selelf::elf::{
-    self, Elf32Header, Elf32Shdr, Endian, SHF_ALLOC, SHT_NOBITS, SHT_PROGBITS,
-};
+use selelf::elf::{self, Elf32Header, Elf32Shdr, Endian, SHF_ALLOC, SHT_NOBITS, SHT_PROGBITS};
 
 const SKIP_SECTIONS: &[&str] = &["seg_init", "seg_rth", "seg_pmco"];
 
@@ -37,10 +35,9 @@ fn parse_elf(data: &[u8]) -> Result<ElfContext> {
     for i in 0..shnum {
         let off = shoff + i * shentsz;
         if off + shentsz > data.len() {
-            return Err(selelf::error::Error::InvalidElf(
-                "section header out of bounds".into(),
-            )
-            .into());
+            return Err(
+                selelf::error::Error::InvalidElf("section header out of bounds".into()).into(),
+            );
         }
         sections.push(elf::parse_section_header(&data[off..], e));
     }
@@ -362,20 +359,8 @@ mod tests {
         let mut builder = TestElfBuilder::new();
         builder
             .add_section("seg_rth", SHT_PROGBITS, SHF_ALLOC, 0x0009_0000, &[0; 16])
-            .add_section(
-                "seg_pmco",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x0009_0100,
-                &[0; 32],
-            )
-            .add_section(
-                "seg_init",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x0009_0200,
-                &[0; 64],
-            );
+            .add_section("seg_pmco", SHT_PROGBITS, SHF_ALLOC, 0x0009_0100, &[0; 32])
+            .add_section("seg_init", SHT_PROGBITS, SHF_ALLOC, 0x0009_0200, &[0; 64]);
         let elf = builder.build();
         let result = process(&elf, false).unwrap();
 
@@ -396,13 +381,7 @@ mod tests {
         let mut builder = TestElfBuilder::new();
         builder
             .add_section("seg_rth", SHT_PROGBITS, SHF_ALLOC, 0x0009_0000, &[0; 16])
-            .add_section(
-                "seg_pmco",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x0009_0100,
-                &[0; 32],
-            )
+            .add_section("seg_pmco", SHT_PROGBITS, SHF_ALLOC, 0x0009_0100, &[0; 32])
             .add_section(
                 "seg_init",
                 SHT_PROGBITS,
@@ -410,13 +389,7 @@ mod tests {
                 0x0009_0200,
                 &vec![0; seg_init_capacity],
             )
-            .add_section(
-                "seg_dmda",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x000B_0000,
-                &dmda_data,
-            );
+            .add_section("seg_dmda", SHT_PROGBITS, SHF_ALLOC, 0x000B_0000, &dmda_data);
         let elf = builder.build();
         let result = process(&elf, false).unwrap();
 
@@ -495,19 +468,10 @@ mod tests {
                 0x0009_0200,
                 &vec![0; seg_init_capacity],
             )
-            .add_section(
-                "seg_dmda",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x000B_0000,
-                &dmda_data,
-            );
+            .add_section("seg_dmda", SHT_PROGBITS, SHF_ALLOC, 0x000B_0000, &dmda_data);
         let elf = builder.build();
         let result = process(&elf, false);
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::SegInitTooSmall { .. }
-        ));
+        assert!(matches!(result.unwrap_err(), Error::SegInitTooSmall { .. }));
     }
 
     #[test]
@@ -519,13 +483,7 @@ mod tests {
         let mut builder = TestElfBuilder::new();
         builder
             .add_section("seg_rth", SHT_PROGBITS, SHF_ALLOC, 0x0009_0000, &[0; 16])
-            .add_section(
-                "seg_pmco",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x0009_0100,
-                &[0; 32],
-            )
+            .add_section("seg_pmco", SHT_PROGBITS, SHF_ALLOC, 0x0009_0100, &[0; 32])
             .add_section(
                 "seg_init",
                 SHT_PROGBITS,
@@ -533,20 +491,8 @@ mod tests {
                 0x0009_0200,
                 &vec![0; seg_init_capacity],
             )
-            .add_section(
-                "seg_dmda",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x000B_0000,
-                &data_a,
-            )
-            .add_section(
-                "seg_pmda",
-                SHT_PROGBITS,
-                SHF_ALLOC,
-                0x000C_0000,
-                &data_b,
-            );
+            .add_section("seg_dmda", SHT_PROGBITS, SHF_ALLOC, 0x000B_0000, &data_a)
+            .add_section("seg_pmda", SHT_PROGBITS, SHF_ALLOC, 0x000C_0000, &data_b);
         let elf = builder.build();
         let result = process(&elf, false).unwrap();
 

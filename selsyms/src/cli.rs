@@ -34,9 +34,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "-i" | "-include" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Error::Usage(
-                        "missing argument for -include".into(),
-                    ));
+                    return Err(Error::Usage("missing argument for -include".into()));
                 }
                 for name in args[i].split(',') {
                     if !name.is_empty() {
@@ -47,9 +45,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             "-e" | "-exclude" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Error::Usage(
-                        "missing argument for -exclude".into(),
-                    ));
+                    return Err(Error::Usage("missing argument for -exclude".into()));
                 }
                 for name in args[i].split(',') {
                     if !name.is_empty() {
@@ -78,10 +74,7 @@ pub fn print_help<W: std::io::Write + ?Sized>(w: &mut W) -> std::io::Result<()> 
         w,
         "inclusion into linker description files. Only function and object"
     )?;
-    writeln!(
-        w,
-        "symbols with global or weak binding are printed."
-    )?;
+    writeln!(w, "symbols with global or weak binding are printed.")?;
     writeln!(w)?;
     writeln!(w, "Options:")?;
     writeln!(w, "-i|-include <name>[,<name>]...")?;
@@ -146,8 +139,7 @@ mod tests {
 
     #[test]
     fn test_parse_include_long() {
-        let opts =
-            parse_args(&args(&["-include", "foo", "a.doj"])).unwrap();
+        let opts = parse_args(&args(&["-include", "foo", "a.doj"])).unwrap();
         assert_eq!(opts.include_syms, vec!["foo"]);
     }
 
@@ -159,8 +151,7 @@ mod tests {
 
     #[test]
     fn test_parse_exclude_long() {
-        let opts =
-            parse_args(&args(&["-exclude", "baz", "a.doj"])).unwrap();
+        let opts = parse_args(&args(&["-exclude", "baz", "a.doj"])).unwrap();
         assert_eq!(opts.exclude_syms, vec!["baz"]);
     }
 

@@ -222,12 +222,14 @@ fn reloc_type_for(instr: &selinstr::encode::Instruction) -> u8 {
     use selinstr::encode::{BranchTarget, Instruction};
     match instr {
         Instruction::LoadImm { .. } => selelf::elf::R_SHARC_PM32 as u8,
-        Instruction::Branch { target: BranchTarget::Absolute(_), .. } => {
-            selelf::elf::R_SHARC_PM24 as u8
-        }
-        Instruction::Branch { target: BranchTarget::PcRelative(_), .. } => {
-            selelf::elf::R_SHARC_PM_PCREL24 as u8
-        }
+        Instruction::Branch {
+            target: BranchTarget::Absolute(_),
+            ..
+        } => selelf::elf::R_SHARC_PM24 as u8,
+        Instruction::Branch {
+            target: BranchTarget::PcRelative(_),
+            ..
+        } => selelf::elf::R_SHARC_PM_PCREL24 as u8,
         Instruction::CJump { .. } => selelf::elf::R_SHARC_PM24 as u8,
         Instruction::DoLoop { .. } | Instruction::DoUntil { .. } => {
             selelf::elf::R_SHARC_PM_PCREL24 as u8
@@ -239,9 +241,7 @@ fn reloc_type_for(instr: &selinstr::encode::Instruction) -> u8 {
         // actually produce is handled above. Panicking here makes such
         // a bug loud instead of silently emitting the wrong reloc
         // type.
-        other => panic!(
-            "relocation emitted for unsupported instruction shape: {other:?}"
-        ),
+        other => panic!("relocation emitted for unsupported instruction shape: {other:?}"),
     }
 }
 
@@ -299,20 +299,25 @@ fn resolve_labels(
     }
     let offset = (label_word_offset as i32) - (instr_word_offset as i32);
     let resolved = match *instr {
-        Instruction::Branch { call, cond, target: BranchTarget::Absolute(0), delayed } => {
-            Instruction::Branch {
-                call,
-                cond,
-                target: BranchTarget::PcRelative(offset),
-                delayed,
-            }
-        }
-        Instruction::DoLoop { counter, end_pc: 0 } => {
-            Instruction::DoLoop { counter, end_pc: offset as u32 }
-        }
-        Instruction::DoUntil { addr: 0, term } => {
-            Instruction::DoUntil { addr: offset as u32, term }
-        }
+        Instruction::Branch {
+            call,
+            cond,
+            target: BranchTarget::Absolute(0),
+            delayed,
+        } => Instruction::Branch {
+            call,
+            cond,
+            target: BranchTarget::PcRelative(offset),
+            delayed,
+        },
+        Instruction::DoLoop { counter, end_pc: 0 } => Instruction::DoLoop {
+            counter,
+            end_pc: offset as u32,
+        },
+        Instruction::DoUntil { addr: 0, term } => Instruction::DoUntil {
+            addr: offset as u32,
+            term,
+        },
         other => other,
     };
     Some(resolved)
@@ -369,8 +374,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     let mut globals: Vec<String> = Vec::new();
     let mut weaks: Vec<String> = Vec::new();
     let mut externs: Vec<String> = Vec::new();
-    let mut aliases: HashMap<String, String> =
-        HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
     let mut current_section_idx: Option<usize> = None;
     let mut pending: Vec<PendingInstr> = Vec::new();
     // SHARC+ hardware DO loops forbid VISA-compressed instructions in
@@ -410,9 +414,8 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
         process_directives(line, &mut state);
 
         if let Some(label) = &line.label {
-            let idx = current_or_default(
-                &mut sections, &mut current_section_idx, ".text", true, visa,
-            );
+            let idx =
+                current_or_default(&mut sections, &mut current_section_idx, ".text", true, visa);
             let sec = &mut sections[idx].1;
             let word_off = if visa && sec.is_pm {
                 sec.visa_offset()
@@ -426,9 +429,8 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
         }
 
         if let Some(instr) = &line.instruction {
-            let idx = current_or_default(
-                &mut sections, &mut current_section_idx, ".text", true, visa,
-            );
+            let idx =
+                current_or_default(&mut sections, &mut current_section_idx, ".text", true, visa);
             let sec = &mut sections[idx].1;
             let byte_offset = sec.code.len();
             // Capture the word/parcel offset of this instruction *before*
@@ -473,8 +475,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                 sec.parcel_count += encoded.parcels();
                 sec.code.extend_from_slice(&bytes);
             } else {
-                let bytes =
-                    selinstr::encode::encode(instr).expect("instruction encoding failed");
+                let bytes = selinstr::encode::encode(instr).expect("instruction encoding failed");
                 sec.code.extend_from_slice(&bytes);
             }
             let byte_len = sec.code.len() - byte_offset;
@@ -543,8 +544,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     if visa && sec.is_visa {
                         let isa_bytes = selinstr::encode::encode(&resolved)
                             .expect("instruction re-encode failed");
-                        let encoded =
-                            selinstr::visa_encode::visa_encode(&resolved, &isa_bytes);
+                        let encoded = selinstr::visa_encode::visa_encode(&resolved, &isa_bytes);
                         let bytes = encoded.to_bytes();
                         sec.code[pi.byte_offset..pi.byte_offset + pi.byte_len]
                             .copy_from_slice(&bytes);
@@ -559,11 +559,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     match label_map.get(&pi.label_ref) {
                         Some(&(sec_idx, word_offset)) => {
                             if !local_refs.iter().any(|(n, _, _)| n == &pi.label_ref) {
-                                local_refs.push((
-                                    pi.label_ref.clone(),
-                                    sec_idx,
-                                    word_offset,
-                                ));
+                                local_refs.push((pi.label_ref.clone(), sec_idx, word_offset));
                             }
                         }
                         None => {
@@ -592,11 +588,12 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     // a `symbol-1` expression), the value becomes the
                     // relocation addend so the linker computes
                     // symbol_address + addend.
-                    let addend = if let selinstr::encode::Instruction::ImmStore { value, .. } = &pi.instr {
-                        *value as i32
-                    } else {
-                        0
-                    };
+                    let addend =
+                        if let selinstr::encode::Instruction::ImmStore { value, .. } = &pi.instr {
+                            *value as i32
+                        } else {
+                            0
+                        };
                     relocs.push(PendingReloc {
                         section_idx: pi.section_idx,
                         byte_offset: (pi.byte_offset / 2) as u32,
@@ -636,7 +633,14 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     }
     relocs.extend(var_relocs);
 
-    Ok(emit_elf_bytes(&sections, &globals, &weaks, &externs, &local_refs, &relocs))
+    Ok(emit_elf_bytes(
+        &sections,
+        &globals,
+        &weaks,
+        &externs,
+        &local_refs,
+        &relocs,
+    ))
 }
 
 /// Mutable state threaded through directive processing. Bundling the
@@ -659,10 +663,7 @@ struct DirectiveState<'a> {
 }
 
 /// Process directive and section-state effects from a parsed line.
-fn process_directives(
-    line: &ParsedLine,
-    state: &mut DirectiveState<'_>,
-) {
+fn process_directives(line: &ParsedLine, state: &mut DirectiveState<'_>) {
     let directive = match &line.directive {
         Some(d) => d,
         None => return,
@@ -691,7 +692,11 @@ fn process_directives(
         }
         Directive::Var(raw_body) => {
             let idx = current_or_default(
-                state.sections, state.current_section_idx, ".data", false, state.visa,
+                state.sections,
+                state.current_section_idx,
+                ".data",
+                false,
+                state.visa,
             );
             let (var_name, init_val) = parse_var_body(raw_body);
             let sec = &mut state.sections[idx].1;
@@ -732,7 +737,11 @@ fn process_directives(
         }
         Directive::Byte(data) => {
             let idx = current_or_default(
-                state.sections, state.current_section_idx, ".text", true, state.visa,
+                state.sections,
+                state.current_section_idx,
+                ".text",
+                true,
+                state.visa,
             );
             state.sections[idx].1.code.extend_from_slice(data);
         }
@@ -746,8 +755,7 @@ fn process_directives(
                     let remainder = current_words % b;
                     if remainder != 0 {
                         let pad_words = b - remainder;
-                        sec.code
-                            .extend(std::iter::repeat_n(0u8, pad_words * unit));
+                        sec.code.extend(std::iter::repeat_n(0u8, pad_words * unit));
                     }
                 }
             }
@@ -764,10 +772,7 @@ fn process_directives(
 /// section, copy that symbol's address; if it parses as a numeric literal,
 /// use that value directly.  Chains (A = B, B = C) are resolved transitively
 /// up to a bounded depth.
-fn resolve_aliases(
-    sections: &mut [(String, SectionData)],
-    aliases: &HashMap<String, String>,
-) {
+fn resolve_aliases(sections: &mut [(String, SectionData)], aliases: &HashMap<String, String>) {
     for (alias_name, raw_value) in aliases {
         // Resolve transitive chains: follow symbol names through the alias map.
         let mut value = raw_value.clone();
@@ -781,7 +786,12 @@ fn resolve_aliases(
         // Try to find the resolved value as an existing symbol.
         let mut found = false;
         for sec in sections.iter_mut() {
-            let hit = sec.1.symbols.iter().find(|(n, _)| *n == value).map(|(_, off)| *off);
+            let hit = sec
+                .1
+                .symbols
+                .iter()
+                .find(|(n, _)| *n == value)
+                .map(|(_, off)| *off);
             if let Some(addr) = hit {
                 sec.1.symbols.push((alias_name.clone(), addr));
                 found = true;
@@ -857,10 +867,12 @@ fn emit_elf_bytes(
             continue;
         }
         let elf_idx = elf_indices[*sec_idx];
-        let from_var = sections.get(*sec_idx)
+        let from_var = sections
+            .get(*sec_idx)
             .map(|(_, sd)| sd.symbols.iter().any(|(n, _)| n == name))
             .unwrap_or(false);
-        let is_data_sec = sections.get(*sec_idx)
+        let is_data_sec = sections
+            .get(*sec_idx)
             .map(|(_, sd)| !sd.is_pm)
             .unwrap_or(false);
         if from_var && is_data_sec {
@@ -1000,8 +1012,7 @@ fn build_adi_attributes(first_pm: Option<(u8, bool)>) -> Vec<u8> {
 
     if let Some((idx, _is_visa)) = first_pm {
         let sec_content = vec![
-            idx,
-            0x00, // end of section index list
+            idx, 0x00, // end of section index list
             0x12, // Tag_Encoding
             0x03,
         ];
@@ -1038,8 +1049,7 @@ fn find_section_by_name(
 
     // Locate the section-header string table.
     let strtab_off = shoff + hdr.e_shstrndx as usize * shentsize;
-    let strtab_shdr =
-        selelf::elf::parse_section_header(&data[strtab_off..], hdr.ei_data);
+    let strtab_shdr = selelf::elf::parse_section_header(&data[strtab_off..], hdr.ei_data);
     let strtab_start = strtab_shdr.sh_offset as usize;
     let strtab_end = strtab_start + strtab_shdr.sh_size as usize;
     let strtab = &data[strtab_start..strtab_end];
@@ -1072,11 +1082,7 @@ mod tests {
         let input_path = dir.join("test.s");
         let output_path = dir.join("test.doj");
         std::fs::write(&input_path, source).unwrap();
-        assemble_file(
-            input_path.to_str().unwrap(),
-            output_path.to_str().unwrap(),
-        )
-        .unwrap();
+        assemble_file(input_path.to_str().unwrap(), output_path.to_str().unwrap()).unwrap();
         let data = std::fs::read(&output_path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         data
@@ -1121,8 +1127,8 @@ mod tests {
             .find(|s| s.sh_type == selelf::elf::SHT_SYMTAB)
             .expect("missing symtab");
         let strtab = &sections[symtab.sh_link as usize];
-        let strtab_data = &data[strtab.sh_offset as usize
-            ..(strtab.sh_offset + strtab.sh_size) as usize];
+        let strtab_data =
+            &data[strtab.sh_offset as usize..(strtab.sh_offset + strtab.sh_size) as usize];
         let nsyms = symtab.sh_size as usize / symtab.sh_entsize as usize;
         let hook = (0..nsyms)
             .map(|i| {
@@ -1148,8 +1154,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_machine, 0x85);
 
-        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let shdr =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
     }
 
@@ -1168,12 +1174,10 @@ mod tests {
         );
         let hdr = selelf::elf::parse_header(&data).unwrap();
 
-        let pmco = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco not found");
+        let pmco = find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco not found");
         assert_eq!(pmco.sh_size, 12); // 2 instructions * 6 bytes
 
-        let dmda = find_section_by_name(&data, &hdr, "seg_dmda")
-            .expect("seg_dmda not found");
+        let dmda = find_section_by_name(&data, &hdr, "seg_dmda").expect("seg_dmda not found");
         assert_eq!(dmda.sh_size, 4); // one 32-bit value
 
         let syms = selelf::elf::extract_global_symbols(&data).unwrap();
@@ -1201,8 +1205,7 @@ mod tests {
         );
         let hdr = selelf::elf::parse_header(&data).unwrap();
 
-        let shdr = find_section_by_name(&data, &hdr, "seg_dmda")
-            .expect("seg_dmda not found");
+        let shdr = find_section_by_name(&data, &hdr, "seg_dmda").expect("seg_dmda not found");
         assert_eq!(shdr.sh_size, 4);
 
         let off = shdr.sh_offset as usize;
@@ -1244,9 +1247,7 @@ mod tests {
 
     #[test]
     fn test_no_section_fallback() {
-        let data = assemble_str(
-            ".GLOBAL _main;\n_main:\n    NOP\n    RTS\n",
-        );
+        let data = assemble_str(".GLOBAL _main;\n_main:\n    NOP\n    RTS\n");
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_machine, 0x85);
         let syms = selelf::elf::extract_global_symbols(&data).unwrap();
@@ -1374,8 +1375,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_type, 1);
 
-        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let shdr =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
 
         let off = shdr.sh_offset as usize;
@@ -1402,8 +1403,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_type, 1);
 
-        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let shdr =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         let off = shdr.sh_offset as usize;
         let word = read_word48(&data[off..off + 6]);
         let decoded = selinstr::disasm::decode_instruction(word);
@@ -1425,8 +1426,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_type, 1);
 
-        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let shdr =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
     }
 
@@ -1457,14 +1458,16 @@ mod tests {
                    .ENDSEG;\n";
         let data = assemble_source(src, true).expect("assemble");
         let hdr = selelf::elf::parse_header(&data).unwrap();
-        let shdr = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let shdr =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         // DO + 3 body instructions + RTS = 5 slots, all full-width
         // 48-bit (6 bytes each) = 30 bytes of code.
-        assert_eq!(shdr.sh_size, 30,
+        assert_eq!(
+            shdr.sh_size, 30,
             "expected every instruction (DO + body + RTS) to be \
              48-bit; got section size {} instead of 30",
-             shdr.sh_size);
+            shdr.sh_size
+        );
     }
 
     /// A LoadImm of an external symbol's address has to end up in the
@@ -1491,8 +1494,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
 
         // seg_pmco: one LoadImm (48-bit, 6 bytes) + RTS (48-bit, 6 bytes).
-        let seg = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let seg =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         assert_eq!(
             seg.sh_size, 12,
             "LoadImm of an extern must not compress; \
@@ -1513,16 +1516,13 @@ mod tests {
             .expect(".rela.seg_pmco section not found");
         assert_eq!(rela.sh_size, 12, "expected exactly one rela entry");
         let rela_off = rela.sh_offset as usize;
-        let r_offset = u32::from_le_bytes(
-            data[rela_off..rela_off + 4].try_into().unwrap(),
-        );
-        let r_info = u32::from_le_bytes(
-            data[rela_off + 4..rela_off + 8].try_into().unwrap(),
-        );
+        let r_offset = u32::from_le_bytes(data[rela_off..rela_off + 4].try_into().unwrap());
+        let r_info = u32::from_le_bytes(data[rela_off + 4..rela_off + 8].try_into().unwrap());
         let r_type = r_info & 0xff;
         assert_eq!(r_offset, 0, "r_offset must be parcel 0 of seg_pmco");
         assert_eq!(
-            r_type, selelf::elf::R_SHARC_PM32,
+            r_type,
+            selelf::elf::R_SHARC_PM32,
             "LoadImm of extern must use R_SHARC_PM32 (0x0c), got 0x{r_type:x}",
         );
     }
@@ -1542,24 +1542,21 @@ mod tests {
         let data = assemble_source(src, true).expect("assemble");
         let hdr = selelf::elf::parse_header(&data).unwrap();
 
-        let seg = find_section_by_name(&data, &hdr, "seg_pmco")
-            .expect("seg_pmco section not found");
+        let seg =
+            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
         assert_eq!(seg.sh_size, 12);
 
         let rela = find_section_by_name(&data, &hdr, ".rela.seg_pmco")
             .expect(".rela.seg_pmco section not found");
         assert_eq!(rela.sh_size, 12);
         let rela_off = rela.sh_offset as usize;
-        let r_offset = u32::from_le_bytes(
-            data[rela_off..rela_off + 4].try_into().unwrap(),
-        );
-        let r_info = u32::from_le_bytes(
-            data[rela_off + 4..rela_off + 8].try_into().unwrap(),
-        );
+        let r_offset = u32::from_le_bytes(data[rela_off..rela_off + 4].try_into().unwrap());
+        let r_info = u32::from_le_bytes(data[rela_off + 4..rela_off + 8].try_into().unwrap());
         let r_type = r_info & 0xff;
         assert_eq!(r_offset, 0, "r_offset must be parcel 0 of seg_pmco");
         assert_eq!(
-            r_type, selelf::elf::R_SHARC_PM24,
+            r_type,
+            selelf::elf::R_SHARC_PM24,
             "CALL of extern must use R_SHARC_PM24 (0x0b), got 0x{r_type:x}",
         );
     }
@@ -1586,10 +1583,8 @@ mod tests {
 
         // The symbol table must contain `my_label` as a defined local
         // symbol pointing at word 1 of seg_pmco.
-        let symtab_shdr = find_section_by_name(&data, &hdr, ".symtab")
-            .expect(".symtab not found");
-        let strtab_shdr = find_section_by_name(&data, &hdr, ".strtab")
-            .expect(".strtab not found");
+        let symtab_shdr = find_section_by_name(&data, &hdr, ".symtab").expect(".symtab not found");
+        let strtab_shdr = find_section_by_name(&data, &hdr, ".strtab").expect(".strtab not found");
         let symtab_off = symtab_shdr.sh_offset as usize;
         let symtab_end = symtab_off + symtab_shdr.sh_size as usize;
         let strtab_off = strtab_shdr.sh_offset as usize;
@@ -1616,7 +1611,11 @@ mod tests {
             let name = selelf::elf::read_string_at(strtab, st_name);
             if name == "my_label" {
                 let binding = st_info >> 4;
-                assert_eq!(binding, selelf::elf::STB_LOCAL, "my_label must be STB_LOCAL");
+                assert_eq!(
+                    binding,
+                    selelf::elf::STB_LOCAL,
+                    "my_label must be STB_LOCAL"
+                );
                 assert_ne!(st_shndx, 0, "my_label must be defined (not SHN_UNDEF)");
                 assert_eq!(st_value, 1, "my_label must point at word 1 of seg_pmco");
                 found = true;

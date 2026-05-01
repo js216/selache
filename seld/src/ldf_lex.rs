@@ -157,7 +157,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn loc(&self) -> Loc {
-        Loc { line: self.line, col: self.col }
+        Loc {
+            line: self.line,
+            col: self.col,
+        }
     }
 
     fn skip_whitespace(&mut self) {
@@ -305,7 +308,8 @@ impl<'a> Lexer<'a> {
                 let name_start = self.pos;
                 let name = self.read_ident_from(name_start);
                 let not_defined = !self.defines.contains_key(&name);
-                self.cond_stack.push((self.active() && not_defined, not_defined));
+                self.cond_stack
+                    .push((self.active() && not_defined, not_defined));
                 self.skip_to_eol();
             }
             "if" => {
@@ -400,7 +404,12 @@ impl<'a> Lexer<'a> {
 
             let loc = self.loc();
             let ch = match self.peek() {
-                None => return Ok(Spanned { tok: Token::Eof, loc }),
+                None => {
+                    return Ok(Spanned {
+                        tok: Token::Eof,
+                        loc,
+                    })
+                }
                 Some(ch) => ch,
             };
 
@@ -444,80 +453,230 @@ impl<'a> Lexer<'a> {
             // checked before single characters.
             let next = self.src.get(self.pos + 1).copied();
             match ch {
-                b'{' => { self.advance(); return Ok(Spanned { tok: Token::LBrace, loc }); }
-                b'}' => { self.advance(); return Ok(Spanned { tok: Token::RBrace, loc }); }
-                b'(' => { self.advance(); return Ok(Spanned { tok: Token::LParen, loc }); }
-                b')' => { self.advance(); return Ok(Spanned { tok: Token::RParen, loc }); }
-                b'[' => { self.advance(); return Ok(Spanned { tok: Token::LBracket, loc }); }
-                b']' => { self.advance(); return Ok(Spanned { tok: Token::RBracket, loc }); }
-                b';' => { self.advance(); return Ok(Spanned { tok: Token::Semi, loc }); }
-                b',' => { self.advance(); return Ok(Spanned { tok: Token::Comma, loc }); }
+                b'{' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::LBrace,
+                        loc,
+                    });
+                }
+                b'}' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::RBrace,
+                        loc,
+                    });
+                }
+                b'(' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::LParen,
+                        loc,
+                    });
+                }
+                b')' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::RParen,
+                        loc,
+                    });
+                }
+                b'[' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::LBracket,
+                        loc,
+                    });
+                }
+                b']' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::RBracket,
+                        loc,
+                    });
+                }
+                b';' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Semi,
+                        loc,
+                    });
+                }
+                b',' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Comma,
+                        loc,
+                    });
+                }
                 b'=' => {
                     self.advance();
                     if next == Some(b'=') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::EqEq, loc });
+                        return Ok(Spanned {
+                            tok: Token::EqEq,
+                            loc,
+                        });
                     }
-                    return Ok(Spanned { tok: Token::Equals, loc });
+                    return Ok(Spanned {
+                        tok: Token::Equals,
+                        loc,
+                    });
                 }
                 b'!' => {
                     self.advance();
                     if next == Some(b'=') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::NotEq, loc });
+                        return Ok(Spanned {
+                            tok: Token::NotEq,
+                            loc,
+                        });
                     }
-                    return Ok(Spanned { tok: Token::Bang, loc });
+                    return Ok(Spanned {
+                        tok: Token::Bang,
+                        loc,
+                    });
                 }
                 b'>' => {
                     self.advance();
                     if next == Some(b'=') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::Ge, loc });
+                        return Ok(Spanned {
+                            tok: Token::Ge,
+                            loc,
+                        });
                     }
                     if next == Some(b'>') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::Shr, loc });
+                        return Ok(Spanned {
+                            tok: Token::Shr,
+                            loc,
+                        });
                     }
-                    return Ok(Spanned { tok: Token::Gt, loc });
+                    return Ok(Spanned {
+                        tok: Token::Gt,
+                        loc,
+                    });
                 }
                 b'<' => {
                     self.advance();
                     if next == Some(b'=') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::Le, loc });
+                        return Ok(Spanned {
+                            tok: Token::Le,
+                            loc,
+                        });
                     }
                     if next == Some(b'<') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::Shl, loc });
+                        return Ok(Spanned {
+                            tok: Token::Shl,
+                            loc,
+                        });
                     }
-                    return Ok(Spanned { tok: Token::Lt, loc });
+                    return Ok(Spanned {
+                        tok: Token::Lt,
+                        loc,
+                    });
                 }
                 b'&' => {
                     self.advance();
                     if next == Some(b'&') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::AmpAmp, loc });
+                        return Ok(Spanned {
+                            tok: Token::AmpAmp,
+                            loc,
+                        });
                     }
-                    return Ok(Spanned { tok: Token::Amp, loc });
+                    return Ok(Spanned {
+                        tok: Token::Amp,
+                        loc,
+                    });
                 }
                 b'|' => {
                     self.advance();
                     if next == Some(b'|') {
                         self.advance();
-                        return Ok(Spanned { tok: Token::PipePipe, loc });
+                        return Ok(Spanned {
+                            tok: Token::PipePipe,
+                            loc,
+                        });
                     }
-                    return Ok(Spanned { tok: Token::Pipe, loc });
+                    return Ok(Spanned {
+                        tok: Token::Pipe,
+                        loc,
+                    });
                 }
-                b'+' => { self.advance(); return Ok(Spanned { tok: Token::Plus, loc }); }
-                b'-' => { self.advance(); return Ok(Spanned { tok: Token::Minus, loc }); }
-                b'*' => { self.advance(); return Ok(Spanned { tok: Token::Star, loc }); }
-                b'%' => { self.advance(); return Ok(Spanned { tok: Token::Percent, loc }); }
-                b'^' => { self.advance(); return Ok(Spanned { tok: Token::Caret, loc }); }
-                b'~' => { self.advance(); return Ok(Spanned { tok: Token::Tilde, loc }); }
-                b'?' => { self.advance(); return Ok(Spanned { tok: Token::Question, loc }); }
-                b':' => { self.advance(); return Ok(Spanned { tok: Token::Colon, loc }); }
-                b'.' => { self.advance(); return Ok(Spanned { tok: Token::Dot, loc }); }
-                b'/' => { self.advance(); return Ok(Spanned { tok: Token::Slash, loc }); }
+                b'+' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Plus,
+                        loc,
+                    });
+                }
+                b'-' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Minus,
+                        loc,
+                    });
+                }
+                b'*' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Star,
+                        loc,
+                    });
+                }
+                b'%' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Percent,
+                        loc,
+                    });
+                }
+                b'^' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Caret,
+                        loc,
+                    });
+                }
+                b'~' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Tilde,
+                        loc,
+                    });
+                }
+                b'?' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Question,
+                        loc,
+                    });
+                }
+                b':' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Colon,
+                        loc,
+                    });
+                }
+                b'.' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Dot,
+                        loc,
+                    });
+                }
+                b'/' => {
+                    self.advance();
+                    return Ok(Spanned {
+                        tok: Token::Slash,
+                        loc,
+                    });
+                }
                 _ => {}
             }
 
@@ -527,7 +686,10 @@ impl<'a> Lexer<'a> {
                 let name_start = self.pos;
                 let name = self.read_ident_from(name_start);
                 let var_name = format!("${name}");
-                return Ok(Spanned { tok: Token::Variable(var_name), loc });
+                return Ok(Spanned {
+                    tok: Token::Variable(var_name),
+                    loc,
+                });
             }
 
             // String literal
@@ -536,7 +698,12 @@ impl<'a> Lexer<'a> {
                 let mut s = String::new();
                 loop {
                     match self.advance() {
-                        None => return Err(format!("unterminated string at line {}:{}", loc.line, loc.col)),
+                        None => {
+                            return Err(format!(
+                                "unterminated string at line {}:{}",
+                                loc.line, loc.col
+                            ))
+                        }
                         Some(b'"') => break,
                         Some(b'\\') => {
                             if let Some(esc) = self.advance() {
@@ -546,7 +713,10 @@ impl<'a> Lexer<'a> {
                         Some(c) => s.push(c as char),
                     }
                 }
-                return Ok(Spanned { tok: Token::StringLit(s), loc });
+                return Ok(Spanned {
+                    tok: Token::StringLit(s),
+                    loc,
+                });
             }
 
             // Number
@@ -566,7 +736,10 @@ impl<'a> Lexer<'a> {
                     let mut val = u32::from_str_radix(&s[2..], 16)
                         .map_err(|e| format!("invalid hex number `{s}`: {e}"))?;
                     val = self.consume_size_suffix(val);
-                    return Ok(Spanned { tok: Token::Number(val), loc });
+                    return Ok(Spanned {
+                        tok: Token::Number(val),
+                        loc,
+                    });
                 }
                 while let Some(c) = self.peek() {
                     if c.is_ascii_digit() {
@@ -576,10 +749,14 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 let s = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("0");
-                let mut val: u32 = s.parse()
+                let mut val: u32 = s
+                    .parse()
                     .map_err(|e| format!("invalid number `{s}`: {e}"))?;
                 val = self.consume_size_suffix(val);
-                return Ok(Spanned { tok: Token::Number(val), loc });
+                return Ok(Spanned {
+                    tok: Token::Number(val),
+                    loc,
+                });
             }
 
             // Identifier / keyword
@@ -593,19 +770,34 @@ impl<'a> Lexer<'a> {
                     let exp = expansion.clone();
                     let trimmed = exp.trim();
                     if let Ok(val) = trimmed.parse::<u32>() {
-                        return Ok(Spanned { tok: Token::Number(val), loc });
+                        return Ok(Spanned {
+                            tok: Token::Number(val),
+                            loc,
+                        });
                     }
                     if let Some(hex) = trimmed.strip_prefix("0x") {
                         if let Ok(val) = u32::from_str_radix(hex, 16) {
-                            return Ok(Spanned { tok: Token::Number(val), loc });
+                            return Ok(Spanned {
+                                tok: Token::Number(val),
+                                loc,
+                            });
                         }
                     }
-                    return Ok(Spanned { tok: Token::Ident(trimmed.to_string()), loc });
+                    return Ok(Spanned {
+                        tok: Token::Ident(trimmed.to_string()),
+                        loc,
+                    });
                 }
-                return Ok(Spanned { tok: Token::Ident(ident), loc });
+                return Ok(Spanned {
+                    tok: Token::Ident(ident),
+                    loc,
+                });
             }
 
-            return Err(format!("unexpected character `{}` at line {}:{}", ch as char, loc.line, loc.col));
+            return Err(format!(
+                "unexpected character `{}` at line {}:{}",
+                ch as char, loc.line, loc.col
+            ));
         }
     }
 }
@@ -626,63 +818,77 @@ mod tests {
     #[test]
     fn simple_tokens() {
         let result = toks("{ } ( ) ; , = > .");
-        assert_eq!(result, vec![
-            Token::LBrace, Token::RBrace, Token::LParen, Token::RParen,
-            Token::Semi, Token::Comma, Token::Equals, Token::Gt, Token::Dot,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                Token::LBrace,
+                Token::RBrace,
+                Token::LParen,
+                Token::RParen,
+                Token::Semi,
+                Token::Comma,
+                Token::Equals,
+                Token::Gt,
+                Token::Dot,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn ident_and_number() {
         let result = toks("MEMORY 0x1000 48");
-        assert_eq!(result, vec![
-            Token::Ident("MEMORY".into()),
-            Token::Number(0x1000),
-            Token::Number(48),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                Token::Ident("MEMORY".into()),
+                Token::Number(0x1000),
+                Token::Number(48),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn variable() {
         let result = toks("$OBJECTS = foo ;");
-        assert_eq!(result, vec![
-            Token::Variable("$OBJECTS".into()),
-            Token::Equals,
-            Token::Ident("foo".into()),
-            Token::Semi,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                Token::Variable("$OBJECTS".into()),
+                Token::Equals,
+                Token::Ident("foo".into()),
+                Token::Semi,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn string_literal() {
         let result = toks("\"hello.doj\"");
-        assert_eq!(result, vec![
-            Token::StringLit("hello.doj".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![Token::StringLit("hello.doj".into()), Token::Eof,]
+        );
     }
 
     #[test]
     fn line_comment() {
         let result = toks("MEMORY // this is a comment\n48");
-        assert_eq!(result, vec![
-            Token::Ident("MEMORY".into()),
-            Token::Number(48),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![Token::Ident("MEMORY".into()), Token::Number(48), Token::Eof,]
+        );
     }
 
     #[test]
     fn block_comment() {
         let result = toks("MEMORY /* block */ 48");
-        assert_eq!(result, vec![
-            Token::Ident("MEMORY".into()),
-            Token::Number(48),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![Token::Ident("MEMORY".into()), Token::Number(48), Token::Eof,]
+        );
     }
 
     #[test]
@@ -711,59 +917,56 @@ mod tests {
     #[test]
     fn ifdef_else() {
         let defs = HashMap::new();
-        let result: Vec<Token> = tokenize(
-            "#ifdef FOO\nMEMORY\n#else\nSECTIONS\n#endif\n",
-            &defs,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|s| s.tok)
-        .collect();
+        let result: Vec<Token> = tokenize("#ifdef FOO\nMEMORY\n#else\nSECTIONS\n#endif\n", &defs)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.tok)
+            .collect();
         assert_eq!(result, vec![Token::Ident("SECTIONS".into()), Token::Eof]);
     }
 
     #[test]
     fn define_substitution() {
         let defs = HashMap::new();
-        let result: Vec<Token> = tokenize(
-            "#define MY_ADDR 0x1000\nSTART(MY_ADDR)\n",
-            &defs,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|s| s.tok)
-        .collect();
-        assert_eq!(result, vec![
-            Token::Ident("START".into()),
-            Token::LParen,
-            Token::Number(0x1000),
-            Token::RParen,
-            Token::Eof,
-        ]);
+        let result: Vec<Token> = tokenize("#define MY_ADDR 0x1000\nSTART(MY_ADDR)\n", &defs)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.tok)
+            .collect();
+        assert_eq!(
+            result,
+            vec![
+                Token::Ident("START".into()),
+                Token::LParen,
+                Token::Number(0x1000),
+                Token::RParen,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn ifndef() {
         let defs = HashMap::new();
-        let result: Vec<Token> = tokenize(
-            "#ifndef FOO\nMEMORY\n#endif\n",
-            &defs,
-        )
-        .unwrap()
-        .into_iter()
-        .map(|s| s.tok)
-        .collect();
+        let result: Vec<Token> = tokenize("#ifndef FOO\nMEMORY\n#endif\n", &defs)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.tok)
+            .collect();
         assert_eq!(result, vec![Token::Ident("MEMORY".into()), Token::Eof]);
     }
 
     #[test]
     fn hex_numbers() {
         let result = toks("0x00090000 0x000900a7");
-        assert_eq!(result, vec![
-            Token::Number(0x00090000),
-            Token::Number(0x000900a7),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                Token::Number(0x00090000),
+                Token::Number(0x000900a7),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -775,10 +978,10 @@ mod tests {
     #[test]
     fn command_line_variables() {
         let result = toks("$COMMAND_LINE_OBJECTS");
-        assert_eq!(result, vec![
-            Token::Variable("$COMMAND_LINE_OBJECTS".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            result,
+            vec![Token::Variable("$COMMAND_LINE_OBJECTS".into()), Token::Eof,]
+        );
     }
 
     #[test]
@@ -807,7 +1010,10 @@ mod tests {
         let result = tokenize("#include \"foo.h\"\n", &defs);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("#include"), "error should mention #include: {msg}");
+        assert!(
+            msg.contains("#include"),
+            "error should mention #include: {msg}"
+        );
     }
 
     #[test]

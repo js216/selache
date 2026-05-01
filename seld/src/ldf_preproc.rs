@@ -51,12 +51,7 @@ impl Preproc {
     /// `file_dir` is the directory that contains the source, used for
     /// resolving relative `#include "..."` directives. `display_name` is
     /// used in diagnostics.
-    pub fn preprocess(
-        &mut self,
-        src: &str,
-        file_dir: &Path,
-        display_name: &str,
-    ) -> Result<String> {
+    pub fn preprocess(&mut self, src: &str, file_dir: &Path, display_name: &str) -> Result<String> {
         let mut out = String::new();
         self.preprocess_inner(src, file_dir, display_name, &mut out, 0)?;
         Ok(out)
@@ -101,9 +96,7 @@ impl Preproc {
                             continue;
                         }
                         let inc_path = parse_include_arg(arg).ok_or_else(|| {
-                            Error::Parse(format!(
-                                "{display_name}:{line_no}: malformed #include"
-                            ))
+                            Error::Parse(format!("{display_name}:{line_no}: malformed #include"))
                         })?;
                         let resolved = self.resolve_include(&inc_path, file_dir)?;
                         let inc_src = std::fs::read_to_string(&resolved).map_err(|e| {
@@ -117,13 +110,7 @@ impl Preproc {
                             .map(|p| p.to_path_buf())
                             .unwrap_or_else(|| PathBuf::from("."));
                         let inc_display = resolved.display().to_string();
-                        self.preprocess_inner(
-                            &inc_src,
-                            &inc_dir,
-                            &inc_display,
-                            out,
-                            depth + 1,
-                        )?;
+                        self.preprocess_inner(&inc_src, &inc_dir, &inc_display, out, depth + 1)?;
                         out.push('\n');
                     }
                     "define" => {
@@ -161,17 +148,15 @@ impl Preproc {
                     }
                     "elif" => {
                         let top = cond.last_mut().ok_or_else(|| {
-                            Error::Parse(format!(
-                                "{display_name}:{line_no}: #elif without #if"
-                            ))
+                            Error::Parse(format!("{display_name}:{line_no}: #elif without #if"))
                         })?;
                         if top.2 {
                             return Err(Error::Parse(format!(
                                 "{display_name}:{line_no}: #elif after #else"
                             )));
                         }
-                        let parent_active = cond.len() < 2
-                            || cond[..cond.len() - 1].iter().all(|(e, _, _)| *e);
+                        let parent_active =
+                            cond.len() < 2 || cond[..cond.len() - 1].iter().all(|(e, _, _)| *e);
                         // Re-borrow after parent_active computation.
                         let top = cond.last_mut().unwrap();
                         if top.1 {
@@ -185,17 +170,15 @@ impl Preproc {
                     }
                     "else" => {
                         let top = cond.last_mut().ok_or_else(|| {
-                            Error::Parse(format!(
-                                "{display_name}:{line_no}: #else without #if"
-                            ))
+                            Error::Parse(format!("{display_name}:{line_no}: #else without #if"))
                         })?;
                         if top.2 {
                             return Err(Error::Parse(format!(
                                 "{display_name}:{line_no}: duplicate #else"
                             )));
                         }
-                        let parent_active = cond.len() < 2
-                            || cond[..cond.len() - 1].iter().all(|(e, _, _)| *e);
+                        let parent_active =
+                            cond.len() < 2 || cond[..cond.len() - 1].iter().all(|(e, _, _)| *e);
                         let top = cond.last_mut().unwrap();
                         top.2 = true;
                         if top.1 {
@@ -563,7 +546,11 @@ impl<'a> ExprEval<'a> {
         self.skip_ws();
         if self.match_str("!") {
             let v = self.parse_unary();
-            if v == 0 { 1 } else { 0 }
+            if v == 0 {
+                1
+            } else {
+                0
+            }
         } else if self.match_str("-") {
             -self.parse_unary()
         } else if self.match_str("+") {
@@ -591,7 +578,11 @@ impl<'a> ExprEval<'a> {
             if had_paren {
                 let _ = self.match_str(")");
             }
-            return if self.defines.contains_key(&name) { 1 } else { 0 };
+            return if self.defines.contains_key(&name) {
+                1
+            } else {
+                0
+            };
         }
         // Numeric literal.
         if let Some(c) = self.peek() {
@@ -950,9 +941,7 @@ mod tests {
 
     #[test]
     fn define_function_with_paste() {
-        let out = pp(
-            "#define RT(n) lib ## n ## .dlb\nRT(cc)\n",
-        );
+        let out = pp("#define RT(n) lib ## n ## .dlb\nRT(cc)\n");
         // The expansion should contain libcc.dlb
         assert!(out.contains("libcc.dlb"), "got: {out}");
     }

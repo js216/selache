@@ -162,11 +162,19 @@ fn compact_isa_output(s: &str) -> String {
         } else if chars[i] == '=' && i + 1 < chars.len() && chars[i + 1] == ' ' {
             result.push('=');
             i += 2; // Skip = and space after
-        } else if chars[i] == ' ' && i + 1 < chars.len() && chars[i + 1] == '*' && i + 2 < chars.len() && chars[i + 2] == ' ' {
+        } else if chars[i] == ' '
+            && i + 1 < chars.len()
+            && chars[i + 1] == '*'
+            && i + 2 < chars.len()
+            && chars[i + 2] == ' '
+        {
             // " * " → compact to "*"
             result.push('*');
             i += 3;
-        } else if chars[i] == ' ' && i + 1 < chars.len() && (chars[i + 1] == '+' || chars[i + 1] == '-') {
+        } else if chars[i] == ' '
+            && i + 1 < chars.len()
+            && (chars[i + 1] == '+' || chars[i + 1] == '-')
+        {
             // Check if this is an operator (not a negative number)
             if i > 0 && i + 2 < chars.len() && chars[i + 2] == ' ' {
                 // " + " or " - " → compact to operator without spaces
@@ -182,9 +190,7 @@ fn compact_isa_output(s: &str) -> String {
         }
     }
     // Ensure "dm(" and "pm(" have a space: "dm (" and "pm ("
-    let mut result = result
-        .replace("dm(", "dm (")
-        .replace("pm(", "pm (");
+    let mut result = result.replace("dm(", "dm (").replace("pm(", "pm (");
     // Remap ISA ureg names to VISA equivalents:
     // ISA 0x64=PCSTKP -> VISA PCSTK (but don't break existing "pcstk")
     // ISA 0x72=FLAGS -> VISA MODE1 (standalone word only, not flag0_in etc.)
@@ -203,10 +209,8 @@ fn visa_replace_ureg(s: &mut String, old: &str, new: &str) {
         let abs_pos = start + pos;
         let end_pos = abs_pos + old.len();
         // Check boundaries: must not be preceded or followed by alphanumeric/underscore
-        let before_ok = abs_pos == 0
-            || !s.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
-        let after_ok = end_pos >= s.len()
-            || !s.as_bytes()[end_pos].is_ascii_alphanumeric();
+        let before_ok = abs_pos == 0 || !s.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
+        let after_ok = end_pos >= s.len() || !s.as_bytes()[end_pos].is_ascii_alphanumeric();
         if before_ok && after_ok {
             s.replace_range(abs_pos..end_pos, new);
             start = abs_pos + new.len();
@@ -312,7 +316,11 @@ fn visa_width(parcel1: u16, parcel2: u16) -> InstrWidth {
             // Type 3: has 3a (48), 3b (32), 3d (48) variants
             // sub5=11001: bit7=1→32, bit7=0→48
             if sub5 == 0b11001 {
-                if bit7 == 1 { InstrWidth::W32 } else { InstrWidth::W48 }
+                if bit7 == 1 {
+                    InstrWidth::W32
+                } else {
+                    InstrWidth::W48
+                }
             } else if parcel2 & 0x3F >= 0x38 {
                 InstrWidth::W32
             } else {
@@ -322,7 +330,11 @@ fn visa_width(parcel1: u16, parcel2: u16) -> InstrWidth {
         0b011 => {
             // Types 4, 5: sub5=01010 bit0=0→32, bit0=1→48
             if sub5 == 0b01010 {
-                if parcel1 & 1 == 0 { InstrWidth::W32 } else { InstrWidth::W48 }
+                if parcel1 & 1 == 0 {
+                    InstrWidth::W32
+                } else {
+                    InstrWidth::W48
+                }
             } else if parcel2 & 0x3F >= 0x38 {
                 InstrWidth::W32
             } else {
@@ -432,7 +444,7 @@ fn decode_type3c(parcel: u16) -> String {
     //
     // Note: dreg encoding packs 4 bits across bits[6:3] in the original
     // Note: dreg encoding packs 4 bits across non-contiguous fields.
-    // 
+    //
 
     // Bit layout:
     //   bits[11:9] = i[2:0] (index register)
@@ -534,7 +546,11 @@ fn decode_32_compute(field: u32) -> String {
 fn decode_32_alu(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
     let fp = opcode & 0x80 != 0;
     let r = |i: u32| -> String {
-        if fp { format!("f{i}") } else { format!("r{i}") }
+        if fp {
+            format!("f{i}")
+        } else {
+            format!("r{i}")
+        }
     };
 
     match opcode {
@@ -752,7 +768,7 @@ fn decode_32_type3b(p1: u16, p2: u16) -> String {
     let i_field = (p1 >> 9) & 0xF;
     let m_offset = (p1 >> 6) & 3;
     let cond = (p1 >> 1) & 0x1F;
-    let d = (p2 >> 15) & 1;          // 0=read, 1=write
+    let d = (p2 >> 15) & 1; // 0=read, 1=write
     let sw_flag = (p2 >> 14) & 1;
     let ureg_code = ((p2 >> 7) & 0x7F) as u32;
     let width_bits = p2 & 3;
@@ -767,7 +783,11 @@ fn decode_32_type3b(p1: u16, p2: u16) -> String {
 
     // Access width suffix (Type 3b): sw_flag=1 → short-word, sw_flag=0 → byte-word
     let suffix = if width_bits == 0 {
-        if sw_flag == 1 { "(sw)" } else { "(bw)" }
+        if sw_flag == 1 {
+            "(sw)"
+        } else {
+            "(bw)"
+        }
     } else {
         "" // normal word, no suffix
     };
@@ -844,10 +864,8 @@ fn decode_32_ureg_move(p1: u16, p2: u16) -> String {
     let sub5 = (p1 >> 8) & 0x1F;
     let cond = (p1 >> 1) & 0x1F;
     let src_group = sub5 & 7;
-    let src_idx = (((p1 >> 7) & 1) << 3)
-        | (((p1 >> 6) & 1) << 2)
-        | ((p1 & 1) << 1)
-        | ((p2 >> 15) & 1);
+    let src_idx =
+        (((p1 >> 7) & 1) << 3) | (((p1 >> 6) & 1) << 2) | ((p1 & 1) << 1) | ((p2 >> 15) & 1);
     let dst_ureg_code = ((p2 >> 7) & 0x7F) as u32;
 
     let src_ureg_code = (src_group << 4) as u32 | src_idx as u32;
@@ -887,7 +905,11 @@ fn decode_32_type4b(p1: u16, p2: u16) -> String {
     let width_bits = p2 & 3;
     let sw_bit = (p2 >> 2) & 1;
     let suffix = if width_bits == 0 {
-        if sw_bit == 1 { "(sw)" } else { "(bw)" }
+        if sw_bit == 1 {
+            "(sw)"
+        } else {
+            "(bw)"
+        }
     } else {
         ""
     };
@@ -948,7 +970,11 @@ fn decode_32_group4(p1: u16, p2: u16) -> String {
     if bit2 == 1 && ((p1 & 0x0F) == 0x04 || (p1 & 0x0F) == 0x08) {
         // Type 16b: dm(Ii,Mm)=imm16
         // M register encoding is uncertain; use approximate decode
-        let m_approx = if lw_flag == 1 { i_field } else { i_field.wrapping_add(2) & 7 };
+        let m_approx = if lw_flag == 1 {
+            i_field
+        } else {
+            i_field.wrapping_add(2) & 7
+        };
         let imm = p2;
         return format!("dm (i{i_field},m{m_approx})=0x{imm:x}");
     }
@@ -956,7 +982,11 @@ fn decode_32_group4(p1: u16, p2: u16) -> String {
     // Standard: ureg <-> dm(offset, Ii)
     let ureg_code = ((p2 >> 7) & 0x7F) as u32;
     let raw_off = (p2 & 0x7F) as i32;
-    let offset = if raw_off >= 64 { raw_off - 128 } else { raw_off };
+    let offset = if raw_off >= 64 {
+        raw_off - 128
+    } else {
+        raw_off
+    };
     let ur = ureg_name_lower(ureg_code);
 
     // Access width suffix
@@ -1085,16 +1115,16 @@ fn visa_ureg_group6(reg: u32) -> String {
         0x1 => "daddr".into(),
         0x2 => "pc".into(),
         0x3 => "pcstk".into(),
-        0x4 => "pcstk".into(),    // 0x64 -> pcstk
+        0x4 => "pcstk".into(), // 0x64 -> pcstk
         0x5 => "laddr".into(),
         0x6 => "laddr".into(),    // 0x66 -> laddr
         0x7 => "curlcntr".into(), // 0x67 -> curlcntr
         0x8 => "lcntr".into(),
-        0x9 => "emuclk".into(),   // 0x69 -> emuclk (via source encoding)
+        0x9 => "emuclk".into(), // 0x69 -> emuclk (via source encoding)
         0xA => "emuclk2".into(),
-        0xB => "px".into(),       // 0x6B -> px
+        0xB => "px".into(), // 0x6B -> px
         0xC => "px1".into(),
-        0xD => "px2".into(),      // 0x6D -> px2
+        0xD => "px2".into(), // 0x6D -> px2
         0xE => "px2".into(),
         _ => format!("ureg(0x{:02x})", 0x60 | reg),
     }
@@ -1108,7 +1138,7 @@ fn visa_ureg_group7(reg: u32) -> String {
     match reg {
         0x0 => "mode1".into(),
         0x1 => "mode2".into(),
-        0x2 => "mode1".into(),    // 0x72 -> mode1
+        0x2 => "mode1".into(), // 0x72 -> mode1
         0x3 => "mode2".into(),
         0x4 => "flags".into(),
         0x5 => "astatx".into(),

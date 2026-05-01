@@ -83,9 +83,8 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                     // Peek: if the next arg looks like a file that could be
                     // our input (ends in .s or .asm), don't consume it.
                     let next = &args[i + 1];
-                    let looks_like_input = next.ends_with(".s")
-                        || next.ends_with(".asm")
-                        || next.ends_with(".S");
+                    let looks_like_input =
+                        next.ends_with(".s") || next.ends_with(".asm") || next.ends_with(".S");
                     if !looks_like_input {
                         i += 1; // consume the value argument
                     }
@@ -201,8 +200,10 @@ mod tests {
     #[test]
     fn test_unknown_flags_ignored() {
         let opts = parse_args(&args(&[
-            "-si-revision", "any",
-            "-flags-link", "-e",
+            "-si-revision",
+            "any",
+            "-flags-link",
+            "-e",
             "test.s",
         ]))
         .unwrap();

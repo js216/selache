@@ -10,8 +10,7 @@ use crate::ldf_lex::{self, Spanned, Token};
 
 /// Parse an LDF source string into an AST.
 pub fn parse(src: &str, defines: &HashMap<String, String>) -> Result<Ldf> {
-    let tokens = ldf_lex::tokenize(src, defines)
-        .map_err(Error::Parse)?;
+    let tokens = ldf_lex::tokenize(src, defines).map_err(Error::Parse)?;
     let mut p = Parser { tokens, pos: 0 };
     p.parse_ldf()
 }
@@ -34,7 +33,11 @@ impl Parser {
     }
 
     fn advance(&mut self) -> &Token {
-        let tok = self.tokens.get(self.pos).map(|s| &s.tok).unwrap_or(&Token::Eof);
+        let tok = self
+            .tokens
+            .get(self.pos)
+            .map(|s| &s.tok)
+            .unwrap_or(&Token::Eof);
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -585,8 +588,8 @@ impl Parser {
 
     fn parse_processor(&mut self) -> Result<(Processor, Vec<ScriptAssignment>)> {
         self.expect_ident()?; // PROCESSOR
-        // Processor names can start with digits (e.g., 21569_CORE0) so we
-        // need to concatenate number and ident tokens.
+                              // Processor names can start with digits (e.g., 21569_CORE0) so we
+                              // need to concatenate number and ident tokens.
         let name = self.read_processor_name()?;
         if !matches!(self.peek(), Token::LBrace) {
             return Err(self.err("expected `{` after PROCESSOR name".into()));
@@ -1279,10 +1282,7 @@ impl Parser {
                     Ok(Expr::Ident(name))
                 }
             }
-            other => Err(self.err(format!(
-                "expected expression, got {}",
-                tok_name(&other)
-            ))),
+            other => Err(self.err(format!("expected expression, got {}", tok_name(&other)))),
         }
     }
 }

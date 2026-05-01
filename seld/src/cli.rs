@@ -184,9 +184,9 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                 if i >= args.len() {
                     return Err(Error::Usage("missing number after -Werror".into()));
                 }
-                let n: u32 = args[i].parse().map_err(|_| {
-                    Error::Usage(format!("invalid warning number: {}", args[i]))
-                })?;
+                let n: u32 = args[i]
+                    .parse()
+                    .map_err(|_| Error::Usage(format!("invalid warning number: {}", args[i])))?;
                 opts.error_warnings.push(n);
             }
             other => {
@@ -220,7 +220,13 @@ mod tests {
     #[test]
     fn basic_parse() {
         let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-T", "app.ldf", "-o", "out.dxe", "main.doj",
+            "-proc",
+            "ADSP-21569",
+            "-T",
+            "app.ldf",
+            "-o",
+            "out.dxe",
+            "main.doj",
         ]))
         .unwrap();
         assert_eq!(opts.processor.as_deref(), Some("ADSP-21569"));
@@ -251,10 +257,7 @@ mod tests {
 
     #[test]
     fn lib_and_include_paths() {
-        let opts = parse_args(&args(&[
-            "-L", "/path/a", "-L", "/path/b", "-I", "/inc",
-        ]))
-        .unwrap();
+        let opts = parse_args(&args(&["-L", "/path/a", "-L", "/path/b", "-I", "/inc"])).unwrap();
         assert_eq!(opts.lib_paths, vec!["/path/a", "/path/b"]);
         assert_eq!(opts.include_paths, vec!["/inc"]);
     }

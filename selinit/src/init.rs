@@ -85,9 +85,9 @@ pub fn collect_sections(data: &[u8], opts: &Options) -> Result<Vec<SectionData>>
                 let off = shdr.sh_offset as usize;
                 let sz = shdr.sh_size as usize;
                 if off + sz > data.len() {
-                    return Err(Error::Shared(selelf::error::Error::InvalidElf(
-                        format!("section {name} data out of bounds"),
-                    )));
+                    return Err(Error::Shared(selelf::error::Error::InvalidElf(format!(
+                        "section {name} data out of bounds"
+                    ))));
                 }
                 data[off..off + sz].to_vec()
             };
@@ -184,11 +184,7 @@ fn build_blocks(sections: &[SectionData]) -> Vec<InitBlock> {
             if word_count > 0 || section.is_nobits {
                 blocks.push(InitBlock {
                     addr: section.addr,
-                    word_count: if section.is_nobits {
-                        0
-                    } else {
-                        word_count
-                    },
+                    word_count: if section.is_nobits { 0 } else { word_count },
                     flags: 1,
                     data: Vec::new(),
                 });
@@ -536,8 +532,7 @@ mod tests {
         // Copy section contents
         out[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(&shstrtab);
         out[data_off..data_off + data_content.len()].copy_from_slice(data_content);
-        out[seg_init_off..seg_init_off + seg_init_data.len()]
-            .copy_from_slice(&seg_init_data);
+        out[seg_init_off..seg_init_off + seg_init_data.len()].copy_from_slice(&seg_init_data);
         out[strtab_off..strtab_off + strtab.len()].copy_from_slice(&strtab);
         out[symtab_off..symtab_off + symtab.len()].copy_from_slice(&symtab);
 
@@ -563,7 +558,7 @@ mod tests {
             shtab_off + 2 * 40,
             &ShdrFields {
                 sh_name: data_name_off as u32,
-                sh_type: 1, // SHT_PROGBITS
+                sh_type: 1,    // SHT_PROGBITS
                 sh_flags: 0x3, // SHF_WRITE | SHF_ALLOC
                 sh_offset: data_off as u32,
                 sh_size: data_content.len() as u32,
@@ -577,7 +572,7 @@ mod tests {
             shtab_off + 3 * 40,
             &ShdrFields {
                 sh_name: seg_init_name as u32,
-                sh_type: 1, // SHT_PROGBITS
+                sh_type: 1,    // SHT_PROGBITS
                 sh_flags: 0x2, // SHF_ALLOC
                 sh_offset: seg_init_off as u32,
                 sh_size: seg_init_data.len() as u32,
@@ -614,10 +609,7 @@ mod tests {
             },
         );
         // Set sh_entsize for symtab
-        write_u32_le(
-            &mut out[shtab_off + 5 * 40 + 36..],
-            sym_entry_size as u32,
-        );
+        write_u32_le(&mut out[shtab_off + 5 * 40 + 36..], sym_entry_size as u32);
 
         out
     }
@@ -726,7 +718,10 @@ mod tests {
         // Should have: block_count(4) + addr(4) + word_count(4) + flags(4) + data(8)
         assert_eq!(stream.len(), 4 + 4 + 4 + 4 + 8);
         // Block count = 1
-        assert_eq!(u32::from_le_bytes([stream[0], stream[1], stream[2], stream[3]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([stream[0], stream[1], stream[2], stream[3]]),
+            1
+        );
         // Addr = 0x10000
         assert_eq!(
             u32::from_le_bytes([stream[4], stream[5], stream[6], stream[7]]),
@@ -760,7 +755,10 @@ mod tests {
         // All zeros => single zero-fill block with no data payload
         assert_eq!(stream.len(), 4 + 4 + 4 + 4);
         // Block count = 1
-        assert_eq!(u32::from_le_bytes([stream[0], stream[1], stream[2], stream[3]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([stream[0], stream[1], stream[2], stream[3]]),
+            1
+        );
         // Flags = 1 (zero-fill)
         assert_eq!(
             u32::from_le_bytes([stream[12], stream[13], stream[14], stream[15]]),

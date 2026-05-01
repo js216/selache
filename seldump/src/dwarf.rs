@@ -472,9 +472,9 @@ fn form_value_size(
             let len = endian.read_u32(&data[pos..]) as usize;
             Some(4 + len)
         }
-        0x05 => Some(2),            // DW_FORM_data2
-        0x06 => Some(4),            // DW_FORM_data4
-        0x07 => Some(8),            // DW_FORM_data8
+        0x05 => Some(2), // DW_FORM_data2
+        0x06 => Some(4), // DW_FORM_data4
+        0x07 => Some(8), // DW_FORM_data8
         0x08 => {
             // DW_FORM_string: null-terminated
             let start = pos;
@@ -501,24 +501,24 @@ fn form_value_size(
             let len = data[pos] as usize;
             Some(1 + len)
         }
-        0x0b => Some(1),            // DW_FORM_data1
-        0x0c => Some(1),            // DW_FORM_flag
+        0x0b => Some(1), // DW_FORM_data1
+        0x0c => Some(1), // DW_FORM_flag
         0x0d => {
             // DW_FORM_sdata: SLEB128
             let (_, n) = decode_uleb128(data, pos); // same byte consumption
             Some(n)
         }
-        0x0e => Some(4),            // DW_FORM_strp (offset into .debug_str)
+        0x0e => Some(4), // DW_FORM_strp (offset into .debug_str)
         0x0f => {
             // DW_FORM_udata: ULEB128
             let (_, n) = decode_uleb128(data, pos);
             Some(n)
         }
         0x10 => Some(address_size as usize), // DW_FORM_ref_addr
-        0x11 => Some(1),            // DW_FORM_ref1
-        0x12 => Some(2),            // DW_FORM_ref2
-        0x13 => Some(4),            // DW_FORM_ref4
-        0x14 => Some(8),            // DW_FORM_ref8
+        0x11 => Some(1),                     // DW_FORM_ref1
+        0x12 => Some(2),                     // DW_FORM_ref2
+        0x13 => Some(4),                     // DW_FORM_ref4
+        0x14 => Some(8),                     // DW_FORM_ref8
         0x15 => {
             // DW_FORM_ref_udata: ULEB128
             let (_, n) = decode_uleb128(data, pos);
@@ -606,7 +606,11 @@ fn format_attr_value(
                 return "???".to_string();
             }
             let val = data[pos];
-            if val != 0 { "yes".to_string() } else { "no".to_string() }
+            if val != 0 {
+                "yes".to_string()
+            } else {
+                "no".to_string()
+            }
         }
         0x0f => {
             // DW_FORM_udata
@@ -677,9 +681,7 @@ fn format_attr_value(
             }
             s
         }
-        _ => {
-            "???".to_string()
-        }
+        _ => "???".to_string(),
     }
 }
 
@@ -689,12 +691,20 @@ fn format_known_constant(at: u64, val: u64, fallback: String) -> String {
         0x13 => {
             // DW_AT_language
             let name = dw_lang_name(val);
-            if name.is_empty() { fallback } else { name.to_string() }
+            if name.is_empty() {
+                fallback
+            } else {
+                name.to_string()
+            }
         }
         0x3e => {
             // DW_AT_encoding
             let name = dw_ate_name(val);
-            if name.is_empty() { fallback } else { name.to_string() }
+            if name.is_empty() {
+                fallback
+            } else {
+                name.to_string()
+            }
         }
         0x32 => {
             // DW_AT_accessibility
@@ -742,11 +752,7 @@ pub fn dump_debug_info(
         writeln!(w, "{:08x}: version = {version:#06x}", cu_offset + 4)?;
 
         let abbrev_offset = endian.read_u32(&data[cu_offset + 6..]);
-        writeln!(
-            w,
-            "{:08x}: offset = {abbrev_offset:#010x}",
-            cu_offset + 6
-        )?;
+        writeln!(w, "{:08x}: offset = {abbrev_offset:#010x}", cu_offset + 6)?;
 
         let address_size = data[cu_offset + 10];
         writeln!(
@@ -945,7 +951,10 @@ pub fn dump_debug_line(data: &[u8], endian: Endian, w: &mut dyn Write) -> io::Re
                 break;
             }
             let dir = read_cstring(data, pos);
-            writeln!(w, "{pos:08x}: included_directories[{dir_idx:#x}] = \"{dir}\"")?;
+            writeln!(
+                w,
+                "{pos:08x}: included_directories[{dir_idx:#x}] = \"{dir}\""
+            )?;
             pos += dir.len() + 1;
             dir_idx += 1;
         }
@@ -1157,10 +1166,7 @@ mod tests {
         assert!(s.contains("0x1 {"), "output: {s}");
         assert!(s.contains("DW_TAG_compile_unit"), "output: {s}");
         assert!(s.contains("DW_CHILDREN_yes"), "output: {s}");
-        assert!(
-            s.contains("{ DW_AT_name, DW_FORM_string }"),
-            "output: {s}"
-        );
+        assert!(s.contains("{ DW_AT_name, DW_FORM_string }"), "output: {s}");
         assert!(
             s.contains("{ DW_AT_language, DW_FORM_data1 }"),
             "output: {s}"
@@ -1303,10 +1309,7 @@ mod tests {
             "output: {s}"
         );
         assert!(s.contains("opcode_base ="), "output: {s}");
-        assert!(
-            s.contains("included_directories[0x1]"),
-            "output: {s}"
-        );
+        assert!(s.contains("included_directories[0x1]"), "output: {s}");
         assert!(s.contains("..\\src\\"), "output: {s}");
         assert!(s.contains("file_names[0x1]"), "output: {s}");
         assert!(s.contains("test.c"), "output: {s}");
@@ -1377,16 +1380,9 @@ mod tests {
     fn test_try_dump_unknown_section() {
         let sections = [];
         let mut out = Vec::new();
-        let handled = try_dump_debug_section(
-            ".text",
-            &[],
-            &sections,
-            &[],
-            &[],
-            Endian::Little,
-            &mut out,
-        )
-        .unwrap();
+        let handled =
+            try_dump_debug_section(".text", &[], &sections, &[], &[], Endian::Little, &mut out)
+                .unwrap();
         assert!(!handled);
     }
 

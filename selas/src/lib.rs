@@ -63,11 +63,7 @@ pub fn run(opts: &cli::Options) -> error::Result<()> {
 
     // Read and preprocess the source
     let src = std::fs::read_to_string(&opts.input)?;
-    let mut pp = preproc::Preprocessor::new(
-        opts.proc.as_deref(),
-        &include_dirs,
-        &opts.defines,
-    );
+    let mut pp = preproc::Preprocessor::new(opts.proc.as_deref(), &include_dirs, &opts.defines);
     let processed = pp.process(&src, &opts.input)?;
 
     if opts.preprocess_only {
@@ -79,7 +75,9 @@ pub fn run(opts: &cli::Options) -> error::Result<()> {
         return Ok(());
     }
 
-    let is_visa = opts.proc.as_deref()
+    let is_visa = opts
+        .proc
+        .as_deref()
         .is_some_and(|p| p.eq_ignore_ascii_case("ADSP-21569"));
     let bytes = assemble::assemble_source(&processed, is_visa)?;
     std::fs::write(&opts.output, bytes)?;

@@ -98,9 +98,7 @@ pub fn read(data: &[u8]) -> Result<Archive> {
         }
         let content = &data[content_start..content_end];
 
-        let name_str = std::str::from_utf8(raw_name)
-            .unwrap_or("")
-            .trim_end();
+        let name_str = std::str::from_utf8(raw_name).unwrap_or("").trim_end();
 
         if name_str == "/" {
             // Symbol table. Capture the raw bytes so we can parse it

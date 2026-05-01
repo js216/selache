@@ -84,7 +84,11 @@ impl Block {
     pub fn to_bytes(&self) -> Vec<u8> {
         let (byte0, byte1) = encode_bflag(self.flags, self.bcode);
         let is_fill = self.flags & BFLAG_FILL != 0;
-        let byte_count = if is_fill { self.fill_count } else { self.data.len() as u32 };
+        let byte_count = if is_fill {
+            self.fill_count
+        } else {
+            self.data.len() as u32
+        };
         let pad = if is_fill { 0 } else { self.padding() };
 
         let mut hdr = [0u8; 16];
@@ -146,7 +150,11 @@ fn convert_nw_to_boot(raw: &[u8]) -> Vec<u8> {
     for w in 0..num_words {
         let base = w * 5;
         let b = |i: usize| {
-            if base + i < raw.len() { raw[base + i] } else { 0 }
+            if base + i < raw.len() {
+                raw[base + i]
+            } else {
+                0
+            }
         };
         out.push(b(3));
         out.push(b(2));
@@ -255,9 +263,7 @@ fn compress_zero_runs(
                     if let Some(ff) = fixed_fill {
                         if let Some(aligned) = try_fixed_fill(rs, j, ff) {
                             if aligned > i {
-                                segs.push(Segment::Data(
-                                    data_part[i..aligned].to_vec(),
-                                ));
+                                segs.push(Segment::Data(data_part[i..aligned].to_vec()));
                             }
                             segs.push(Segment::Fill(ff as u32));
                             i = aligned + ff;
@@ -283,16 +289,12 @@ fn compress_zero_runs(
                 if let Some(ff) = fixed_fill {
                     if let Some(aligned) = try_fixed_fill(rs, run_end, ff) {
                         if aligned > i {
-                            segs.push(Segment::Data(
-                                data_part[i..aligned].to_vec(),
-                            ));
+                            segs.push(Segment::Data(data_part[i..aligned].to_vec()));
                         }
                         segs.push(Segment::Fill(ff as u32));
                         i = aligned + ff;
                         if i < run_end {
-                            segs.push(Segment::Data(
-                                data_part[i..run_end].to_vec(),
-                            ));
+                            segs.push(Segment::Data(data_part[i..run_end].to_vec()));
                         }
                         break;
                     }
@@ -462,9 +464,7 @@ fn convert_to_boot(raw: &[u8], width: WordWidth) -> Vec<u8> {
             pad_to_4(&mut d);
             d
         }
-        WordWidth::NormalWord => {
-            convert_nw_to_boot(raw)
-        }
+        WordWidth::NormalWord => convert_nw_to_boot(raw),
     }
 }
 
@@ -537,9 +537,7 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
     for i in 0..shnum {
         let off = shoff + i * shentsz;
         if off + shentsz > elf_data.len() {
-            return Err(Error::InvalidElf(
-                "section header out of bounds".into(),
-            ));
+            return Err(Error::InvalidElf("section header out of bounds".into()));
         }
         let shdr = elf::parse_section_header(&elf_data[off..], endian);
 
@@ -559,9 +557,7 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
         let data_off = shdr.sh_offset as usize;
         let data_sz = shdr.sh_size as usize;
         if data_off + data_sz > elf_data.len() {
-            return Err(Error::InvalidElf(
-                "section data out of bounds".into(),
-            ));
+            return Err(Error::InvalidElf("section data out of bounds".into()));
         }
 
         let raw = elf_data[data_off..data_off + data_sz].to_vec();
@@ -635,8 +631,6 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
             data: Vec::new(),
             argument: 0,
             fill_count: 0,
-
-
         }]);
     }
 
@@ -663,8 +657,7 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
         // For MBS+NoFill mode, compute segments using fill-mode logic
         // so we can preserve the default-mode block boundaries that
         // the MBS split layout depends on.
-        let compute_with_fill =
-            (use_fill || opts.max_block_size.is_some()) && sec.compressible;
+        let compute_with_fill = (use_fill || opts.max_block_size.is_some()) && sec.compressible;
         let mut segments = if compute_with_fill {
             compress_zero_runs(&sec.raw, fixed, min_fill, step, base_mod4)
         } else {
@@ -751,9 +744,7 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
                                     data_blocks.push(Block {
                                         flags: 0,
                                         bcode,
-                                        target_addr: block_addr
-                                            + ext_start as u32
-                                            + eoff as u32,
+                                        target_addr: block_addr + ext_start as u32 + eoff as u32,
                                         data: ext_data[eoff..eend].to_vec(),
                                         argument: 0,
                                         fill_count: 0,
@@ -837,12 +828,11 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
                         // by -2 and extended by +4 bytes (2 overlap
                         // at start, 2 past natural end).  Larger
                         // post-merge fills are not shifted.
-                        let (shift, extra) =
-                            if prev_was_merged && (count as usize) < 3000 {
-                                (2u32, 4usize)
-                            } else {
-                                (0, 0)
-                            };
+                        let (shift, extra) = if prev_was_merged && (count as usize) < 3000 {
+                            (2u32, 4usize)
+                        } else {
+                            (0, 0)
+                        };
                         let zero_raw = vec![0u8; count as usize + extra];
                         let boot_data = convert_to_boot(&zero_raw, sec.width);
                         let block_addr = sec.addr + sec_offset - shift;
@@ -911,8 +901,6 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
             data: Vec::new(),
             argument: 0x10,
             fill_count: 0,
-
-
         });
 
         // Block 1: INIT block, addr = CRC control register, arg = polynomial.
@@ -923,8 +911,6 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
             data: Vec::new(),
             argument: opts.crc32_polynomial,
             fill_count: 0,
-
-
         });
 
         // FIRST marker (same as non-CRC case).
@@ -1008,8 +994,6 @@ mod tests {
             data: Vec::new(),
             argument: 0x30,
             fill_count: 0,
-
-
         };
         let bytes = block.to_bytes();
 
@@ -1035,8 +1019,6 @@ mod tests {
             data: vec![0xAA; 32],
             argument: 0,
             fill_count: 0,
-
-
         };
         let bytes = block.to_bytes();
         assert_eq!(bytes.len(), 16 + 32);
@@ -1055,8 +1037,6 @@ mod tests {
             data: Vec::new(),
             argument: 0,
             fill_count: 0,
-
-
         };
         let bytes = block.to_bytes();
         let addr = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
@@ -1106,7 +1086,7 @@ mod tests {
         elf[18..20].copy_from_slice(&0x85u16.to_le_bytes()); // EM_SHARC
         elf[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
         elf[24..28].copy_from_slice(&entry.to_le_bytes()); // e_entry
-        // e_phoff = 0 (no program headers needed for section-based loading)
+                                                           // e_phoff = 0 (no program headers needed for section-based loading)
         elf[32..36].copy_from_slice(&(shdr_off as u32).to_le_bytes()); // e_shoff
         elf[40..42].copy_from_slice(&(ehdr_size as u16).to_le_bytes()); // e_ehsize
         elf[42..44].copy_from_slice(&0u16.to_le_bytes()); // e_phentsize
@@ -1337,8 +1317,6 @@ mod tests {
             data: vec![0xBB; 13],
             argument: 0,
             fill_count: 0,
-
-
         };
         let bytes = block.to_bytes();
         // Total length must be a multiple of 4 (16-byte header + 13 data + 3 pad = 32).

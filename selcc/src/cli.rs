@@ -155,13 +155,23 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             s if s.starts_with('-') => {
                 // Accept but ignore unrecognized switches for now,
                 // consuming an argument if the switch is known to take one.
-                if matches!(s, "-l" | "-R" | "-Map"
-                    | "-flags-compiler" | "-flags-asm" | "-flags-link"
-                    | "-flags-mem" | "-flags-pp"
-                    | "-Werror" | "-Wsuppress" | "-Wremarks"
-                    | "-section-id" | "-overlay-group"
-                    | "-pgo-session" | "-misra-suppress-advisory")
-                {
+                if matches!(
+                    s,
+                    "-l" | "-R"
+                        | "-Map"
+                        | "-flags-compiler"
+                        | "-flags-asm"
+                        | "-flags-link"
+                        | "-flags-mem"
+                        | "-flags-pp"
+                        | "-Werror"
+                        | "-Wsuppress"
+                        | "-Wremarks"
+                        | "-section-id"
+                        | "-overlay-group"
+                        | "-pgo-session"
+                        | "-misra-suppress-advisory"
+                ) {
                     i += 1;
                 }
             }

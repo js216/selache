@@ -85,11 +85,7 @@ fn test_section_header_dump() {
 
 #[test]
 fn test_symbol_table_dump() {
-    let data = testutil::make_elf_object(
-        0x85,
-        ELFDATA2LSB,
-        &[("_main", true), ("_helper", true)],
-    );
+    let data = testutil::make_elf_object(0x85, ELFDATA2LSB, &[("_main", true), ("_helper", true)]);
     let path = write_temp_file(&data, "test_sym.doj");
     let output = Command::new(seldump_bin())
         .args(["-n", ".symtab", path.to_str().unwrap()])
@@ -275,10 +271,7 @@ fn test_section_index_range() {
 
 #[test]
 fn test_version_flag() {
-    let output = Command::new(seldump_bin())
-        .args(["-v"])
-        .output()
-        .unwrap();
+    let output = Command::new(seldump_bin()).args(["-v"]).output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     // -v doesn't require a file
     assert!(stdout.contains("seldump version 0.1.0"));
@@ -298,10 +291,7 @@ fn test_help_flag() {
 
 #[test]
 fn test_no_file_error() {
-    let output = Command::new(seldump_bin())
-        .args(["-fh"])
-        .output()
-        .unwrap();
+    let output = Command::new(seldump_bin()).args(["-fh"]).output().unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("no object file"));

@@ -17,9 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::mach::MachInstr;
 use crate::target;
 
-use selinstr::encode::{
-    AluOp, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, ShiftOp,
-};
+use selinstr::encode::{AluOp, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, ShiftOp};
 
 /// Rewrite virtual register references in a list of machine instructions,
 /// mapping them to physical registers R0-R15.
@@ -54,8 +52,7 @@ pub fn allocate(
     let mut out = Vec::new();
     let mut index_map = Vec::with_capacity(instrs.len());
 
-    let label_indices: BTreeSet<usize> =
-        label_positions.iter().map(|&(_, idx)| idx).collect();
+    let label_indices: BTreeSet<usize> = label_positions.iter().map(|&(_, idx)| idx).collect();
 
     for (i, mi) in instrs.iter().enumerate() {
         // Fall-through predecessor flush: at a label landing position,
@@ -261,7 +258,9 @@ impl Allocator {
     /// use of the vreg resolves to the new location via `get_phys` →
     /// either the new physical mapping or the `emit_reload` path.
     fn spill_caller_saved(&mut self, spill: &mut Vec<MachInstr>) {
-        let to_handle: Vec<(u16, u8)> = self.vreg_to_phys.iter()
+        let to_handle: Vec<(u16, u8)> = self
+            .vreg_to_phys
+            .iter()
             .filter(|(&vreg, &phys)| {
                 target::CALLER_SAVED.contains(&phys)
                     && vreg != target::RETURN_REG_VREG
@@ -331,7 +330,9 @@ impl Allocator {
     /// vregs) are skipped: they have no spill slot and the ABI keeps
     /// their register binding live across the whole function.
     fn flush_all_vregs(&mut self, spill: &mut Vec<MachInstr>) {
-        let to_flush: Vec<(u16, u8)> = self.vreg_to_phys.iter()
+        let to_flush: Vec<(u16, u8)> = self
+            .vreg_to_phys
+            .iter()
             .filter(|(&vreg, _)| !self.permanent_vregs.contains(&vreg))
             .map(|(&vreg, &phys)| (vreg, phys))
             .collect();
@@ -368,10 +369,7 @@ impl Allocator {
     fn free_callee_saved(&self) -> Option<u8> {
         target::CALLEE_SAVED
             .iter()
-            .find(|&&phys| {
-                !self.phys_to_vreg.contains_key(&phys)
-                    && !self.pinned.contains(&phys)
-            })
+            .find(|&&phys| !self.phys_to_vreg.contains_key(&phys) && !self.pinned.contains(&phys))
             .copied()
     }
 
@@ -491,9 +489,7 @@ impl Allocator {
         loop {
             let candidate = target::CALLER_SAVED[self.next_evict as usize];
             self.next_evict = (self.next_evict + 1) % n_caller;
-            if !self.pinned.contains(&candidate)
-                && self.phys_to_vreg.contains_key(&candidate)
-            {
+            if !self.pinned.contains(&candidate) && self.phys_to_vreg.contains_key(&candidate) {
                 return candidate;
             }
             if self.next_evict == start {
@@ -563,8 +559,7 @@ impl Allocator {
                 lr,
                 compute,
             } => {
-                let new_compute = compute
-                    .map(|c| self.rewrite_compute(&c, &mut spill_pre));
+                let new_compute = compute.map(|c| self.rewrite_compute(&c, &mut spill_pre));
                 Instruction::Return {
                     interrupt,
                     cond,
@@ -574,14 +569,24 @@ impl Allocator {
                 }
             }
 
-            Instruction::Branch { call, cond, target, delayed } => {
+            Instruction::Branch {
+                call,
+                cond,
+                target,
+                delayed,
+            } => {
                 // Jump-source flush: a Branch ends the current basic
                 // block, so every live non-permanent vreg must be in
                 // its spill slot before control transfers. The
                 // matching label-landing flush in `allocate` handles
                 // the fall-through side of the merge.
                 self.flush_all_vregs(&mut spill_pre);
-                Instruction::Branch { call, cond, target, delayed }
+                Instruction::Branch {
+                    call,
+                    cond,
+                    target,
+                    delayed,
+                }
             }
 
             Instruction::ComputeLoadStore {
@@ -591,8 +596,7 @@ impl Allocator {
                 offset,
                 cond,
             } => {
-                let new_compute = compute
-                    .map(|c| self.rewrite_compute(&c, &mut spill_pre));
+                let new_compute = compute.map(|c| self.rewrite_compute(&c, &mut spill_pre));
                 let new_dreg = self.get_phys(dreg, &mut spill_pre);
                 Instruction::ComputeLoadStore {
                     compute: new_compute,
@@ -616,9 +620,7 @@ impl Allocator {
                 // callee's RFRAME restores the wrong frame pointer.
                 let is_fixed = |u: u16| {
                     u & target::UREG_FIXED_TAG != 0
-                        && ((u & 0x70) == 0x00
-                            || (u & 0x70) == 0x10
-                            || (u & 0x70) == 0x20)
+                        && ((u & 0x70) == 0x00 || (u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
                 // Indirect-call frame-link setup `R2 = I6`: the very
                 // next instruction will be `I6 = I7`, after which any
@@ -633,9 +635,8 @@ impl Allocator {
                 // frame I6 base. Direct CJUMP does not have this
                 // issue: hardware preserves I6 across the call, so
                 // its spill point at the CJUMP itself is fine.
-                let dest_is_r2 = is_fixed(dest)
-                    && (dest & 0x70) == 0x00
-                    && (dest & 0x0F) == target::ureg_r(2);
+                let dest_is_r2 =
+                    is_fixed(dest) && (dest & 0x70) == 0x00 && (dest & 0x0F) == target::ureg_r(2);
                 let src_is_frame = is_fixed(src)
                     && (src & 0x70) == 0x10
                     && (src & 0x0F) == (target::ureg_i(target::FRAME_PTR) & 0x0F);
@@ -655,7 +656,10 @@ impl Allocator {
                 } else {
                     target::ureg_r(self.get_phys(src, &mut spill_pre))
                 };
-                Instruction::URegMove { dest: new_dest, src: new_src }
+                Instruction::URegMove {
+                    dest: new_dest,
+                    src: new_src,
+                }
             }
 
             Instruction::CJump { .. } => {
@@ -711,14 +715,20 @@ impl Allocator {
             | Instruction::DoUntil { .. } => mi.instr,
 
             Instruction::UregDagMove {
-                pm, write, ureg, i_reg, m_reg, cond, compute, post_modify,
+                pm,
+                write,
+                ureg,
+                i_reg,
+                m_reg,
+                cond,
+                compute,
+                post_modify,
             } => {
                 // Tag-bit + I/M-group nibble identifies a fixed
                 // I/M/R-register encoding (R2 push for CJUMP delay
                 // slot, I12 reload for indirect return). Other ureg
                 // values are raw R-vreg ids.
-                let new_compute = compute
-                    .map(|c| self.rewrite_compute(&c, &mut spill_pre));
+                let new_compute = compute.map(|c| self.rewrite_compute(&c, &mut spill_pre));
                 let tag = ureg & target::UREG_FIXED_TAG != 0;
                 let group = ureg & 0x70;
                 // R-group fixed encoding is 0x00..0x0F (group 0), used
@@ -733,59 +743,85 @@ impl Allocator {
                     target::ureg_r(phys)
                 };
                 Instruction::UregDagMove {
-                    pm, write, ureg: new_ureg, i_reg, m_reg, cond,
-                    compute: new_compute, post_modify,
+                    pm,
+                    write,
+                    ureg: new_ureg,
+                    i_reg,
+                    m_reg,
+                    cond,
+                    compute: new_compute,
+                    post_modify,
                 }
             }
 
-            Instruction::UregAbsAccess { pm, write, ureg, addr } => {
+            Instruction::UregAbsAccess {
+                pm,
+                write,
+                ureg,
+                addr,
+            } => {
                 let is_fixed = |u: u16| {
-                    u & target::UREG_FIXED_TAG != 0
-                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
+                    u & target::UREG_FIXED_TAG != 0 && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
                 if is_fixed(ureg) {
                     Instruction::UregAbsAccess {
-                        pm, write,
+                        pm,
+                        write,
                         ureg: ureg & !target::UREG_FIXED_TAG,
                         addr,
                     }
                 } else {
                     let phys = self.get_phys(ureg, &mut spill_pre);
                     Instruction::UregAbsAccess {
-                        pm, write,
+                        pm,
+                        write,
                         ureg: target::ureg_r(phys),
                         addr,
                     }
                 }
             }
 
-            Instruction::UregMemAccess { pm, i_reg, write, lw, ureg, offset } => {
+            Instruction::UregMemAccess {
+                pm,
+                i_reg,
+                write,
+                lw,
+                ureg,
+                offset,
+            } => {
                 let is_fixed = |u: u16| {
-                    u & target::UREG_FIXED_TAG != 0
-                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
+                    u & target::UREG_FIXED_TAG != 0 && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
                 if is_fixed(ureg) {
                     Instruction::UregMemAccess {
-                        pm, i_reg, write, lw,
+                        pm,
+                        i_reg,
+                        write,
+                        lw,
                         ureg: ureg & !target::UREG_FIXED_TAG,
                         offset,
                     }
                 } else {
                     let phys = self.get_phys(ureg, &mut spill_pre);
                     Instruction::UregMemAccess {
-                        pm, i_reg, write, lw,
+                        pm,
+                        i_reg,
+                        write,
+                        lw,
                         ureg: target::ureg_r(phys),
                         offset,
                     }
                 }
             }
 
-            Instruction::UregTransfer { src_ureg, dst_ureg, compute } => {
-                let new_compute = compute
-                    .map(|c| self.rewrite_compute(&c, &mut spill_pre));
+            Instruction::UregTransfer {
+                src_ureg,
+                dst_ureg,
+                compute,
+            } => {
+                let new_compute = compute.map(|c| self.rewrite_compute(&c, &mut spill_pre));
                 let is_fixed = |u: u16| {
-                    u & target::UREG_FIXED_TAG != 0
-                        && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
+                    u & target::UREG_FIXED_TAG != 0 && ((u & 0x70) == 0x10 || (u & 0x70) == 0x20)
                 };
                 let new_src = if is_fixed(src_ureg) {
                     src_ureg & !target::UREG_FIXED_TAG
@@ -820,21 +856,13 @@ impl Allocator {
         match *op {
             ComputeOp::Alu(ref alu) => ComputeOp::Alu(self.rewrite_alu(alu, spill)),
             ComputeOp::Mul(ref mul) => ComputeOp::Mul(self.rewrite_mul(mul, spill)),
-            ComputeOp::Shift(ref shift) => {
-                ComputeOp::Shift(self.rewrite_shift(shift, spill))
-            }
-            ComputeOp::Falu(ref falu) => {
-                ComputeOp::Falu(self.rewrite_falu(falu, spill))
-            }
+            ComputeOp::Shift(ref shift) => ComputeOp::Shift(self.rewrite_shift(shift, spill)),
+            ComputeOp::Falu(ref falu) => ComputeOp::Falu(self.rewrite_falu(falu, spill)),
             ComputeOp::Multi(m) => ComputeOp::Multi(m),
         }
     }
 
-    fn rewrite_alu(
-        &mut self,
-        alu: &selinstr::encode::AluOp,
-        spill: &mut Vec<MachInstr>,
-    ) -> AluOp {
+    fn rewrite_alu(&mut self, alu: &selinstr::encode::AluOp, spill: &mut Vec<MachInstr>) -> AluOp {
         use selinstr::encode::AluOp::*;
         match *alu {
             Add { rn, rx, ry } => Add {
@@ -870,7 +898,8 @@ impl Allocator {
                     // r4 instead of the arg value.
                     let resident = self.phys_to_vreg.get(&dest_phys).copied();
                     if let Some(v) = resident {
-                        if v != rx && v != target::RETURN_REG_VREG
+                        if v != rx
+                            && v != target::RETURN_REG_VREG
                             && v != target::RETURN_REG_HI_VREG
                             && self.vreg_to_phys.get(&v).copied() == Some(dest_phys)
                         {
@@ -1057,26 +1086,46 @@ impl Allocator {
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
-            ReadMr0f { rn } => ReadMr0f { rn: self.get_phys(rn, spill) },
-            ReadMr1f { rn } => ReadMr1f { rn: self.get_phys(rn, spill) },
-            ReadMr2f { rn } => ReadMr2f { rn: self.get_phys(rn, spill) },
-            ReadMr0b { rn } => ReadMr0b { rn: self.get_phys(rn, spill) },
-            ReadMr1b { rn } => ReadMr1b { rn: self.get_phys(rn, spill) },
-            ReadMr2b { rn } => ReadMr2b { rn: self.get_phys(rn, spill) },
-            WriteMr0f { rn } => WriteMr0f { rn: self.get_phys(rn, spill) },
-            WriteMr1f { rn } => WriteMr1f { rn: self.get_phys(rn, spill) },
-            WriteMr2f { rn } => WriteMr2f { rn: self.get_phys(rn, spill) },
-            WriteMr0b { rn } => WriteMr0b { rn: self.get_phys(rn, spill) },
-            WriteMr1b { rn } => WriteMr1b { rn: self.get_phys(rn, spill) },
-            WriteMr2b { rn } => WriteMr2b { rn: self.get_phys(rn, spill) },
+            ReadMr0f { rn } => ReadMr0f {
+                rn: self.get_phys(rn, spill),
+            },
+            ReadMr1f { rn } => ReadMr1f {
+                rn: self.get_phys(rn, spill),
+            },
+            ReadMr2f { rn } => ReadMr2f {
+                rn: self.get_phys(rn, spill),
+            },
+            ReadMr0b { rn } => ReadMr0b {
+                rn: self.get_phys(rn, spill),
+            },
+            ReadMr1b { rn } => ReadMr1b {
+                rn: self.get_phys(rn, spill),
+            },
+            ReadMr2b { rn } => ReadMr2b {
+                rn: self.get_phys(rn, spill),
+            },
+            WriteMr0f { rn } => WriteMr0f {
+                rn: self.get_phys(rn, spill),
+            },
+            WriteMr1f { rn } => WriteMr1f {
+                rn: self.get_phys(rn, spill),
+            },
+            WriteMr2f { rn } => WriteMr2f {
+                rn: self.get_phys(rn, spill),
+            },
+            WriteMr0b { rn } => WriteMr0b {
+                rn: self.get_phys(rn, spill),
+            },
+            WriteMr1b { rn } => WriteMr1b {
+                rn: self.get_phys(rn, spill),
+            },
+            WriteMr2b { rn } => WriteMr2b {
+                rn: self.get_phys(rn, spill),
+            },
         }
     }
 
-    fn rewrite_falu(
-        &mut self,
-        falu: &FaluOp,
-        spill: &mut Vec<MachInstr>,
-    ) -> FaluOp {
+    fn rewrite_falu(&mut self, falu: &FaluOp, spill: &mut Vec<MachInstr>) -> FaluOp {
         match *falu {
             FaluOp::Add { rn, rx, ry } => FaluOp::Add {
                 rn: self.get_phys(rn, spill),
@@ -1322,8 +1371,12 @@ mod tests {
         let (out, spills, _) = allocate(&instrs, 0, false, &[]);
         assert_eq!(spills, 0);
         // Should still have a LoadImm and Return.
-        assert!(out.iter().any(|m| matches!(m.instr, Instruction::LoadImm { .. })));
-        assert!(out.iter().any(|m| matches!(m.instr, Instruction::Return { .. })));
+        assert!(out
+            .iter()
+            .any(|m| matches!(m.instr, Instruction::LoadImm { .. })));
+        assert!(out
+            .iter()
+            .any(|m| matches!(m.instr, Instruction::Return { .. })));
     }
 
     #[test]
@@ -1347,7 +1400,11 @@ mod tests {
             MachInstr {
                 instr: Instruction::Compute {
                     cond: target::COND_TRUE,
-                    compute: ComputeOp::Alu(AluOp::Add { rn: 2, rx: 0, ry: 1 }),
+                    compute: ComputeOp::Alu(AluOp::Add {
+                        rn: 2,
+                        rx: 0,
+                        ry: 1,
+                    }),
                 },
                 reloc: None,
             },

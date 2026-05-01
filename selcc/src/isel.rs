@@ -34,7 +34,8 @@ pub struct IselResult {
 /// the register allocator will rewrite them to valid physical registers.
 pub fn select(ir: &[IrOp]) -> IselResult {
     select_with_name(
-        ir, "anon",
+        ir,
+        "anon",
         &std::collections::HashSet::new(),
         &std::collections::HashMap::new(),
         &std::collections::HashSet::new(),
@@ -177,9 +178,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs, "___div32", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___div32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UDiv(dst, lhs, rhs) => {
@@ -190,9 +189,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs, "___udiv32", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___udiv32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::Mod(dst, lhs, rhs) => {
@@ -203,9 +200,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs, "___mod32", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___mod32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UMod(dst, lhs, rhs) => {
@@ -216,9 +211,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs, "___umod32", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___umod32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::BitAnd(dst, lhs, rhs) => {
@@ -441,9 +434,15 @@ pub fn select_with_name(
                 // execution with the callee's I6 still in place and
                 // the very next frame-relative access in the caller
                 // faults the core.
-                instrs.push(MachInstr { instr: Instruction::Rframe, reloc: None });
+                instrs.push(MachInstr {
+                    instr: Instruction::Rframe,
+                    reloc: None,
+                });
                 // Delay slot 2: NOP. Nothing useful to place here.
-                instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
+                instrs.push(MachInstr {
+                    instr: Instruction::Nop,
+                    reloc: None,
+                });
             }
 
             IrOp::LoadStructRetPtr(dst) => {
@@ -458,7 +457,11 @@ pub fn select_with_name(
                 ));
             }
 
-            IrOp::RetStruct { src_addr, dst_addr, num_words } => {
+            IrOp::RetStruct {
+                src_addr,
+                dst_addr,
+                num_words,
+            } => {
                 // Struct-by-value return. Three cases keyed on size:
                 //   nw == 1   -> R0 = mem[src_addr + 0]; return.
                 //   nw == 2   -> R0 = mem[src_addr + 0];
@@ -498,8 +501,8 @@ pub fn select_with_name(
                     // Copy the `num_words` words through that pointer
                     // into the caller's buffer, then set R0 = dst_addr
                     // per the ABI so the caller can chain-reuse it.
-                    let dst_vreg = dst_addr
-                        .expect("RetStruct nw > STRUCT_RET_MAX_REGS without dst_addr");
+                    let dst_vreg =
+                        dst_addr.expect("RetStruct nw > STRUCT_RET_MAX_REGS without dst_addr");
                     for w in 0..*num_words {
                         let byte_off = (w * 4) as i8;
                         // scratch vreg held in R0 transiently; the
@@ -552,8 +555,14 @@ pub fn select_with_name(
                     },
                     reloc: None,
                 });
-                instrs.push(MachInstr { instr: Instruction::Rframe, reloc: None });
-                instrs.push(MachInstr { instr: Instruction::Nop, reloc: None });
+                instrs.push(MachInstr {
+                    instr: Instruction::Rframe,
+                    reloc: None,
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::Nop,
+                    reloc: None,
+                });
             }
 
             IrOp::Call(dst, name, args) => {
@@ -589,8 +598,10 @@ pub fn select_with_name(
                     let reg_count = if is_complex_args {
                         0
                     } else {
-                        let named = variadic_named_counts.get(name)
-                            .copied().unwrap_or(args.len());
+                        let named = variadic_named_counts
+                            .get(name)
+                            .copied()
+                            .unwrap_or(args.len());
                         target::variadic_reg_named(named)
                     };
                     for (i, arg) in args.iter().enumerate().rev() {
@@ -616,7 +627,9 @@ pub fn select_with_name(
                         }
                         let phys = target::ARG_REGS[i];
                         instrs.push(MachInstr::compute_pass(
-                            0xC000u16 | phys as u16, *arg as u16));
+                            0xC000u16 | phys as u16,
+                            *arg as u16,
+                        ));
                     }
                 } else {
                     // Stack arguments (args ARG_REGS.len()+): push in
@@ -656,7 +669,10 @@ pub fn select_with_name(
                             break;
                         }
                         let phys = target::ARG_REGS[i];
-                        instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
+                        instrs.push(MachInstr::compute_pass(
+                            0xC000u16 | phys as u16,
+                            *arg as u16,
+                        ));
                     }
                 }
                 // CJUMP (DB) target: the SHARC+ C-ABI call. The two
@@ -783,7 +799,10 @@ pub fn select_with_name(
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
+                    instrs.push(MachInstr::compute_pass(
+                        0xC000u16 | phys as u16,
+                        *arg as u16,
+                    ));
                 }
                 // Move the function address (held in a data-register
                 // vreg) into I12. `URegMove` with the src tagged as a
@@ -860,10 +879,7 @@ pub fn select_with_name(
                 // instruction and (b) append `-1` to the symbol in the
                 // emitted text so the linker produces the right
                 // relocation addend.
-                let ret_label_name = format!(
-                    ".L_ret_{}_indirect_{}",
-                    func_name, call_site_counter
-                );
+                let ret_label_name = format!(".L_ret_{}_indirect_{}", func_name, call_site_counter);
                 call_site_counter += 1;
                 instrs.push(MachInstr {
                     instr: Instruction::ImmStore {
@@ -885,7 +901,12 @@ pub fn select_with_name(
                 ));
             }
 
-            IrOp::CallStruct { name, args, dst_addr, num_words } => {
+            IrOp::CallStruct {
+                name,
+                args,
+                dst_addr,
+                num_words,
+            } => {
                 // Struct-returning direct call. Three ABI branches,
                 // keyed on the returned size in words, mirror the
                 // callee-side split in `RetStruct`:
@@ -930,7 +951,10 @@ pub fn select_with_name(
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
+                    instrs.push(MachInstr::compute_pass(
+                        0xC000u16 | phys as u16,
+                        *arg as u16,
+                    ));
                 }
                 // Hidden ret-pointer in R1 for the large-struct path.
                 // Emitted AFTER the scalar arg moves so that a scalar
@@ -946,7 +970,10 @@ pub fn select_with_name(
                 }
                 // CJUMP to callee: identical to IrOp::Call.
                 instrs.push(MachInstr {
-                    instr: Instruction::CJump { addr: 0, delayed: true },
+                    instr: Instruction::CJump {
+                        addr: 0,
+                        delayed: true,
+                    },
                     reloc: Some(Reloc {
                         symbol: name.clone(),
                         kind: RelocKind::Addr24,
@@ -965,9 +992,8 @@ pub fn select_with_name(
                     },
                     reloc: None,
                 });
-                let ret_label_name = format!(
-                    ".L_ret_{}_{}_{}", func_name, name, call_site_counter,
-                );
+                let ret_label_name =
+                    format!(".L_ret_{}_{}_{}", func_name, name, call_site_counter,);
                 call_site_counter += 1;
                 instrs.push(MachInstr {
                     instr: Instruction::ImmStore {
@@ -1006,7 +1032,12 @@ pub fn select_with_name(
                 }
             }
 
-            IrOp::CallIndirectStruct { addr, args, dst_addr, num_words } => {
+            IrOp::CallIndirectStruct {
+                addr,
+                args,
+                dst_addr,
+                num_words,
+            } => {
                 // Indirect variant of CallStruct. Structurally mirrors
                 // IrOp::CallIndirect with the same ABI additions as
                 // `CallStruct` for the direct form. See those comments
@@ -1034,7 +1065,10 @@ pub fn select_with_name(
                         break;
                     }
                     let phys = target::ARG_REGS[i];
-                    instrs.push(MachInstr::compute_pass(0xC000u16 | phys as u16, *arg as u16));
+                    instrs.push(MachInstr::compute_pass(
+                        0xC000u16 | phys as u16,
+                        *arg as u16,
+                    ));
                 }
                 if is_hidden_ptr {
                     instrs.push(MachInstr::compute_pass(
@@ -1087,9 +1121,8 @@ pub fn select_with_name(
                     },
                     reloc: None,
                 });
-                let ret_label_name = format!(
-                    ".L_ret_{}_indirect_{}", func_name, call_site_counter,
-                );
+                let ret_label_name =
+                    format!(".L_ret_{}_indirect_{}", func_name, call_site_counter,);
                 call_site_counter += 1;
                 instrs.push(MachInstr {
                     instr: Instruction::ImmStore {
@@ -1168,7 +1201,13 @@ pub fn select_with_name(
                     );
                 } else {
                     // Indirect load through pointer in a data register.
-                    emit_indirect_access(&mut instrs, *base as u16, *dst as u16, *offset as i8, false);
+                    emit_indirect_access(
+                        &mut instrs,
+                        *base as u16,
+                        *dst as u16,
+                        *offset as i8,
+                        false,
+                    );
                 }
             }
 
@@ -1184,7 +1223,13 @@ pub fn select_with_name(
                     );
                 } else {
                     // Indirect store through pointer in a data register.
-                    emit_indirect_access(&mut instrs, *base as u16, *val as u16, *offset as i8, true);
+                    emit_indirect_access(
+                        &mut instrs,
+                        *base as u16,
+                        *val as u16,
+                        *offset as i8,
+                        true,
+                    );
                 }
             }
 
@@ -1466,7 +1511,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_b, ry: s_y }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_t,
+                            rx: s_b,
+                            ry: s_y,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1474,7 +1523,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Sub { rn: s_t, rx: s_two, ry: s_t }),
+                        compute: ComputeOp::Falu(FaluOp::Sub {
+                            rn: s_t,
+                            rx: s_two,
+                            ry: s_t,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1482,7 +1535,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_y, rx: s_y, ry: s_t }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_y,
+                            rx: s_y,
+                            ry: s_t,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1490,21 +1547,33 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_b, ry: s_y }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_t,
+                            rx: s_b,
+                            ry: s_y,
+                        }),
                     },
                     reloc: None,
                 });
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Sub { rn: s_t, rx: s_two, ry: s_t }),
+                        compute: ComputeOp::Falu(FaluOp::Sub {
+                            rn: s_t,
+                            rx: s_two,
+                            ry: s_t,
+                        }),
                     },
                     reloc: None,
                 });
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_y, rx: s_y, ry: s_t }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_y,
+                            rx: s_y,
+                            ry: s_t,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1514,7 +1583,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_a, rx: s_a, ry: s_y }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_a,
+                            rx: s_a,
+                            ry: s_y,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1524,7 +1597,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_b, ry: s_a }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_t,
+                            rx: s_b,
+                            ry: s_a,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1532,7 +1609,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Sub { rn: s_t, rx: s_a_save, ry: s_t }),
+                        compute: ComputeOp::Falu(FaluOp::Sub {
+                            rn: s_t,
+                            rx: s_a_save,
+                            ry: s_t,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1540,7 +1621,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Mul(MulOp::FMul { rn: s_t, rx: s_t, ry: s_y }),
+                        compute: ComputeOp::Mul(MulOp::FMul {
+                            rn: s_t,
+                            rx: s_t,
+                            ry: s_y,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1548,7 +1633,11 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Falu(FaluOp::Add { rn: s_a, rx: s_a, ry: s_t }),
+                        compute: ComputeOp::Falu(FaluOp::Add {
+                            rn: s_a,
+                            rx: s_a,
+                            ry: s_t,
+                        }),
                     },
                     reloc: None,
                 });
@@ -1722,7 +1811,10 @@ pub fn select_with_name(
                     instrs.push(MachInstr {
                         instr: Instruction::Modify {
                             i_reg: target::FRAME_PTR,
-                            value: frame_offset, width: MemWidth::Nw, bitrev: false, },
+                            value: frame_offset,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
                         reloc: None,
                     });
                     instrs.push(MachInstr {
@@ -1736,7 +1828,10 @@ pub fn select_with_name(
                     instrs.push(MachInstr {
                         instr: Instruction::Modify {
                             i_reg: target::FRAME_PTR,
-                            value: -frame_offset, width: MemWidth::Nw, bitrev: false, },
+                            value: -frame_offset,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
                         reloc: None,
                     });
                 }
@@ -1834,7 +1929,6 @@ pub fn select_with_name(
 
             // ---- 64-bit instruction selection ----
             // Each 64-bit vreg V occupies two physical registers: V (lo) and V+1 (hi).
-
             IrOp::LoadImm64(dst, val) => {
                 let lo = *dst as u16;
                 let hi = (*dst + 1) as u16;
@@ -1945,9 +2039,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_64_divmod(
-                    &mut instrs, "___div64", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_64_divmod(&mut instrs, "___div64", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UDiv64(dst, lhs, rhs) => {
@@ -1956,9 +2048,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_64_divmod(
-                    &mut instrs, "___udiv64", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_64_divmod(&mut instrs, "___udiv64", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::Mod64(dst, lhs, rhs) => {
@@ -1967,9 +2057,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_64_divmod(
-                    &mut instrs, "___mod64", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_64_divmod(&mut instrs, "___mod64", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UMod64(dst, lhs, rhs) => {
@@ -1978,9 +2066,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_64_divmod(
-                    &mut instrs, "___umod64", *dst, *lhs, *rhs, &mut ctx,
-                );
+                emit_runtime_call_64_divmod(&mut instrs, "___umod64", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::BitAnd64(dst, lhs, rhs) => {
@@ -1994,7 +2080,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::And {
-                            rn: dst_lo, rx: lhs_lo, ry: rhs_lo,
+                            rn: dst_lo,
+                            rx: lhs_lo,
+                            ry: rhs_lo,
                         }),
                     },
                     reloc: None,
@@ -2003,7 +2091,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::And {
-                            rn: dst_hi, rx: lhs_hi, ry: rhs_hi,
+                            rn: dst_hi,
+                            rx: lhs_hi,
+                            ry: rhs_hi,
                         }),
                     },
                     reloc: None,
@@ -2021,7 +2111,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Or {
-                            rn: dst_lo, rx: lhs_lo, ry: rhs_lo,
+                            rn: dst_lo,
+                            rx: lhs_lo,
+                            ry: rhs_lo,
                         }),
                     },
                     reloc: None,
@@ -2030,7 +2122,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Or {
-                            rn: dst_hi, rx: lhs_hi, ry: rhs_hi,
+                            rn: dst_hi,
+                            rx: lhs_hi,
+                            ry: rhs_hi,
                         }),
                     },
                     reloc: None,
@@ -2048,7 +2142,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Xor {
-                            rn: dst_lo, rx: lhs_lo, ry: rhs_lo,
+                            rn: dst_lo,
+                            rx: lhs_lo,
+                            ry: rhs_lo,
                         }),
                     },
                     reloc: None,
@@ -2057,7 +2153,9 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Xor {
-                            rn: dst_hi, rx: lhs_hi, ry: rhs_hi,
+                            rn: dst_hi,
+                            rx: lhs_hi,
+                            ry: rhs_hi,
                         }),
                     },
                     reloc: None,
@@ -2093,7 +2191,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Not {
-                            rn: dst_lo, rx: src_lo,
+                            rn: dst_lo,
+                            rx: src_lo,
                         }),
                     },
                     reloc: None,
@@ -2102,7 +2201,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Not {
-                            rn: dst_hi, rx: src_hi,
+                            rn: dst_hi,
+                            rx: src_hi,
                         }),
                     },
                     reloc: None,
@@ -2112,7 +2212,10 @@ pub fn select_with_name(
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
-                        compute: ComputeOp::Alu(AluOp::Inc { rn: dst_lo, rx: dst_lo }),
+                        compute: ComputeOp::Alu(AluOp::Inc {
+                            rn: dst_lo,
+                            rx: dst_lo,
+                        }),
                     },
                     reloc: None,
                 });
@@ -2122,7 +2225,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::PassCi {
-                            rn: dst_hi, rx: dst_hi,
+                            rn: dst_hi,
+                            rx: dst_hi,
                         }),
                     },
                     reloc: None,
@@ -2138,7 +2242,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Not {
-                            rn: dst_lo, rx: src_lo,
+                            rn: dst_lo,
+                            rx: src_lo,
                         }),
                     },
                     reloc: None,
@@ -2147,7 +2252,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::Not {
-                            rn: dst_hi, rx: src_hi,
+                            rn: dst_hi,
+                            rx: src_hi,
                         }),
                     },
                     reloc: None,
@@ -2183,9 +2289,15 @@ pub fn select_with_name(
                 let rhs_lo = *rhs as u16;
                 let signed = matches!(op, IrOp::Cmp64(..));
                 let hi_alu = if signed {
-                    AluOp::Comp { rx: lhs_hi, ry: rhs_hi }
+                    AluOp::Comp {
+                        rx: lhs_hi,
+                        ry: rhs_hi,
+                    }
                 } else {
-                    AluOp::CompU { rx: lhs_hi, ry: rhs_hi }
+                    AluOp::CompU {
+                        rx: lhs_hi,
+                        ry: rhs_hi,
+                    }
                 };
                 instrs.push(MachInstr {
                     instr: Instruction::Compute {
@@ -2212,7 +2324,8 @@ pub fn select_with_name(
                     instr: Instruction::Compute {
                         cond: target::COND_TRUE,
                         compute: ComputeOp::Alu(AluOp::CompU {
-                            rx: lhs_lo, ry: rhs_lo,
+                            rx: lhs_lo,
+                            ry: rhs_lo,
                         }),
                     },
                     reloc: None,
@@ -2422,7 +2535,10 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u16, write:
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: offset, width: MemWidth::Nw, bitrev: false, },
+                value: offset,
+                width: MemWidth::Nw,
+                bitrev: false,
+            },
             reloc: None,
         });
         instrs.push(MachInstr {
@@ -2442,7 +2558,10 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u16, write:
         instrs.push(MachInstr {
             instr: Instruction::Modify {
                 i_reg: target::FRAME_PTR,
-                value: -offset, width: MemWidth::Nw, bitrev: false, },
+                value: -offset,
+                width: MemWidth::Nw,
+                bitrev: false,
+            },
             reloc: None,
         });
     }
@@ -2457,7 +2576,13 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u16, write:
 /// Without the NOP the AG computes the address from the STALE I4, and the
 /// load/store lands at the wrong memory location (typically an instant
 /// hard fault on a read-only or out-of-range address).
-fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u16, dreg: u16, offset: i8, write: bool) {
+fn emit_indirect_access(
+    instrs: &mut Vec<MachInstr>,
+    base: u16,
+    dreg: u16,
+    offset: i8,
+    write: bool,
+) {
     // Use the bare URegMove form for the R-vreg → I4 transfer
     // instead of UregTransfer-with-compute=None. UregTransfer
     // packs a compute slot into bits[22:0] of the encoded word; when
@@ -2546,12 +2671,7 @@ fn emit_indirect_access(instrs: &mut Vec<MachInstr>, base: u16, dreg: u16, offse
 /// for the low 64 bits of a 64x64 multiply is irrelevant: in two's
 /// complement, multiplication truncated to `N` bits produces the same
 /// bit pattern for signed and unsigned operands.
-fn emit_inline_mul_64(
-    instrs: &mut Vec<MachInstr>,
-    dst: u32,
-    lhs: u32,
-    rhs: u32,
-) {
+fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;
@@ -2575,7 +2695,11 @@ fn emit_inline_mul_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::MulSsi { rn: 4, rx: 0, ry: 3 }),
+            compute: ComputeOp::Mul(MulOp::MulSsi {
+                rn: 4,
+                rx: 0,
+                ry: 3,
+            }),
         },
         reloc: None,
     });
@@ -2583,7 +2707,11 @@ fn emit_inline_mul_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::MulSsi { rn: 5, rx: 1, ry: 2 }),
+            compute: ComputeOp::Mul(MulOp::MulSsi {
+                rn: 5,
+                rx: 1,
+                ry: 2,
+            }),
         },
         reloc: None,
     });
@@ -2620,7 +2748,11 @@ fn emit_inline_mul_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 1, rx: 4, ry: 5 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 1,
+                rx: 4,
+                ry: 5,
+            }),
         },
         reloc: None,
     });
@@ -2629,7 +2761,11 @@ fn emit_inline_mul_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 1, rx: 1, ry: 6 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 1,
+                rx: 1,
+                ry: 6,
+            }),
         },
         reloc: None,
     });
@@ -2672,13 +2808,7 @@ fn emit_inline_mul_64(
 /// holds the shift count, rhs_hi is ignored).  Scratch registers R4,
 /// R5, R7 are clobbered.  Result is returned in R0:R1 and copied to
 /// the destination vreg pair.
-fn emit_inline_shr_64(
-    instrs: &mut Vec<MachInstr>,
-    dst: u32,
-    lhs: u32,
-    rhs: u32,
-    signed: bool,
-) {
+fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32, signed: bool) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;
@@ -2715,7 +2845,11 @@ fn emit_inline_shr_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 5, rx: 3, ry: 4 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 5,
+                rx: 3,
+                ry: 4,
+            }),
         },
         reloc: None,
     });
@@ -2729,9 +2863,17 @@ fn emit_inline_shr_64(
     // because for 32 < n the sign bits must propagate into the low
     // word for signed right shift.
     let hi_to_lo_shift = if signed {
-        ShiftOp::Ashift { rn: 7, rx: 1, ry: 5 }
+        ShiftOp::Ashift {
+            rn: 7,
+            rx: 1,
+            ry: 5,
+        }
     } else {
-        ShiftOp::Lshift { rn: 7, rx: 1, ry: 5 }
+        ShiftOp::Lshift {
+            rn: 7,
+            rx: 1,
+            ry: 5,
+        }
     };
     instrs.push(MachInstr {
         instr: Instruction::Compute {
@@ -2744,9 +2886,17 @@ fn emit_inline_shr_64(
     // for unsigned).  This is the new high word; for n >= 32 it is
     // zero (unsigned) or all sign bits (signed), both correct.
     let new_hi_shift = if signed {
-        ShiftOp::Ashift { rn: 1, rx: 1, ry: 3 }
+        ShiftOp::Ashift {
+            rn: 1,
+            rx: 1,
+            ry: 3,
+        }
     } else {
-        ShiftOp::Lshift { rn: 1, rx: 1, ry: 3 }
+        ShiftOp::Lshift {
+            rn: 1,
+            rx: 1,
+            ry: 3,
+        }
     };
     instrs.push(MachInstr {
         instr: Instruction::Compute {
@@ -2761,7 +2911,11 @@ fn emit_inline_shr_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 0, rx: 0, ry: 3 }),
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: 0,
+                rx: 0,
+                ry: 3,
+            }),
         },
         reloc: None,
     });
@@ -2769,7 +2923,11 @@ fn emit_inline_shr_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Or { rn: 0, rx: 0, ry: 7 }),
+            compute: ComputeOp::Alu(AluOp::Or {
+                rn: 0,
+                rx: 0,
+                ry: 7,
+            }),
         },
         reloc: None,
     });
@@ -2805,12 +2963,7 @@ fn emit_inline_shr_64(
 /// Staying in the low-numbered vreg space keeps the sequence
 /// internally consistent (regalloc rewrites the vreg ids, but the
 /// instructions reference the same vregs before and after the rewrite).
-fn emit_inline_shl_64(
-    instrs: &mut Vec<MachInstr>,
-    dst: u32,
-    lhs: u32,
-    rhs: u32,
-) {
+fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;
@@ -2838,7 +2991,11 @@ fn emit_inline_shl_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 5, rx: 2, ry: 4 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 5,
+                rx: 2,
+                ry: 4,
+            }),
         },
         reloc: None,
     });
@@ -2850,7 +3007,11 @@ fn emit_inline_shl_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 7, rx: 0, ry: 5 }),
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: 7,
+                rx: 0,
+                ry: 5,
+            }),
         },
         reloc: None,
     });
@@ -2859,7 +3020,11 @@ fn emit_inline_shl_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 1, rx: 1, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: 1,
+                rx: 1,
+                ry: 2,
+            }),
         },
         reloc: None,
     });
@@ -2867,7 +3032,11 @@ fn emit_inline_shl_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Or { rn: 1, rx: 1, ry: 7 }),
+            compute: ComputeOp::Alu(AluOp::Or {
+                rn: 1,
+                rx: 1,
+                ry: 7,
+            }),
         },
         reloc: None,
     });
@@ -2875,7 +3044,11 @@ fn emit_inline_shl_64(
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 0, rx: 0, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: 0,
+                rx: 0,
+                ry: 2,
+            }),
         },
         reloc: None,
     });
@@ -3084,15 +3257,18 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
     };
     for op in ir {
         match op {
-            IrOp::LoadImm(a, _) | IrOp::LoadImm64(a, _)
-            | IrOp::LoadGlobal(a, _) | IrOp::ReadGlobal(a, _)
+            IrOp::LoadImm(a, _)
+            | IrOp::LoadImm64(a, _)
+            | IrOp::LoadGlobal(a, _)
+            | IrOp::ReadGlobal(a, _)
             | IrOp::ReadGlobal64(a, _)
-            | IrOp::LoadString(a, _) | IrOp::LoadWideString(a, _)
+            | IrOp::LoadString(a, _)
+            | IrOp::LoadWideString(a, _)
             | IrOp::FrameAddr(a, _)
-            | IrOp::LoadStackArg(a, _) | IrOp::StackArgAddr(a, _)
+            | IrOp::LoadStackArg(a, _)
+            | IrOp::StackArgAddr(a, _)
             | IrOp::StackSave(a) => bump(*a),
-            IrOp::StoreGlobal(a, _) | IrOp::WriteGlobal64(a, _)
-            | IrOp::StackRestore(a) => bump(*a),
+            IrOp::StoreGlobal(a, _) | IrOp::WriteGlobal64(a, _) | IrOp::StackRestore(a) => bump(*a),
             IrOp::Copy(a, b)
             | IrOp::Copy64(a, b)
             | IrOp::Neg(a, b)
@@ -3109,28 +3285,45 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
                 bump(*a);
                 bump(*b);
             }
-            IrOp::Add(a, b, c) | IrOp::Sub(a, b, c) | IrOp::Mul(a, b, c)
-            | IrOp::Div(a, b, c) | IrOp::UDiv(a, b, c)
-            | IrOp::Mod(a, b, c) | IrOp::UMod(a, b, c)
-            | IrOp::BitAnd(a, b, c) | IrOp::BitOr(a, b, c)
+            IrOp::Add(a, b, c)
+            | IrOp::Sub(a, b, c)
+            | IrOp::Mul(a, b, c)
+            | IrOp::Div(a, b, c)
+            | IrOp::UDiv(a, b, c)
+            | IrOp::Mod(a, b, c)
+            | IrOp::UMod(a, b, c)
+            | IrOp::BitAnd(a, b, c)
+            | IrOp::BitOr(a, b, c)
             | IrOp::BitXor(a, b, c)
-            | IrOp::Shl(a, b, c) | IrOp::Shr(a, b, c) | IrOp::Lshr(a, b, c)
-            | IrOp::FAdd(a, b, c) | IrOp::FSub(a, b, c)
-            | IrOp::FMul(a, b, c) | IrOp::FDiv(a, b, c)
-            | IrOp::Add64(a, b, c) | IrOp::Sub64(a, b, c)
-            | IrOp::Mul64(a, b, c) | IrOp::Div64(a, b, c)
-            | IrOp::UDiv64(a, b, c) | IrOp::Mod64(a, b, c)
+            | IrOp::Shl(a, b, c)
+            | IrOp::Shr(a, b, c)
+            | IrOp::Lshr(a, b, c)
+            | IrOp::FAdd(a, b, c)
+            | IrOp::FSub(a, b, c)
+            | IrOp::FMul(a, b, c)
+            | IrOp::FDiv(a, b, c)
+            | IrOp::Add64(a, b, c)
+            | IrOp::Sub64(a, b, c)
+            | IrOp::Mul64(a, b, c)
+            | IrOp::Div64(a, b, c)
+            | IrOp::UDiv64(a, b, c)
+            | IrOp::Mod64(a, b, c)
             | IrOp::UMod64(a, b, c)
-            | IrOp::BitAnd64(a, b, c) | IrOp::BitOr64(a, b, c)
+            | IrOp::BitAnd64(a, b, c)
+            | IrOp::BitOr64(a, b, c)
             | IrOp::BitXor64(a, b, c)
-            | IrOp::Shl64(a, b, c) | IrOp::Shr64(a, b, c)
+            | IrOp::Shl64(a, b, c)
+            | IrOp::Shr64(a, b, c)
             | IrOp::UShr64(a, b, c) => {
                 bump(*a);
                 bump(*b);
                 bump(*c);
             }
-            IrOp::FCmp(a, b) | IrOp::Cmp(a, b) | IrOp::Cmp64(a, b)
-            | IrOp::UCmp(a, b) | IrOp::UCmp64(a, b) => {
+            IrOp::FCmp(a, b)
+            | IrOp::Cmp(a, b)
+            | IrOp::Cmp64(a, b)
+            | IrOp::UCmp(a, b)
+            | IrOp::UCmp64(a, b) => {
                 bump(*a);
                 bump(*b);
             }
@@ -3147,7 +3340,11 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
                 }
             }
             IrOp::Call(dst, _, args)
-            | IrOp::CallStruct { dst_addr: dst, args, .. } => {
+            | IrOp::CallStruct {
+                dst_addr: dst,
+                args,
+                ..
+            } => {
                 bump(*dst);
                 for a in args {
                     bump(*a);
@@ -3160,7 +3357,12 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
                     bump(*a);
                 }
             }
-            IrOp::CallIndirectStruct { addr, args, dst_addr, .. } => {
+            IrOp::CallIndirectStruct {
+                addr,
+                args,
+                dst_addr,
+                ..
+            } => {
                 bump(*addr);
                 bump(*dst_addr);
                 for a in args {
@@ -3168,7 +3370,9 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
                 }
             }
             IrOp::Ret(Some(v)) => bump(*v),
-            IrOp::RetStruct { src_addr, dst_addr, .. } => {
+            IrOp::RetStruct {
+                src_addr, dst_addr, ..
+            } => {
                 bump(*src_addr);
                 if let Some(d) = dst_addr {
                     bump(*d);
@@ -3176,7 +3380,9 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
             }
             IrOp::LoadStructRetPtr(v) => bump(*v),
             IrOp::Ret(None)
-            | IrOp::Branch(_) | IrOp::BranchCond(_, _) | IrOp::Label(_)
+            | IrOp::Branch(_)
+            | IrOp::BranchCond(_, _)
+            | IrOp::Label(_)
             | IrOp::HardwareLoop { .. }
             | IrOp::Nop => {}
         }
@@ -3197,9 +3403,7 @@ fn max_ir_label(ir: &[IrOp]) -> Label {
     };
     for op in ir {
         match op {
-            IrOp::Label(l)
-            | IrOp::Branch(l)
-            | IrOp::BranchCond(_, l) => bump(*l),
+            IrOp::Label(l) | IrOp::Branch(l) | IrOp::BranchCond(_, l) => bump(*l),
             IrOp::HardwareLoop { end_label, .. } => bump(*end_label),
             _ => {}
         }
@@ -3296,10 +3500,7 @@ mod tests {
     #[test]
     fn select_load_imm64() {
         // Load a 64-bit immediate into vreg pair (0, 1).
-        let ir = vec![
-            IrOp::LoadImm64(0, 0x0000_0001_0000_0002),
-            IrOp::Nop,
-        ];
+        let ir = vec![IrOp::LoadImm64(0, 0x0000_0001_0000_0002), IrOp::Nop];
         let result = select(&ir);
         // Should emit two LoadImm instructions: lo then hi.
         assert!(result.instrs.len() >= 2);
@@ -3334,7 +3535,11 @@ mod tests {
             matches!(
                 m.instr,
                 Instruction::Compute {
-                    compute: ComputeOp::Alu(AluOp::Add { rn: 4, rx: 0, ry: 2 }),
+                    compute: ComputeOp::Alu(AluOp::Add {
+                        rn: 4,
+                        rx: 0,
+                        ry: 2
+                    }),
                     ..
                 }
             )
@@ -3344,7 +3549,11 @@ mod tests {
             matches!(
                 m.instr,
                 Instruction::Compute {
-                    compute: ComputeOp::Alu(AluOp::AddCi { rn: 5, rx: 1, ry: 3 }),
+                    compute: ComputeOp::Alu(AluOp::AddCi {
+                        rn: 5,
+                        rx: 1,
+                        ry: 3
+                    }),
                     ..
                 }
             )
@@ -3365,7 +3574,11 @@ mod tests {
             matches!(
                 m.instr,
                 Instruction::Compute {
-                    compute: ComputeOp::Alu(AluOp::Sub { rn: 4, rx: 0, ry: 2 }),
+                    compute: ComputeOp::Alu(AluOp::Sub {
+                        rn: 4,
+                        rx: 0,
+                        ry: 2
+                    }),
                     ..
                 }
             )
@@ -3375,7 +3588,11 @@ mod tests {
             matches!(
                 m.instr,
                 Instruction::Compute {
-                    compute: ComputeOp::Alu(AluOp::SubCi { rn: 5, rx: 1, ry: 3 }),
+                    compute: ComputeOp::Alu(AluOp::SubCi {
+                        rn: 5,
+                        rx: 1,
+                        ry: 3
+                    }),
                     ..
                 }
             )
@@ -3385,32 +3602,28 @@ mod tests {
 
     #[test]
     fn select_bitnot64() {
-        let ir = vec![
-            IrOp::LoadImm64(0, 0xFF),
-            IrOp::BitNot64(2, 0),
-            IrOp::Nop,
-        ];
+        let ir = vec![IrOp::LoadImm64(0, 0xFF), IrOp::BitNot64(2, 0), IrOp::Nop];
         let result = select(&ir);
-        let not_count = result.instrs.iter().filter(|m| {
-            matches!(
-                m.instr,
-                Instruction::Compute {
-                    compute: ComputeOp::Alu(AluOp::Not { .. }),
-                    ..
-                }
-            )
-        }).count();
+        let not_count = result
+            .instrs
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.instr,
+                    Instruction::Compute {
+                        compute: ComputeOp::Alu(AluOp::Not { .. }),
+                        ..
+                    }
+                )
+            })
+            .count();
         assert_eq!(not_count, 2, "expected two NOT instructions for BitNot64");
     }
 
     #[test]
     fn select_int_to_long_long() {
         // Zero-extend: lo = src, hi = 0.
-        let ir = vec![
-            IrOp::LoadImm(0, 42),
-            IrOp::IntToLongLong(2, 0),
-            IrOp::Nop,
-        ];
+        let ir = vec![IrOp::LoadImm(0, 42), IrOp::IntToLongLong(2, 0), IrOp::Nop];
         let result = select(&ir);
         // Should contain a PASS for lo and a LoadImm(0) for hi.
         let has_pass = result.instrs.iter().any(|m| {
@@ -3462,15 +3675,19 @@ mod tests {
             IrOp::Nop,
         ];
         let result = select(&ir);
-        let and_count = result.instrs.iter().filter(|m| {
-            matches!(
-                m.instr,
-                Instruction::Compute {
-                    compute: ComputeOp::Alu(AluOp::And { .. }),
-                    ..
-                }
-            )
-        }).count();
+        let and_count = result
+            .instrs
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.instr,
+                    Instruction::Compute {
+                        compute: ComputeOp::Alu(AluOp::And { .. }),
+                        ..
+                    }
+                )
+            })
+            .count();
         assert_eq!(and_count, 2, "expected two AND instructions for BitAnd64");
     }
 
@@ -3485,13 +3702,15 @@ mod tests {
         let result = select(&ir);
         // The 64-bit multiply is inlined, so there must be no CALL
         // and no reloc against the legacy `___mul64` helper name.
-        let has_call = result.instrs.iter().any(|m| {
-            matches!(&m.instr, Instruction::Branch { call: true, .. })
-        });
+        let has_call = result
+            .instrs
+            .iter()
+            .any(|m| matches!(&m.instr, Instruction::Branch { call: true, .. }));
         assert!(!has_call, "expected inline 64-bit multiply, got a CALL");
-        let references_legacy = result.instrs.iter().any(|m| {
-            m.reloc.as_ref().is_some_and(|r| r.symbol == "___mul64")
-        });
+        let references_legacy = result
+            .instrs
+            .iter()
+            .any(|m| m.reloc.as_ref().is_some_and(|r| r.symbol == "___mul64"));
         assert!(
             !references_legacy,
             "unexpected relocation to legacy ___mul64 helper"
@@ -3525,7 +3744,10 @@ mod tests {
                 }
             )
         });
-        assert!(has_mrf_ssi, "missing MRF SSI multiply for the low-low product");
+        assert!(
+            has_mrf_ssi,
+            "missing MRF SSI multiply for the low-low product"
+        );
     }
 
     #[test]
@@ -3538,7 +3760,10 @@ mod tests {
                 .as_ref()
                 .is_some_and(|r| r.symbol == "___shr64" || r.symbol == "___ushr64")
         });
-        assert!(!bad_call, "unexpected relocation to legacy 64-bit shift helper");
+        assert!(
+            !bad_call,
+            "unexpected relocation to legacy 64-bit shift helper"
+        );
         // The signed 64-bit shift is distinguished by the use of at
         // least one ASHIFT with a register count.
         let has_ashift = result.instrs.iter().any(|m| {
@@ -3550,7 +3775,10 @@ mod tests {
                 }
             )
         });
-        assert!(has_ashift, "expected ASHIFT in signed 64-bit right shift lowering");
+        assert!(
+            has_ashift,
+            "expected ASHIFT in signed 64-bit right shift lowering"
+        );
     }
 
     #[test]
@@ -3562,7 +3790,10 @@ mod tests {
                 .as_ref()
                 .is_some_and(|r| r.symbol == "___shr64" || r.symbol == "___ushr64")
         });
-        assert!(!bad_call, "unexpected relocation to legacy 64-bit shift helper");
+        assert!(
+            !bad_call,
+            "unexpected relocation to legacy 64-bit shift helper"
+        );
         // The unsigned 64-bit shift uses LSHIFT exclusively.
         let ashift_count = result
             .instrs

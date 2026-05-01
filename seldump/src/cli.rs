@@ -115,9 +115,7 @@ fn parse_format_modifier(modifier: &str) -> Result<ContentFormat> {
         b'i' => Ok(ContentFormat::Disasm),
         b's' => Ok(ContentFormat::DisasmLabels),
         b'm' => Ok(ContentFormat::DisasmMnemonic),
-        _ => Err(Error::Usage(format!(
-            "unknown format modifier: {modifier}"
-        ))),
+        _ => Err(Error::Usage(format!("unknown format modifier: {modifier}"))),
     }
 }
 
@@ -186,9 +184,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
             let fmt = parse_format_modifier(modifier)?;
             i += 1;
             if i >= args.len() {
-                return Err(Error::Usage(
-                    "-i requires a range argument".to_string(),
-                ));
+                return Err(Error::Usage("-i requires a range argument".to_string()));
             }
             let range_str = &args[i];
             let (start, end) = parse_index_range(range_str)?;
@@ -273,10 +269,7 @@ pub fn print_help(w: &mut dyn std::io::Write) -> std::io::Result<()> {
         w,
         "             x0 and x1 are decimal integers, and x1 defaults to x0 if"
     )?;
-    writeln!(
-        w,
-        "             omitted.  Formatting rules as are for -n."
-    )?;
+    writeln!(w, "             omitted.  Formatting rules as are for -n.")?;
     writeln!(
         w,
         " -all        Print everything.  Same as -fh -ph -sh -notes -n '*'"
@@ -311,10 +304,7 @@ pub fn print_help(w: &mut dyn std::io::Write) -> std::io::Result<()> {
         w,
         "character which forces section contents to be formatted a certain way:"
     )?;
-    writeln!(
-        w,
-        " a  Dump contents in hex and ASCII, 16 bytes per line."
-    )?;
+    writeln!(w, " a  Dump contents in hex and ASCII, 16 bytes per line.")?;
     writeln!(w, " x  Dump contents in hex, 32 bytes per line.")?;
     writeln!(
         w,

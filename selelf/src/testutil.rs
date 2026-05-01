@@ -63,7 +63,7 @@ pub fn make_elf_object(machine: u16, endian: u8, symbols: &[(&str, bool)]) -> Ve
         // st_name = text_name_off in strtab? No, section symbols typically have st_name=0
         // st_info = STB_LOCAL << 4 | STT_SECTION (3)
         symtab[base + 12] = 3; // STB_LOCAL | STT_SECTION
-        // st_shndx = 2 (.text section index)
+                               // st_shndx = 2 (.text section index)
         write_u16(&mut symtab[base + 14..], 2, is_le);
     }
 
@@ -105,7 +105,7 @@ pub fn make_elf_object(machine: u16, endian: u8, symbols: &[(&str, bool)]) -> Ve
     out[4] = 1; // ELFCLASS32
     out[5] = endian;
     out[6] = 1; // EV_CURRENT
-    // e_type = ET_REL (1)
+                // e_type = ET_REL (1)
     write_u16(&mut out[16..], 1, is_le);
     // e_machine
     write_u16(&mut out[18..], machine, is_le);
@@ -131,45 +131,65 @@ pub fn make_elf_object(machine: u16, endian: u8, symbols: &[(&str, bool)]) -> Ve
     // Section headers (40 bytes each)
     // [0] NULL (all zeros)
     // [1] .shstrtab
-    write_shdr(&mut out, shtab_off + 40, &ShdrFields {
-        sh_name: shstrtab_name_off as u32,
-        sh_type: 3, // SHT_STRTAB
-        sh_offset: shstrtab_off as u32,
-        sh_size: shstrtab.len() as u32,
-        sh_link: 0,
-        sh_info: 0,
-        sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 40,
+        &ShdrFields {
+            sh_name: shstrtab_name_off as u32,
+            sh_type: 3, // SHT_STRTAB
+            sh_offset: shstrtab_off as u32,
+            sh_size: shstrtab.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [2] .text
-    write_shdr(&mut out, shtab_off + 2 * 40, &ShdrFields {
-        sh_name: text_name_off as u32,
-        sh_type: 1, // SHT_PROGBITS
-        sh_offset: text_off as u32,
-        sh_size: text_data.len() as u32,
-        sh_link: 0,
-        sh_info: 0,
-        sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 2 * 40,
+        &ShdrFields {
+            sh_name: text_name_off as u32,
+            sh_type: 1, // SHT_PROGBITS
+            sh_offset: text_off as u32,
+            sh_size: text_data.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [3] .strtab
-    write_shdr(&mut out, shtab_off + 3 * 40, &ShdrFields {
-        sh_name: strtab_name_off as u32,
-        sh_type: 3, // SHT_STRTAB
-        sh_offset: strtab_off as u32,
-        sh_size: strtab.len() as u32,
-        sh_link: 0,
-        sh_info: 0,
-        sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 3 * 40,
+        &ShdrFields {
+            sh_name: strtab_name_off as u32,
+            sh_type: 3, // SHT_STRTAB
+            sh_offset: strtab_off as u32,
+            sh_size: strtab.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [4] .symtab
-    write_shdr(&mut out, shtab_off + 4 * 40, &ShdrFields {
-        sh_name: symtab_name_off as u32,
-        sh_type: 2, // SHT_SYMTAB
-        sh_offset: symtab_off as u32,
-        sh_size: symtab.len() as u32,
-        sh_link: 3, // .strtab section index
-        sh_info: first_global as u32,
-        sh_entsize: sym_entry_size as u32,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 4 * 40,
+        &ShdrFields {
+            sh_name: symtab_name_off as u32,
+            sh_type: 2, // SHT_SYMTAB
+            sh_offset: symtab_off as u32,
+            sh_size: symtab.len() as u32,
+            sh_link: 3, // .strtab section index
+            sh_info: first_global as u32,
+            sh_entsize: sym_entry_size as u32,
+        },
+        is_le,
+    );
 
     out
 }
@@ -467,47 +487,80 @@ pub fn make_elf_with_align(align_data: &[u8], entsize: u32) -> Vec<u8> {
     // Section headers
     // [0] NULL (zeros)
     // [1] .shstrtab
-    write_shdr(&mut out, shtab_off + 40, &ShdrFields {
-        sh_name: shstrtab_name_off as u32,
-        sh_type: 3,
-        sh_offset: shstrtab_off as u32,
-        sh_size: shstrtab.len() as u32,
-        sh_link: 0, sh_info: 0, sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 40,
+        &ShdrFields {
+            sh_name: shstrtab_name_off as u32,
+            sh_type: 3,
+            sh_offset: shstrtab_off as u32,
+            sh_size: shstrtab.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [2] .text
-    write_shdr(&mut out, shtab_off + 2 * 40, &ShdrFields {
-        sh_name: text_name_off as u32,
-        sh_type: 1,
-        sh_offset: text_off as u32,
-        sh_size: text_data.len() as u32,
-        sh_link: 0, sh_info: 0, sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 2 * 40,
+        &ShdrFields {
+            sh_name: text_name_off as u32,
+            sh_type: 1,
+            sh_offset: text_off as u32,
+            sh_size: text_data.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [3] .strtab
-    write_shdr(&mut out, shtab_off + 3 * 40, &ShdrFields {
-        sh_name: strtab_name_off as u32,
-        sh_type: 3,
-        sh_offset: strtab_off as u32,
-        sh_size: strtab.len() as u32,
-        sh_link: 0, sh_info: 0, sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 3 * 40,
+        &ShdrFields {
+            sh_name: strtab_name_off as u32,
+            sh_type: 3,
+            sh_offset: strtab_off as u32,
+            sh_size: strtab.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [4] .symtab
-    write_shdr(&mut out, shtab_off + 4 * 40, &ShdrFields {
-        sh_name: symtab_name_off as u32,
-        sh_type: 2,
-        sh_offset: symtab_off as u32,
-        sh_size: symtab.len() as u32,
-        sh_link: 3, sh_info: 1, sh_entsize: 16,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 4 * 40,
+        &ShdrFields {
+            sh_name: symtab_name_off as u32,
+            sh_type: 2,
+            sh_offset: symtab_off as u32,
+            sh_size: symtab.len() as u32,
+            sh_link: 3,
+            sh_info: 1,
+            sh_entsize: 16,
+        },
+        is_le,
+    );
     // [5] .align.text (SHT_SHARC_ALIGN = 0x70000000)
-    write_shdr(&mut out, shtab_off + 5 * 40, &ShdrFields {
-        sh_name: align_name_off as u32,
-        sh_type: 0x7000_0000,
-        sh_offset: align_off as u32,
-        sh_size: align_data.len() as u32,
-        sh_link: 4, // symtab
-        sh_info: 2, // .text section
-        sh_entsize: entsize,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 5 * 40,
+        &ShdrFields {
+            sh_name: align_name_off as u32,
+            sh_type: 0x7000_0000,
+            sh_offset: align_off as u32,
+            sh_size: align_data.len() as u32,
+            sh_link: 4, // symtab
+            sh_info: 2, // .text section
+            sh_entsize: entsize,
+        },
+        is_le,
+    );
 
     out
 }
@@ -584,47 +637,80 @@ pub fn make_elf_with_symconstr(
     // Section headers
     // [0] NULL
     // [1] .shstrtab
-    write_shdr(&mut out, shtab_off + 40, &ShdrFields {
-        sh_name: shstrtab_name_off as u32,
-        sh_type: 3,
-        sh_offset: shstrtab_off as u32,
-        sh_size: shstrtab.len() as u32,
-        sh_link: 0, sh_info: 0, sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 40,
+        &ShdrFields {
+            sh_name: shstrtab_name_off as u32,
+            sh_type: 3,
+            sh_offset: shstrtab_off as u32,
+            sh_size: shstrtab.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [2] .text
-    write_shdr(&mut out, shtab_off + 2 * 40, &ShdrFields {
-        sh_name: text_name_off as u32,
-        sh_type: 1,
-        sh_offset: text_off as u32,
-        sh_size: text_data.len() as u32,
-        sh_link: 0, sh_info: 0, sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 2 * 40,
+        &ShdrFields {
+            sh_name: text_name_off as u32,
+            sh_type: 1,
+            sh_offset: text_off as u32,
+            sh_size: text_data.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [3] .strtab
-    write_shdr(&mut out, shtab_off + 3 * 40, &ShdrFields {
-        sh_name: strtab_name_off as u32,
-        sh_type: 3,
-        sh_offset: strtab_off as u32,
-        sh_size: strtab_content.len() as u32,
-        sh_link: 0, sh_info: 0, sh_entsize: 0,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 3 * 40,
+        &ShdrFields {
+            sh_name: strtab_name_off as u32,
+            sh_type: 3,
+            sh_offset: strtab_off as u32,
+            sh_size: strtab_content.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_entsize: 0,
+        },
+        is_le,
+    );
     // [4] .symtab
-    write_shdr(&mut out, shtab_off + 4 * 40, &ShdrFields {
-        sh_name: symtab_name_off as u32,
-        sh_type: 2,
-        sh_offset: symtab_off as u32,
-        sh_size: symtab.len() as u32,
-        sh_link: 3, sh_info: 1, sh_entsize: 16,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 4 * 40,
+        &ShdrFields {
+            sh_name: symtab_name_off as u32,
+            sh_type: 2,
+            sh_offset: symtab_off as u32,
+            sh_size: symtab.len() as u32,
+            sh_link: 3,
+            sh_info: 1,
+            sh_entsize: 16,
+        },
+        is_le,
+    );
     // [5] .symconstraint (SHT_SHARC_SYMCONSTR = 0x70000001)
-    write_shdr(&mut out, shtab_off + 5 * 40, &ShdrFields {
-        sh_name: symconstr_name_off as u32,
-        sh_type: 0x7000_0001,
-        sh_offset: symconstr_off as u32,
-        sh_size: symconstr_data.len() as u32,
-        sh_link: 4, // symtab
-        sh_info: 0,
-        sh_entsize: entsize,
-    }, is_le);
+    write_shdr(
+        &mut out,
+        shtab_off + 5 * 40,
+        &ShdrFields {
+            sh_name: symconstr_name_off as u32,
+            sh_type: 0x7000_0001,
+            sh_offset: symconstr_off as u32,
+            sh_size: symconstr_data.len() as u32,
+            sh_link: 4, // symtab
+            sh_info: 0,
+            sh_entsize: entsize,
+        },
+        is_le,
+    );
 
     out
 }

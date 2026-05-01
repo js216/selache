@@ -87,7 +87,11 @@ pub fn parse(data: &[u8]) -> Result<Vec<(String, u32)>> {
         pos = end + 1;
     }
 
-    Ok(offsets.into_iter().zip(names).map(|(o, n)| (n, o)).collect())
+    Ok(offsets
+        .into_iter()
+        .zip(names)
+        .map(|(o, n)| (n, o))
+        .collect())
 }
 
 #[cfg(test)]
@@ -101,8 +105,7 @@ mod tests {
         let obj2 = testutil::make_sharc_object(&["_process"]);
         let obj3 = testutil::make_sharc_object(&["_cleanup", "_shutdown"]);
 
-        let members: Vec<(&[u8], u32)> =
-            vec![(&obj1, 1000), (&obj2, 2000), (&obj3, 3000)];
+        let members: Vec<(&[u8], u32)> = vec![(&obj1, 1000), (&obj2, 2000), (&obj3, 3000)];
         let index_data = build(&members).unwrap();
         let parsed = parse(&index_data).unwrap();
 

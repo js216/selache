@@ -6,15 +6,31 @@ use crate::error::{Error, Result};
 
 /// Known SHARC+ processor variants.
 const KNOWN_PROCESSORS: &[&str] = &[
-    "ADSP-21562", "ADSP-21563", "ADSP-21565", "ADSP-21566",
-    "ADSP-21567", "ADSP-21568", "ADSP-21569",
-    "ADSP-21571", "ADSP-21573",
-    "ADSP-21583", "ADSP-21584", "ADSP-21587",
+    "ADSP-21562",
+    "ADSP-21563",
+    "ADSP-21565",
+    "ADSP-21566",
+    "ADSP-21567",
+    "ADSP-21568",
+    "ADSP-21569",
+    "ADSP-21571",
+    "ADSP-21573",
+    "ADSP-21583",
+    "ADSP-21584",
+    "ADSP-21587",
     "ADSP-21593",
-    "ADSP-SC570", "ADSP-SC571", "ADSP-SC572", "ADSP-SC573",
-    "ADSP-SC582", "ADSP-SC583", "ADSP-SC584", "ADSP-SC587",
-    "ADSP-SC588", "ADSP-SC589",
-    "ADSP-SC594", "ADSP-SC598",
+    "ADSP-SC570",
+    "ADSP-SC571",
+    "ADSP-SC572",
+    "ADSP-SC573",
+    "ADSP-SC582",
+    "ADSP-SC583",
+    "ADSP-SC584",
+    "ADSP-SC587",
+    "ADSP-SC588",
+    "ADSP-SC589",
+    "ADSP-SC594",
+    "ADSP-SC598",
 ];
 
 /// Supported boot modes.
@@ -101,7 +117,8 @@ fn parse_u32(s: &str) -> std::result::Result<u32, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u32::from_str_radix(hex, 16).map_err(|e| format!("invalid number '{s}': {e}"))
     } else {
-        s.parse::<u32>().map_err(|e| format!("invalid number '{s}': {e}"))
+        s.parse::<u32>()
+            .map_err(|e| format!("invalid number '{s}': {e}"))
     }
 }
 
@@ -161,8 +178,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                 if i >= args.len() {
                     return Err(Error::Usage("missing boot mode after -b".into()));
                 }
-                boot_mode = BootMode::from_str(&args[i])
-                    .map_err(Error::Usage)?;
+                boot_mode = BootMode::from_str(&args[i]).map_err(Error::Usage)?;
             }
             "-bcode" => {
                 i += 1;
@@ -183,8 +199,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                 if i >= args.len() {
                     return Err(Error::Usage("missing format after -f".into()));
                 }
-                format = OutputFormat::from_str(&args[i])
-                    .map_err(Error::Usage)?;
+                format = OutputFormat::from_str(&args[i]).map_err(Error::Usage)?;
             }
             "-CRC32" => {
                 crc32_enabled = true;
@@ -201,9 +216,7 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                 }
                 let val = parse_u32(&args[i]).map_err(Error::Usage)?;
                 if val % 4 != 0 {
-                    return Err(Error::Usage(
-                        "MaxBlockSize must be a multiple of 4".into(),
-                    ));
+                    return Err(Error::Usage("MaxBlockSize must be a multiple of 4".into()));
                 }
                 max_block_size = Some(val);
             }
@@ -223,31 +236,25 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
                 }
                 let val = parse_u32(&args[i]).map_err(Error::Usage)?;
                 if val != 8 {
-                    return Err(Error::Usage(
-                        "only -Width 8 is supported".into(),
-                    ));
+                    return Err(Error::Usage("only -Width 8 is supported".into()));
                 }
                 width = Some(val);
             }
             "-si-revision" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Error::Usage(
-                        "missing version after -si-revision".into(),
-                    ));
+                    return Err(Error::Usage("missing version after -si-revision".into()));
                 }
                 si_revision = Some(args[i].clone());
             }
             // Stubs: parsed but unused
-            "-callback" | "-init" | "-M" | "-MM" | "-Mo" | "-Mt"
-            | "-core0" | "-core1" | "-core2" => {
+            "-callback" | "-init" | "-M" | "-MM" | "-Mo" | "-Mt" | "-core0" | "-core1"
+            | "-core2" => {
                 // Consume trailing arguments for switches that take them
                 match args[i].as_str() {
                     "-callback" | "-init" => {
                         // Skip until next flag or end
-                        while i + 1 < args.len()
-                            && !args[i + 1].starts_with('-')
-                        {
+                        while i + 1 < args.len() && !args[i + 1].starts_with('-') {
                             i += 1;
                         }
                     }
@@ -298,7 +305,10 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
 
     let processor = processor.ok_or(Error::Usage("-proc is required".into()))?;
 
-    if !KNOWN_PROCESSORS.iter().any(|p| p.eq_ignore_ascii_case(&processor)) {
+    if !KNOWN_PROCESSORS
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(&processor))
+    {
         return Err(Error::Usage(format!("unknown processor: {processor}")));
     }
 
@@ -353,54 +363,64 @@ mod tests {
 
     #[test]
     fn test_spi_default_bcode() {
-        let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-b", "SPI", "input.dxe",
-        ])).unwrap();
+        let opts = parse_args(&args(&["-proc", "ADSP-21569", "-b", "SPI", "input.dxe"])).unwrap();
         assert_eq!(opts.bcode, Some(1));
     }
 
     #[test]
     fn test_ospi_default_bcode() {
-        let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-b", "OSPI", "input.dxe",
-        ])).unwrap();
+        let opts = parse_args(&args(&["-proc", "ADSP-21569", "-b", "OSPI", "input.dxe"])).unwrap();
         assert_eq!(opts.bcode, Some(1));
     }
 
     #[test]
     fn test_spihost_default_bcode() {
         let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-b", "SPIHOST", "input.dxe",
-        ])).unwrap();
+            "-proc",
+            "ADSP-21569",
+            "-b",
+            "SPIHOST",
+            "input.dxe",
+        ]))
+        .unwrap();
         assert_eq!(opts.bcode, Some(0));
     }
 
     #[test]
     fn test_explicit_bcode_overrides_default() {
-        let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-bcode", "5", "input.dxe",
-        ])).unwrap();
+        let opts = parse_args(&args(&["-proc", "ADSP-21569", "-bcode", "5", "input.dxe"])).unwrap();
         assert_eq!(opts.bcode, Some(5));
     }
 
     #[test]
     fn test_parse_all_flags() {
         let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569",
-            "-b", "OSPI",
-            "-bcode", "3",
-            "-o", "out.ldr",
-            "-f", "hex",
-            "-CRC32", "0x04C11DB7",
-            "-MaxBlockSize", "1024",
-            "-MaxImageSize", "65536",
-            "-Width", "8",
+            "-proc",
+            "ADSP-21569",
+            "-b",
+            "OSPI",
+            "-bcode",
+            "3",
+            "-o",
+            "out.ldr",
+            "-f",
+            "hex",
+            "-CRC32",
+            "0x04C11DB7",
+            "-MaxBlockSize",
+            "1024",
+            "-MaxImageSize",
+            "65536",
+            "-Width",
+            "8",
             "-v",
             "-W",
             "-NoFillBlock",
-            "-si-revision", "1.0",
+            "-si-revision",
+            "1.0",
             "input.dxe",
-        ])).unwrap();
+        ]))
+        .unwrap();
         assert_eq!(opts.processor, "ADSP-21569");
         assert_eq!(opts.boot_mode, BootMode::Ospi);
         assert_eq!(opts.bcode, Some(3));
@@ -419,9 +439,7 @@ mod tests {
 
     #[test]
     fn test_crc32_default_poly() {
-        let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-CRC32", "input.dxe",
-        ])).unwrap();
+        let opts = parse_args(&args(&["-proc", "ADSP-21569", "-CRC32", "input.dxe"])).unwrap();
         assert!(opts.crc32_enabled);
         assert_eq!(opts.crc32_polynomial, crate::crc32::DEFAULT_POLYNOMIAL);
         assert_eq!(opts.input_file, "input.dxe");
@@ -472,7 +490,11 @@ mod tests {
     #[test]
     fn test_max_block_size_not_multiple_of_4() {
         let result = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-MaxBlockSize", "13", "input.dxe",
+            "-proc",
+            "ADSP-21569",
+            "-MaxBlockSize",
+            "13",
+            "input.dxe",
         ]));
         assert!(matches!(result.unwrap_err(), Error::Usage(_)));
     }
@@ -487,9 +509,8 @@ mod tests {
     #[test]
     fn test_stub_options_accepted() {
         // Make sure stub options don't cause errors
-        let opts = parse_args(&args(&[
-            "-proc", "ADSP-21569", "-core0", "-M", "input.dxe",
-        ])).unwrap();
+        let opts =
+            parse_args(&args(&["-proc", "ADSP-21569", "-core0", "-M", "input.dxe"])).unwrap();
         assert_eq!(opts.input_file, "input.dxe");
     }
 

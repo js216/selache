@@ -20,11 +20,7 @@ pub fn extract_section(elf_data: &[u8], section_name: &str) -> Result<Vec<u8>> {
 
 /// Replace a section's content with `new_data`, adjusting all offsets.
 /// Returns the modified ELF as a new byte vector.
-pub fn replace_section(
-    elf_data: &[u8],
-    section_name: &str,
-    new_data: &[u8],
-) -> Result<Vec<u8>> {
+pub fn replace_section(elf_data: &[u8], section_name: &str, new_data: &[u8]) -> Result<Vec<u8>> {
     let hdr = elf::parse_header(elf_data)?;
     let e = hdr.ei_data;
     let shent = hdr.e_shentsize as usize;
@@ -37,9 +33,7 @@ pub fn replace_section(
 
     // Build the output by splicing: everything before the section data,
     // the new section data, then everything after.
-    let mut out = Vec::with_capacity(
-        (elf_data.len() as i64 + delta) as usize,
-    );
+    let mut out = Vec::with_capacity((elf_data.len() as i64 + delta) as usize);
     out.extend_from_slice(&elf_data[..old_off]);
     out.extend_from_slice(new_data);
     out.extend_from_slice(&elf_data[old_off + old_sz..]);
@@ -163,10 +157,7 @@ fn parse_hex_char(c: u8) -> Result<u8> {
 }
 
 /// Find a named section in the ELF, returning its index and parsed header.
-fn find_section(
-    elf_data: &[u8],
-    section_name: &str,
-) -> Result<(usize, elf::Elf32Shdr)> {
+fn find_section(elf_data: &[u8], section_name: &str) -> Result<(usize, elf::Elf32Shdr)> {
     let hdr = elf::parse_header(elf_data)?;
     let e = hdr.ei_data;
     let shent = hdr.e_shentsize as usize;

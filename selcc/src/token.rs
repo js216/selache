@@ -100,23 +100,23 @@ pub enum Token {
     Assign,
 
     // New operators
-    Arrow,        // ->
-    Dot,          // .
-    PlusPlus,     // ++
-    MinusMinus,   // --
-    PlusAssign,   // +=
-    MinusAssign,  // -=
-    StarAssign,   // *=
-    SlashAssign,  // /=
-    PercentAssign,// %=
-    AmpAssign,    // &=
-    PipeAssign,   // |=
-    CaretAssign,  // ^=
-    ShlAssign,    // <<=
-    ShrAssign,    // >>=
-    Question,     // ?
-    Colon,        // :
-    Ellipsis,     // ...
+    Arrow,         // ->
+    Dot,           // .
+    PlusPlus,      // ++
+    MinusMinus,    // --
+    PlusAssign,    // +=
+    MinusAssign,   // -=
+    StarAssign,    // *=
+    SlashAssign,   // /=
+    PercentAssign, // %=
+    AmpAssign,     // &=
+    PipeAssign,    // |=
+    CaretAssign,   // ^=
+    ShlAssign,     // <<=
+    ShrAssign,     // >>=
+    Question,      // ?
+    Colon,         // :
+    Ellipsis,      // ...
 
     // Delimiters
     LParen,

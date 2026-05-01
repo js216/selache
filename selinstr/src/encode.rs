@@ -367,15 +367,9 @@ pub enum Instruction {
     },
     /// Type 12a: LCNTR = imm16, DO end_pc UNTIL LCE.
     /// Type 12b: LCNTR = ureg, DO end_pc UNTIL LCE.
-    DoLoop {
-        counter: LoopCounter,
-        end_pc: u32,
-    },
+    DoLoop { counter: LoopCounter, end_pc: u32 },
     /// Type 13: DO addr UNTIL cond (non-counter loop).
-    DoUntil {
-        addr: u32,
-        term: u8,
-    },
+    DoUntil { addr: u32, term: u8 },
     /// Type 1: Compute + dual DM/PM transfer.
     DualMove {
         compute: Option<ComputeOp>,
@@ -383,7 +377,12 @@ pub enum Instruction {
         pm: DagAccess,
     },
     /// Type 19: MODIFY(Ii, immediate32) / BITREV(Ii, immediate32).
-    Modify { i_reg: u8, value: i32, width: MemWidth, bitrev: bool },
+    Modify {
+        i_reg: u8,
+        value: i32,
+        width: MemWidth,
+        bitrev: bool,
+    },
     /// Type 9a: Indirect JUMP/CALL through PM register pair (Ii, Mm).
     IndirectBranch {
         call: bool,
@@ -413,10 +412,7 @@ pub enum Instruction {
         ops: u8,
     },
     /// Type 25a: CJUMP (computed jump) with optional delayed branch.
-    CJump {
-        addr: u32,
-        delayed: bool,
-    },
+    CJump { addr: u32, delayed: bool },
     /// Type 3: Compute, ureg<->DM/PM with DAG register modify.
     UregDagMove {
         /// 0=DM/DAG1, 1=PM/DAG2
@@ -603,7 +599,12 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             compute,
         } => encode_type11a(interrupt, cond, delayed, lr, compute),
         Instruction::Compute { cond, compute } => encode_type2(cond, compute),
-        Instruction::Branch { call, cond, target, delayed } => encode_branch(call, cond, target, delayed),
+        Instruction::Branch {
+            call,
+            cond,
+            target,
+            delayed,
+        } => encode_branch(call, cond, target, delayed),
         Instruction::ComputeLoadStore {
             compute,
             access,
@@ -614,16 +615,24 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
         Instruction::DoLoop { counter, end_pc } => encode_do_loop(counter, end_pc),
         Instruction::DoUntil { addr, term } => {
             // Type 13: bits[47:40]=0x0E, bits[37:33]=term, bits[23:0]=addr24
-            let word = (0x0Eu64 << 40)
-                | ((term as u64 & 0x1F) << 33)
-                | (addr as u64 & 0xFFFFFF);
+            let word = (0x0Eu64 << 40) | ((term as u64 & 0x1F) << 33) | (addr as u64 & 0xFFFFFF);
             Ok(word)
         }
         Instruction::DualMove { compute, dm, pm } => encode_type1(compute, dm, pm),
-        Instruction::Modify { i_reg, value, width, bitrev } => encode_type19(i_reg, value, width, bitrev),
-        Instruction::IndirectBranch { call, cond, pm_i, pm_m, delayed, .. } => {
-            encode_type9a(call, cond, pm_i, pm_m, delayed)
-        }
+        Instruction::Modify {
+            i_reg,
+            value,
+            width,
+            bitrev,
+        } => encode_type19(i_reg, value, width, bitrev),
+        Instruction::IndirectBranch {
+            call,
+            cond,
+            pm_i,
+            pm_m,
+            delayed,
+            ..
+        } => encode_type9a(call, cond, pm_i, pm_m, delayed),
         Instruction::EmuIdle => Ok((1u64 << 39) | (1u64 << 38)),
         Instruction::Sync => Ok(1u64 << 38),
         Instruction::BitOp { op, sreg, data } => {
@@ -636,17 +645,39 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
                 | (data as u64);
             Ok(word)
         }
-        Instruction::StackOp { ops } => {
-            Ok((0x17u64 << 40) | ((ops as u64) << 33))
-        }
+        Instruction::StackOp { ops } => Ok((0x17u64 << 40) | ((ops as u64) << 33)),
         Instruction::CJump { addr, delayed } => {
             let db = if delayed { 1u64 << 34 } else { 0 };
             Ok((0x18u64 << 40) | db | (addr as u64 & 0xFFFFFF))
         }
-        Instruction::UregDagMove { pm, write, ureg, i_reg, m_reg, cond, compute, post_modify } => {
-            encode_type3(&UregDagMoveArgs { _pm: pm, write, ureg, i_reg, m_reg, cond, post_modify }, &compute)
-        }
-        Instruction::DagModify { pm, i_reg, m_reg, cond, compute } => {
+        Instruction::UregDagMove {
+            pm,
+            write,
+            ureg,
+            i_reg,
+            m_reg,
+            cond,
+            compute,
+            post_modify,
+        } => encode_type3(
+            &UregDagMoveArgs {
+                _pm: pm,
+                write,
+                ureg,
+                i_reg,
+                m_reg,
+                cond,
+                post_modify,
+            },
+            &compute,
+        ),
+        Instruction::DagModify {
+            pm,
+            i_reg,
+            m_reg,
+            cond,
+            compute,
+        } => {
             let comp = encode_compute_opt(&compute)?;
             let g = if pm { 1u64 } else { 0 };
             // Standard Type 7 (bit39=0): g at bit38, i_field at bits[37:35],
@@ -659,10 +690,17 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
                 | (comp as u64);
             Ok(word)
         }
-        Instruction::RegisterSwap { dreg, cdreg, cond, ref compute } => {
-            encode_type5b(dreg, cdreg, cond, compute)
-        }
-        Instruction::UregTransfer { src_ureg, dst_ureg, compute } => {
+        Instruction::RegisterSwap {
+            dreg,
+            cdreg,
+            cond,
+            ref compute,
+        } => encode_type5b(dreg, cdreg, cond, compute),
+        Instruction::UregTransfer {
+            src_ureg,
+            dst_ureg,
+            compute,
+        } => {
             let comp = encode_compute_opt(&compute)?;
             // Type 5a layout (from disassembler decode_type5a):
             //   bits[47:45] = 011, bit[44]=1, bit[43]=0
@@ -690,15 +728,35 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             Ok(word)
         }
         Instruction::URegMove { dest, src } => encode_type5a(dest, src),
-        Instruction::UregMemAccess { pm, i_reg, write, lw, ureg, offset } => {
-            encode_type15(pm, i_reg, write, lw, ureg, offset)
-        }
-        Instruction::ImmShift { shift_type, sub_op, imm, rn, rx, data_hi, cond } => {
-            encode_type6b(shift_type, sub_op, imm, rn, rx, data_hi, cond)
-        }
+        Instruction::UregMemAccess {
+            pm,
+            i_reg,
+            write,
+            lw,
+            ureg,
+            offset,
+        } => encode_type15(pm, i_reg, write, lw, ureg, offset),
+        Instruction::ImmShift {
+            shift_type,
+            sub_op,
+            imm,
+            rn,
+            rx,
+            data_hi,
+            cond,
+        } => encode_type6b(shift_type, sub_op, imm, rn, rx, data_hi, cond),
         Instruction::ImmShiftMem {
-            shift_type, sub_op, imm, rn, rx, len_hi,
-            i_reg, m_reg, write, dreg, cond,
+            shift_type,
+            sub_op,
+            imm,
+            rn,
+            rx,
+            len_hi,
+            i_reg,
+            m_reg,
+            write,
+            dreg,
+            cond,
         } => {
             let op_field = ((shift_type as u64 & 0x7) << 4) | (sub_op as u64 & 3);
             let d = if write { 1u64 } else { 0 };
@@ -714,12 +772,18 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
                 | ((rn as u64 & 0xF) << 4)
                 | (rx as u64 & 0xF))
         }
-        Instruction::ImmStore { pm, i_reg, m_reg, value } => {
-            encode_type16(pm, i_reg, m_reg, value)
-        }
-        Instruction::UregAbsAccess { pm, write, ureg, addr } => {
-            encode_type14(pm, write, ureg, addr)
-        }
+        Instruction::ImmStore {
+            pm,
+            i_reg,
+            m_reg,
+            value,
+        } => encode_type16(pm, i_reg, m_reg, value),
+        Instruction::UregAbsAccess {
+            pm,
+            write,
+            ureg,
+            addr,
+        } => encode_type14(pm, write, ureg, addr),
     }
 }
 
@@ -976,7 +1040,17 @@ fn encode_shift(op: &ShiftOp) -> Result<u32, EncodeError> {
 
 fn encode_multi(op: &MultiOp) -> Result<u32, EncodeError> {
     match *op {
-        MultiOp::MulAlu { fp, mul_sel, alu_sel, rm, ra, rxm, rym, rxa, rya } => {
+        MultiOp::MulAlu {
+            fp,
+            mul_sel,
+            alu_sel,
+            rm,
+            ra,
+            rxm,
+            rym,
+            rxa,
+            rya,
+        } => {
             // Compute field layout (23 bits):
             //   bit[22]    = 1 (multifunction)
             //   bits[21:16] = mf_op
@@ -998,7 +1072,16 @@ fn encode_multi(op: &MultiOp) -> Result<u32, EncodeError> {
                 | (rya as u32 & 3);
             Ok(field)
         }
-        MultiOp::MulDualAddSub { fp, rm, ra, rs, rxm, rym, rxa, rya } => {
+        MultiOp::MulDualAddSub {
+            fp,
+            rm,
+            ra,
+            rs,
+            rxm,
+            rym,
+            rxa,
+            rya,
+        } => {
             // bits[22] = 1, bit[21] = 1 (dual add/sub), bit[20] = fp
             // bits[19:16] = Rs, bits[15:12] = Rm, bits[11:8] = Ra
             // bits[7:6] = Rxm, [5:4] = Rym, [3:2] = Rxa, [1:0] = Rya
@@ -1039,7 +1122,13 @@ fn encode_type17(ureg: u16, value: u32) -> Result<u64, EncodeError> {
 // bits[22:0] = compute
 // ---------------------------------------------------------------------------
 
-fn encode_type11a(interrupt: bool, cond: u8, delayed: bool, lr: bool, compute: Option<ComputeOp>) -> Result<u64, EncodeError> {
+fn encode_type11a(
+    interrupt: bool,
+    cond: u8,
+    delayed: bool,
+    lr: bool,
+    compute: Option<ComputeOp>,
+) -> Result<u64, EncodeError> {
     let comp = encode_compute_opt(&compute)?;
     let x = if interrupt { 1u64 } else { 0u64 };
     let j = if delayed { 1u64 } else { 0u64 };
@@ -1062,9 +1151,7 @@ fn encode_type11a(interrupt: bool, cond: u8, delayed: bool, lr: bool, compute: O
 
 fn encode_type2(cond: u8, compute: ComputeOp) -> Result<u64, EncodeError> {
     let comp = encode_compute(&compute)?;
-    let word = (0x01u64 << 40)
-        | ((cond as u64 & 0x1F) << 33)
-        | (comp as u64);
+    let word = (0x01u64 << 40) | ((cond as u64 & 0x1F) << 33) | (comp as u64);
     Ok(word)
 }
 
@@ -1080,7 +1167,12 @@ fn encode_type2(cond: u8, compute: ComputeOp) -> Result<u64, EncodeError> {
 //   bits[23:0] = offset24 (signed)
 // ---------------------------------------------------------------------------
 
-fn encode_branch(call: bool, cond: u8, target: BranchTarget, delayed: bool) -> Result<u64, EncodeError> {
+fn encode_branch(
+    call: bool,
+    cond: u8,
+    target: BranchTarget,
+    delayed: bool,
+) -> Result<u64, EncodeError> {
     let j = if call { 1u64 } else { 0u64 };
     let db = if delayed { 1u64 << 26 } else { 0 };
     let cond_bits = (cond as u64 & 0x1F) << 33;
@@ -1113,7 +1205,13 @@ fn encode_branch(call: bool, cond: u8, target: BranchTarget, delayed: bool) -> R
 // bits[22:0] = compute (0 for no compute)
 // ---------------------------------------------------------------------------
 
-fn encode_type9a(call: bool, cond: u8, pm_i: u8, pm_m: u8, delayed: bool) -> Result<u64, EncodeError> {
+fn encode_type9a(
+    call: bool,
+    cond: u8,
+    pm_i: u8,
+    pm_m: u8,
+    delayed: bool,
+) -> Result<u64, EncodeError> {
     let j = if call { 1u64 } else { 0u64 };
     let db = if delayed { 1u64 } else { 0u64 };
     let cond_bits = (cond as u64 & 0x1F) << 33;
@@ -1159,10 +1257,7 @@ struct UregDagMoveArgs {
     post_modify: bool,
 }
 
-fn encode_type3(
-    a: &UregDagMoveArgs,
-    compute: &Option<ComputeOp>,
-) -> Result<u64, EncodeError> {
+fn encode_type3(a: &UregDagMoveArgs, compute: &Option<ComputeOp>) -> Result<u64, EncodeError> {
     if a.i_reg > 7 {
         return Err(EncodeError {
             msg: format!("Type 3 I register index {} out of range (0-7)", a.i_reg),
@@ -1235,7 +1330,7 @@ fn encode_type4(
         | ((cond as u64 & 0x1F) << 33)           // bits[37:33]
         | ((data6 as u64) << 27)                 // bits[32:27]
         | ((dreg as u64 & 0xF) << 23)            // bits[26:23]
-        | (comp as u64);                         // bits[22:0]
+        | (comp as u64); // bits[22:0]
     Ok(word)
 }
 
@@ -1259,15 +1354,11 @@ fn encode_do_loop(counter: LoopCounter, end_pc: u32) -> Result<u64, EncodeError>
     }
     match counter {
         LoopCounter::Immediate(count) => {
-            let word = (0x0Cu64 << 40)
-                | ((count as u64) << 24)
-                | (end_pc as u64);
+            let word = (0x0Cu64 << 40) | ((count as u64) << 24) | (end_pc as u64);
             Ok(word)
         }
         LoopCounter::Ureg(ureg) => {
-            let word = (0x0Du64 << 40)
-                | ((ureg as u64) << 32)
-                | (end_pc as u64);
+            let word = (0x0Du64 << 40) | ((ureg as u64) << 32) | (end_pc as u64);
             Ok(word)
         }
     }
@@ -1357,11 +1448,7 @@ fn encode_type19(i_reg: u8, value: i32, width: MemWidth, bitrev: bool) -> Result
             // Standard Type 19 (sub=0x16): i_src at bits[34:32]
             // bit[38] = BREV (1 for BITREV, 0 for MODIFY)
             let brev = if bitrev { 1u64 } else { 0 };
-            let word = (0x16u64 << 40)
-                | (g << 39)
-                | (brev << 38)
-                | (i_field << 32)
-                | data32;
+            let word = (0x16u64 << 40) | (g << 39) | (brev << 38) | (i_field << 32) | data32;
             Ok(word)
         }
         MemWidth::Nw | MemWidth::Sw => {
@@ -1370,12 +1457,12 @@ fn encode_type19(i_reg: u8, value: i32, width: MemWidth, bitrev: bool) -> Result
             //   bit[38] = g (DAG select)
             //   bits[34:32] = i_src
             //   bits[37:35] = dest_xor (0 = same register)
-            let nw_bit = if matches!(width, MemWidth::Nw) { 1u64 } else { 0 };
-            let word = (0x15u64 << 40)
-                | (nw_bit << 39)
-                | (g << 38)
-                | (i_field << 32)
-                | data32;
+            let nw_bit = if matches!(width, MemWidth::Nw) {
+                1u64
+            } else {
+                0
+            };
+            let word = (0x15u64 << 40) | (nw_bit << 39) | (g << 38) | (i_field << 32) | data32;
             Ok(word)
         }
     }
@@ -1423,11 +1510,7 @@ fn encode_type16(pm: bool, i_reg: u8, m_reg: u8, value: u32) -> Result<u64, Enco
 fn encode_type14(pm: bool, write: bool, ureg: u16, addr: u32) -> Result<u64, EncodeError> {
     let g = if pm { 1u64 } else { 0 };
     let d = if write { 1u64 } else { 0 };
-    let word = (0b000_100u64 << 42)
-        | (g << 41)
-        | (d << 40)
-        | ((ureg as u64) << 32)
-        | (addr as u64);
+    let word = (0b000_100u64 << 42) | (g << 41) | (d << 40) | ((ureg as u64) << 32) | (addr as u64);
     Ok(word)
 }
 
@@ -1486,7 +1569,12 @@ fn encode_type5a(dest: u16, src: u16) -> Result<u64, EncodeError> {
 // bits[22:0]  = compute
 // ---------------------------------------------------------------------------
 
-fn encode_type5b(dreg: u16, cdreg: u16, cond: u8, compute: &Option<ComputeOp>) -> Result<u64, EncodeError> {
+fn encode_type5b(
+    dreg: u16,
+    cdreg: u16,
+    cond: u8,
+    compute: &Option<ComputeOp>,
+) -> Result<u64, EncodeError> {
     check_reg4("dreg", dreg)?;
     check_reg4("cdreg", cdreg)?;
     let comp = encode_compute_opt(compute)?;
@@ -1509,7 +1597,14 @@ fn encode_type5b(dreg: u16, cdreg: u16, cond: u8, compute: &Option<ComputeOp>) -
 // bits[31:0]  = offset32
 // ---------------------------------------------------------------------------
 
-fn encode_type15(pm: bool, i_reg: u8, write: bool, lw: bool, ureg: u16, offset: i32) -> Result<u64, EncodeError> {
+fn encode_type15(
+    pm: bool,
+    i_reg: u8,
+    write: bool,
+    lw: bool,
+    ureg: u16,
+    offset: i32,
+) -> Result<u64, EncodeError> {
     let g = if pm { 1u64 } else { 0 };
     let d = if write { 1u64 } else { 0 };
     let lw_bit = if lw { 1u64 } else { 0 };
@@ -1532,7 +1627,15 @@ fn encode_type15(pm: bool, i_reg: u8, write: bool, lw: bool, ureg: u16, offset: 
 // bits[3:0]   = Rx
 // ---------------------------------------------------------------------------
 
-fn encode_type6b(shift_type: u8, sub_op: u8, imm: u8, rn: u16, rx: u16, data_hi: u8, cond: u8) -> Result<u64, EncodeError> {
+fn encode_type6b(
+    shift_type: u8,
+    sub_op: u8,
+    imm: u8,
+    rn: u16,
+    rx: u16,
+    data_hi: u8,
+    cond: u8,
+) -> Result<u64, EncodeError> {
     let op_field = ((shift_type as u64 & 0xF) << 4) | (sub_op as u64 & 3);
     let word = (0x02u64 << 40)
         | ((cond as u64 & 0x1F) << 33)
@@ -1565,25 +1668,37 @@ mod tests {
 
     #[test]
     fn roundtrip_load_imm_r0() {
-        let text = roundtrip(&Instruction::LoadImm { ureg: 0x00, value: 0x0000002A });
+        let text = roundtrip(&Instruction::LoadImm {
+            ureg: 0x00,
+            value: 0x0000002A,
+        });
         assert_eq!(text, "R0 = 0x2A");
     }
 
     #[test]
     fn roundtrip_load_imm_i0() {
-        let text = roundtrip(&Instruction::LoadImm { ureg: 0x10, value: 0xABCD0000 });
+        let text = roundtrip(&Instruction::LoadImm {
+            ureg: 0x10,
+            value: 0xABCD0000,
+        });
         assert_eq!(text, "I0 = -0x54330000");
     }
 
     #[test]
     fn roundtrip_load_imm_mode1() {
-        let text = roundtrip(&Instruction::LoadImm { ureg: 0x70, value: 0x00001000 });
+        let text = roundtrip(&Instruction::LoadImm {
+            ureg: 0x70,
+            value: 0x00001000,
+        });
         assert_eq!(text, "MODE1 = 0x1000");
     }
 
     #[test]
     fn roundtrip_load_imm_r15() {
-        let text = roundtrip(&Instruction::LoadImm { ureg: 0x0F, value: 0xFFFFFFFF });
+        let text = roundtrip(&Instruction::LoadImm {
+            ureg: 0x0F,
+            value: 0xFFFFFFFF,
+        });
         assert_eq!(text, "R15 = -0x1");
     }
 
@@ -1591,19 +1706,37 @@ mod tests {
 
     #[test]
     fn roundtrip_rts() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: false, lr: false, compute: None });
+        let text = roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: false,
+            lr: false,
+            compute: None,
+        });
         assert_eq!(text, "RTS");
     }
 
     #[test]
     fn roundtrip_rti() {
-        let text = roundtrip(&Instruction::Return { interrupt: true, cond: 31, delayed: false, lr: false, compute: None });
+        let text = roundtrip(&Instruction::Return {
+            interrupt: true,
+            cond: 31,
+            delayed: false,
+            lr: false,
+            compute: None,
+        });
         assert_eq!(text, "RTI");
     }
 
     #[test]
     fn roundtrip_conditional_rts() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 0, delayed: false, lr: false, compute: None });
+        let text = roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 0,
+            delayed: false,
+            lr: false,
+            compute: None,
+        });
         assert_eq!(text, "IF EQ RTS");
     }
 
@@ -1614,26 +1747,48 @@ mod tests {
             cond: 31,
             delayed: false,
             lr: false,
-            compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
+            compute: Some(ComputeOp::Alu(AluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            })),
         });
         assert_eq!(text, "RTS , R0 = R1 + R2");
     }
 
     #[test]
     fn roundtrip_rts_db() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: true, lr: false, compute: None });
+        let text = roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: true,
+            lr: false,
+            compute: None,
+        });
         assert_eq!(text, "RTS (DB)");
     }
 
     #[test]
     fn roundtrip_rts_lr() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: false, lr: true, compute: None });
+        let text = roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: false,
+            lr: true,
+            compute: None,
+        });
         assert_eq!(text, "RTS (LR)");
     }
 
     #[test]
     fn roundtrip_rts_db_lr() {
-        let text = roundtrip(&Instruction::Return { interrupt: false, cond: 31, delayed: true, lr: true, compute: None });
+        let text = roundtrip(&Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: true,
+            lr: true,
+            compute: None,
+        });
         assert_eq!(text, "RTS (DB,LR)");
     }
 
@@ -1643,7 +1798,11 @@ mod tests {
     fn roundtrip_add() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = R1 + R2");
     }
@@ -1652,7 +1811,11 @@ mod tests {
     fn roundtrip_sub() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Sub { rn: 3, rx: 4, ry: 5 }),
+            compute: ComputeOp::Alu(AluOp::Sub {
+                rn: 3,
+                rx: 4,
+                ry: 5,
+            }),
         });
         assert_eq!(text, "R3 = R4 - R5");
     }
@@ -1661,7 +1824,11 @@ mod tests {
     fn roundtrip_and() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::And { rn: 6, rx: 7, ry: 8 }),
+            compute: ComputeOp::Alu(AluOp::And {
+                rn: 6,
+                rx: 7,
+                ry: 8,
+            }),
         });
         assert_eq!(text, "R6 = R7 AND R8");
     }
@@ -1670,7 +1837,11 @@ mod tests {
     fn roundtrip_or() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Or { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::Or {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = R1 OR R2");
     }
@@ -1679,7 +1850,11 @@ mod tests {
     fn roundtrip_xor() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Xor { rn: 1, rx: 2, ry: 3 }),
+            compute: ComputeOp::Alu(AluOp::Xor {
+                rn: 1,
+                rx: 2,
+                ry: 3,
+            }),
         });
         assert_eq!(text, "R1 = R2 XOR R3");
     }
@@ -1733,7 +1908,11 @@ mod tests {
     fn roundtrip_min() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Min { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::Min {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = MIN(R1, R2)");
     }
@@ -1742,7 +1921,11 @@ mod tests {
     fn roundtrip_max() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Max { rn: 3, rx: 4, ry: 5 }),
+            compute: ComputeOp::Alu(AluOp::Max {
+                rn: 3,
+                rx: 4,
+                ry: 5,
+            }),
         });
         assert_eq!(text, "R3 = MAX(R4, R5)");
     }
@@ -1751,7 +1934,11 @@ mod tests {
     fn roundtrip_clip() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Clip { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::Clip {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = CLIP R1 BY R2");
     }
@@ -1760,7 +1947,11 @@ mod tests {
     fn roundtrip_conditional_compute() {
         let text = roundtrip(&Instruction::Compute {
             cond: 0, // EQ
-            compute: ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "IF EQ R0 = R1 + R2");
     }
@@ -1769,7 +1960,11 @@ mod tests {
     fn roundtrip_cond_lt() {
         let text = roundtrip(&Instruction::Compute {
             cond: 1, // LT
-            compute: ComputeOp::Alu(AluOp::Sub { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::Sub {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "IF LT R0 = R1 - R2");
     }
@@ -1780,7 +1975,11 @@ mod tests {
     fn roundtrip_float_add() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Falu(FaluOp::Add { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Falu(FaluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "F0 = F1 + F2");
     }
@@ -1789,7 +1988,11 @@ mod tests {
     fn roundtrip_float_sub() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Falu(FaluOp::Sub { rn: 3, rx: 4, ry: 5 }),
+            compute: ComputeOp::Falu(FaluOp::Sub {
+                rn: 3,
+                rx: 4,
+                ry: 5,
+            }),
         });
         assert_eq!(text, "F3 = F4 - F5");
     }
@@ -1863,7 +2066,11 @@ mod tests {
     fn roundtrip_mul_ssf() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Mul(MulOp::MulSsf { rn: 1, rx: 5, ry: 6 }),
+            compute: ComputeOp::Mul(MulOp::MulSsf {
+                rn: 1,
+                rx: 5,
+                ry: 6,
+            }),
         });
         assert_eq!(text, "R1 = R5 * R6 (SSF)");
     }
@@ -1872,7 +2079,11 @@ mod tests {
     fn roundtrip_fmul() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Mul(MulOp::FMul { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Mul(MulOp::FMul {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "F0 = F1 * F2");
     }
@@ -1910,7 +2121,11 @@ mod tests {
     fn roundtrip_lshift() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Lshift { rn: 4, rx: 5, ry: 6 }),
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: 4,
+                rx: 5,
+                ry: 6,
+            }),
         });
         assert_eq!(text, "R4 = LSHIFT R5 BY R6");
     }
@@ -1919,7 +2134,11 @@ mod tests {
     fn roundtrip_ashift() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Ashift { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Ashift {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = ASHIFT R1 BY R2");
     }
@@ -1928,7 +2147,11 @@ mod tests {
     fn roundtrip_rot() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Rot { rn: 1, rx: 2, ry: 3 }),
+            compute: ComputeOp::Shift(ShiftOp::Rot {
+                rn: 1,
+                rx: 2,
+                ry: 3,
+            }),
         });
         assert_eq!(text, "R1 = ROT R2 BY R3");
     }
@@ -1937,7 +2160,11 @@ mod tests {
     fn roundtrip_bset() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Bset { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Bset {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = BSET R1 BY R2");
     }
@@ -1946,7 +2173,11 @@ mod tests {
     fn roundtrip_bclr() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Bclr { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Bclr {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = BCLR R1 BY R2");
     }
@@ -1955,7 +2186,11 @@ mod tests {
     fn roundtrip_btgl() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Btgl { rn: 3, rx: 4, ry: 5 }),
+            compute: ComputeOp::Shift(ShiftOp::Btgl {
+                rn: 3,
+                rx: 4,
+                ry: 5,
+            }),
         });
         assert_eq!(text, "R3 = BTGL R4 BY R5");
     }
@@ -1973,7 +2208,11 @@ mod tests {
     fn roundtrip_fext() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Fext { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Fext {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = FEXT R1 BY R2");
     }
@@ -1982,7 +2221,11 @@ mod tests {
     fn roundtrip_fdep() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Shift(ShiftOp::Fdep { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Shift(ShiftOp::Fdep {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = FDEP R1 BY R2");
     }
@@ -2012,7 +2255,8 @@ mod tests {
         let text = roundtrip(&Instruction::Branch {
             call: false,
             cond: 31,
-            delayed: false, target: BranchTarget::Absolute(0x001234),
+            delayed: false,
+            target: BranchTarget::Absolute(0x001234),
         });
         assert_eq!(text, "JUMP 0x001234");
     }
@@ -2022,7 +2266,8 @@ mod tests {
         let text = roundtrip(&Instruction::Branch {
             call: true,
             cond: 31,
-            delayed: false, target: BranchTarget::Absolute(0x005678),
+            delayed: false,
+            target: BranchTarget::Absolute(0x005678),
         });
         assert_eq!(text, "CALL 0x005678");
     }
@@ -2032,7 +2277,8 @@ mod tests {
         let text = roundtrip(&Instruction::Branch {
             call: false,
             cond: 16, // NE
-            delayed: false, target: BranchTarget::Absolute(0x000100),
+            delayed: false,
+            target: BranchTarget::Absolute(0x000100),
         });
         assert_eq!(text, "IF NE JUMP 0x000100");
     }
@@ -2042,7 +2288,8 @@ mod tests {
         let text = roundtrip(&Instruction::Branch {
             call: false,
             cond: 31,
-            delayed: false, target: BranchTarget::PcRelative(10),
+            delayed: false,
+            target: BranchTarget::PcRelative(10),
         });
         assert_eq!(text, "JUMP (PC,0xA)");
     }
@@ -2052,7 +2299,8 @@ mod tests {
         let text = roundtrip(&Instruction::Branch {
             call: false,
             cond: 31,
-            delayed: false, target: BranchTarget::PcRelative(-5),
+            delayed: false,
+            target: BranchTarget::PcRelative(-5),
         });
         assert_eq!(text, "JUMP (PC,-0x5)");
     }
@@ -2063,7 +2311,11 @@ mod tests {
     fn roundtrip_dm_load_imm_offset() {
         let text = roundtrip(&Instruction::ComputeLoadStore {
             compute: None,
-            access: MemAccess { pm: false, write: false, i_reg: 0 },
+            access: MemAccess {
+                pm: false,
+                write: false,
+                i_reg: 0,
+            },
             dreg: 0,
             offset: 1,
             cond: 31,
@@ -2075,7 +2327,11 @@ mod tests {
     fn roundtrip_pm_store_imm_offset() {
         let text = roundtrip(&Instruction::ComputeLoadStore {
             compute: None,
-            access: MemAccess { pm: true, write: true, i_reg: 2 },
+            access: MemAccess {
+                pm: true,
+                write: true,
+                i_reg: 2,
+            },
             dreg: 5,
             offset: -3,
             cond: 31,
@@ -2086,8 +2342,16 @@ mod tests {
     #[test]
     fn roundtrip_compute_plus_dm_load() {
         let text = roundtrip(&Instruction::ComputeLoadStore {
-            compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
-            access: MemAccess { pm: false, write: false, i_reg: 3 },
+            compute: Some(ComputeOp::Alu(AluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            })),
+            access: MemAccess {
+                pm: false,
+                write: false,
+                i_reg: 3,
+            },
             dreg: 4,
             offset: 0,
             cond: 31,
@@ -2099,7 +2363,11 @@ mod tests {
     fn roundtrip_conditional_type4() {
         let text = roundtrip(&Instruction::ComputeLoadStore {
             compute: None,
-            access: MemAccess { pm: false, write: false, i_reg: 0 },
+            access: MemAccess {
+                pm: false,
+                write: false,
+                i_reg: 0,
+            },
             dreg: 0,
             offset: 1,
             cond: 0, // EQ
@@ -2133,8 +2401,18 @@ mod tests {
     fn roundtrip_dual_read() {
         let text = roundtrip(&Instruction::DualMove {
             compute: None,
-            dm: DagAccess { write: false, i_reg: 0, m_reg: 0, dreg: 0 },
-            pm: DagAccess { write: false, i_reg: 0, m_reg: 0, dreg: 1 },
+            dm: DagAccess {
+                write: false,
+                i_reg: 0,
+                m_reg: 0,
+                dreg: 0,
+            },
+            pm: DagAccess {
+                write: false,
+                i_reg: 0,
+                m_reg: 0,
+                dreg: 1,
+            },
         });
         assert_eq!(text, "R0 = DM(I0, M0), R1 = PM(I8, M8)");
     }
@@ -2143,8 +2421,18 @@ mod tests {
     fn roundtrip_dual_dm_write() {
         let text = roundtrip(&Instruction::DualMove {
             compute: None,
-            dm: DagAccess { write: true, i_reg: 1, m_reg: 2, dreg: 3 },
-            pm: DagAccess { write: false, i_reg: 2, m_reg: 1, dreg: 4 },
+            dm: DagAccess {
+                write: true,
+                i_reg: 1,
+                m_reg: 2,
+                dreg: 3,
+            },
+            pm: DagAccess {
+                write: false,
+                i_reg: 2,
+                m_reg: 1,
+                dreg: 4,
+            },
         });
         assert_eq!(text, "DM(I1, M2) = R3, R4 = PM(I10, M9)");
     }
@@ -2152,9 +2440,23 @@ mod tests {
     #[test]
     fn roundtrip_dual_with_compute() {
         let text = roundtrip(&Instruction::DualMove {
-            compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
-            dm: DagAccess { write: false, i_reg: 0, m_reg: 0, dreg: 3 },
-            pm: DagAccess { write: false, i_reg: 0, m_reg: 0, dreg: 4 },
+            compute: Some(ComputeOp::Alu(AluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            })),
+            dm: DagAccess {
+                write: false,
+                i_reg: 0,
+                m_reg: 0,
+                dreg: 3,
+            },
+            pm: DagAccess {
+                write: false,
+                i_reg: 0,
+                m_reg: 0,
+                dreg: 4,
+            },
         });
         assert_eq!(text, "R0 = R1 + R2, R3 = DM(I0, M0), R4 = PM(I8, M8)");
     }
@@ -2180,7 +2482,8 @@ mod tests {
         let result = encode(&Instruction::Branch {
             call: false,
             cond: 31,
-            delayed: false, target: BranchTarget::Absolute(0x1000000),
+            delayed: false,
+            target: BranchTarget::Absolute(0x1000000),
         });
         assert!(result.is_err());
     }
@@ -2189,7 +2492,11 @@ mod tests {
     fn error_dreg_out_of_range() {
         let result = encode(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 16, rx: 0, ry: 0 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 16,
+                rx: 0,
+                ry: 0,
+            }),
         });
         assert!(result.is_err());
     }
@@ -2198,7 +2505,11 @@ mod tests {
     fn error_offset_out_of_range() {
         let result = encode(&Instruction::ComputeLoadStore {
             compute: None,
-            access: MemAccess { pm: false, write: false, i_reg: 0 },
+            access: MemAccess {
+                pm: false,
+                write: false,
+                i_reg: 0,
+            },
             dreg: 0,
             offset: 33,
             cond: 31,
@@ -2212,7 +2523,11 @@ mod tests {
     fn roundtrip_add_ci() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::AddCi { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Alu(AluOp::AddCi {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "R0 = R1 + R2 + CI");
     }
@@ -2290,7 +2605,11 @@ mod tests {
     fn roundtrip_float_min() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Falu(FaluOp::Min { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Falu(FaluOp::Min {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "F0 = MIN(F1, F2)");
     }
@@ -2299,7 +2618,11 @@ mod tests {
     fn roundtrip_float_max() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Falu(FaluOp::Max { rn: 3, rx: 4, ry: 5 }),
+            compute: ComputeOp::Falu(FaluOp::Max {
+                rn: 3,
+                rx: 4,
+                ry: 5,
+            }),
         });
         assert_eq!(text, "F3 = MAX(F4, F5)");
     }
@@ -2308,7 +2631,11 @@ mod tests {
     fn roundtrip_scalb() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Falu(FaluOp::Scalb { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Falu(FaluOp::Scalb {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "F0 = SCALB F1 BY R2");
     }
@@ -2335,7 +2662,11 @@ mod tests {
     fn roundtrip_copysign() {
         let text = roundtrip(&Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Falu(FaluOp::Copysign { rn: 0, rx: 1, ry: 2 }),
+            compute: ComputeOp::Falu(FaluOp::Copysign {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            }),
         });
         assert_eq!(text, "F0 = F1 COPYSIGN F2");
     }
@@ -2344,7 +2675,12 @@ mod tests {
 
     #[test]
     fn roundtrip_modify() {
-        let instr = Instruction::Modify { i_reg: 7, value: -4, width: MemWidth::Normal, bitrev: false };
+        let instr = Instruction::Modify {
+            i_reg: 7,
+            value: -4,
+            width: MemWidth::Normal,
+            bitrev: false,
+        };
         let bytes = encode(&instr).expect("encode failed");
         let lines = disasm::disassemble(&bytes, 0, false);
         assert!(lines[0].text.contains("MODIFY"));
@@ -2353,14 +2689,24 @@ mod tests {
 
     #[test]
     fn roundtrip_modify_positive() {
-        let instr = Instruction::Modify { i_reg: 0, value: 16, width: MemWidth::Normal, bitrev: false };
+        let instr = Instruction::Modify {
+            i_reg: 0,
+            value: 16,
+            width: MemWidth::Normal,
+            bitrev: false,
+        };
         let text = roundtrip(&instr);
         assert_eq!(text, "I0=MODIFY (I0,0x10)");
     }
 
     #[test]
     fn roundtrip_modify_dag2() {
-        let instr = Instruction::Modify { i_reg: 10, value: 0x100, width: MemWidth::Normal, bitrev: false };
+        let instr = Instruction::Modify {
+            i_reg: 10,
+            value: 0x100,
+            width: MemWidth::Normal,
+            bitrev: false,
+        };
         let text = roundtrip(&instr);
         assert_eq!(text, "I10=MODIFY (I10,0x100)");
     }
@@ -2379,9 +2725,9 @@ mod tests {
                 rm: 0,
                 ra: 8,
                 rxm: 1,
-                rym: 0,  // R4 = R(0+4)
-                rxa: 0,  // R8 = R(0+8)
-                rya: 0,  // R12 = R(0+12)
+                rym: 0, // R4 = R(0+4)
+                rxa: 0, // R8 = R(0+8)
+                rya: 0, // R12 = R(0+12)
             }),
         };
         let text = roundtrip(&instr);
@@ -2400,9 +2746,9 @@ mod tests {
                 rm: 3,
                 ra: 9,
                 rxm: 2,
-                rym: 1,  // R5 = R(1+4)
-                rxa: 2,  // R10 = R(2+8)
-                rya: 2,  // R14 = R(2+12)
+                rym: 1, // R5 = R(1+4)
+                rxa: 2, // R10 = R(2+8)
+                rya: 2, // R14 = R(2+12)
             }),
         };
         let text = roundtrip(&instr);
@@ -2529,7 +2875,13 @@ mod tests {
     #[test]
     fn roundtrip_imm_lshift_positive() {
         let instr = Instruction::ImmShift {
-            shift_type: 0, sub_op: 0, imm: 3, rn: 4, rx: 5, data_hi: 0, cond: 31,
+            shift_type: 0,
+            sub_op: 0,
+            imm: 3,
+            rn: 4,
+            rx: 5,
+            data_hi: 0,
+            cond: 31,
         };
         let text = roundtrip(&instr);
         assert_eq!(text, "R4=LSHIFT R5 BY 0x3");
@@ -2538,8 +2890,13 @@ mod tests {
     #[test]
     fn roundtrip_imm_lshift_negative() {
         let instr = Instruction::ImmShift {
-            shift_type: 0, sub_op: 0,
-            imm: (-1i8) as u8, rn: 0, rx: 1, data_hi: 0, cond: 31,
+            shift_type: 0,
+            sub_op: 0,
+            imm: (-1i8) as u8,
+            rn: 0,
+            rx: 1,
+            data_hi: 0,
+            cond: 31,
         };
         let text = roundtrip(&instr);
         assert_eq!(text, "R0=LSHIFT R1 BY -0x1");
@@ -2548,7 +2905,13 @@ mod tests {
     #[test]
     fn roundtrip_imm_ashift() {
         let instr = Instruction::ImmShift {
-            shift_type: 2, sub_op: 0, imm: 8, rn: 2, rx: 3, data_hi: 0, cond: 31,
+            shift_type: 2,
+            sub_op: 0,
+            imm: 8,
+            rn: 2,
+            rx: 3,
+            data_hi: 0,
+            cond: 31,
         };
         let text = roundtrip(&instr);
         assert_eq!(text, "R2=ASHIFT R3 BY 0x8");
@@ -2558,9 +2921,13 @@ mod tests {
     fn roundtrip_imm_fext() {
         // R0 = FEXT R1 BY 0x1F:0x1
         let instr = Instruction::ImmShift {
-            shift_type: 1, sub_op: 0,
+            shift_type: 1,
+            sub_op: 0,
             imm: 0x1F | (1 << 6), // pos=31, len_lo=1
-            rn: 0, rx: 1, data_hi: 0, cond: 31, // len_hi = 0
+            rn: 0,
+            rx: 1,
+            data_hi: 0,
+            cond: 31, // len_hi = 0
         };
         let text = roundtrip(&instr);
         assert_eq!(text, "R0=FEXT R1 BY 0x1F:0x1");
@@ -2578,9 +2945,9 @@ mod tests {
                 rm: 0,
                 ra: 11,
                 rxm: 2,
-                rym: 2,  // R6 = R(2+4)
-                rxa: 1,  // R9 = R(1+8)
-                rya: 1,  // R13 = R(1+12)
+                rym: 2, // R6 = R(2+4)
+                rxa: 1, // R9 = R(1+8)
+                rya: 1, // R13 = R(1+12)
             }),
         };
         let text = roundtrip(&instr);
@@ -2606,7 +2973,11 @@ mod tests {
             dreg: 0,
             cdreg: 0,
             cond: 31,
-            compute: Some(ComputeOp::Alu(AluOp::Add { rn: 0, rx: 1, ry: 2 })),
+            compute: Some(ComputeOp::Alu(AluOp::Add {
+                rn: 0,
+                rx: 1,
+                ry: 2,
+            })),
         });
         assert_eq!(text, "R0 = R1 + R2 , R0<->S0");
     }
@@ -2654,8 +3025,22 @@ mod tests {
     #[test]
     fn mulop_opcode_audit() {
         // `Rn = Rx * Ry` family (template 01yx f00r).
-        assert_eq!(mul_opcode(MulOp::MulSsi { rn: 0, rx: 1, ry: 2 }), 0x70);
-        assert_eq!(mul_opcode(MulOp::MulSsf { rn: 0, rx: 1, ry: 2 }), 0x78);
+        assert_eq!(
+            mul_opcode(MulOp::MulSsi {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x70
+        );
+        assert_eq!(
+            mul_opcode(MulOp::MulSsf {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x78
+        );
         // `mrf = Rx * Ry` family (template 01yx f10r).
         assert_eq!(mul_opcode(MulOp::MrfMulSsi { rx: 1, ry: 2 }), 0x74);
         assert_eq!(mul_opcode(MulOp::MrfMulSsf { rx: 1, ry: 2 }), 0x7C);
@@ -2663,7 +3048,14 @@ mod tests {
         // `mrb = Rx * Ry` family (template 01yx f11r).
         assert_eq!(mul_opcode(MulOp::MrbMulSsf { rx: 1, ry: 2 }), 0x7E);
         // Multiply-accumulate variants (template 10yx fXXr).
-        assert_eq!(mul_opcode(MulOp::MacSsf { rn: 0, rx: 1, ry: 2 }), 0xB8);
+        assert_eq!(
+            mul_opcode(MulOp::MacSsf {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0xB8
+        );
         assert_eq!(mul_opcode(MulOp::MrfMacSsf { rx: 1, ry: 2 }), 0xBC);
         assert_eq!(mul_opcode(MulOp::MrbMacSsf { rx: 1, ry: 2 }), 0xBE);
         // Multiply-subtract variants (template 11yx fXXr).
@@ -2673,27 +3065,104 @@ mod tests {
         assert_eq!(mul_opcode(MulOp::ClrMrf), 0x14);
         assert_eq!(mul_opcode(MulOp::ClrMrb), 0x16);
         // `Fn = Fx * Fy` (0011 0000).
-        assert_eq!(mul_opcode(MulOp::FMul { rn: 0, rx: 1, ry: 2 }), 0x30);
+        assert_eq!(
+            mul_opcode(MulOp::FMul {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x30
+        );
     }
 
     #[test]
     fn shiftop_opcode_audit() {
-        assert_eq!(shift_opcode(ShiftOp::Lshift { rn: 0, rx: 1, ry: 2 }), 0x00);
-        assert_eq!(shift_opcode(ShiftOp::Ashift { rn: 0, rx: 1, ry: 2 }), 0x04);
-        assert_eq!(shift_opcode(ShiftOp::Rot { rn: 0, rx: 1, ry: 2 }), 0x08);
-        assert_eq!(shift_opcode(ShiftOp::OrLshift { rn: 0, rx: 1, ry: 2 }), 0x20);
-        assert_eq!(shift_opcode(ShiftOp::OrAshift { rn: 0, rx: 1, ry: 2 }), 0x24);
-        assert_eq!(shift_opcode(ShiftOp::Fext { rn: 0, rx: 1, ry: 2 }), 0x40);
-        assert_eq!(shift_opcode(ShiftOp::Fdep { rn: 0, rx: 1, ry: 2 }), 0x44);
+        assert_eq!(
+            shift_opcode(ShiftOp::Lshift {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x00
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::Ashift {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x04
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::Rot {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x08
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::OrLshift {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x20
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::OrAshift {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x24
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::Fext {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x40
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::Fdep {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0x44
+        );
         assert_eq!(shift_opcode(ShiftOp::Exp { rn: 0, rx: 1 }), 0x80);
         assert_eq!(shift_opcode(ShiftOp::ExpEx { rn: 0, rx: 1 }), 0x84);
         assert_eq!(shift_opcode(ShiftOp::Leftz { rn: 0, rx: 1 }), 0x88);
         assert_eq!(shift_opcode(ShiftOp::Lefto { rn: 0, rx: 1 }), 0x8C);
         assert_eq!(shift_opcode(ShiftOp::Fpack { rn: 0, rx: 1 }), 0x90);
         assert_eq!(shift_opcode(ShiftOp::Funpack { rn: 0, rx: 1 }), 0x94);
-        assert_eq!(shift_opcode(ShiftOp::Bset { rn: 0, rx: 1, ry: 2 }), 0xC0);
-        assert_eq!(shift_opcode(ShiftOp::Bclr { rn: 0, rx: 1, ry: 2 }), 0xC4);
-        assert_eq!(shift_opcode(ShiftOp::Btgl { rn: 0, rx: 1, ry: 2 }), 0xC8);
+        assert_eq!(
+            shift_opcode(ShiftOp::Bset {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0xC0
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::Bclr {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0xC4
+        );
+        assert_eq!(
+            shift_opcode(ShiftOp::Btgl {
+                rn: 0,
+                rx: 1,
+                ry: 2
+            }),
+            0xC8
+        );
         assert_eq!(shift_opcode(ShiftOp::Btst { rx: 1, ry: 2 }), 0xCC);
     }
 }

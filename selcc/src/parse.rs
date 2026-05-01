@@ -34,8 +34,15 @@ fn is_type_start(t: &Token) -> bool {
     if let Token::Ident(name) = t {
         return matches!(
             name.as_str(),
-            "__builtin_quad" | "__pm" | "__dm" | "__byte_addressed" | "__word_addressed"
-                | "size_t" | "ptrdiff_t" | "intptr_t" | "uintptr_t"
+            "__builtin_quad"
+                | "__pm"
+                | "__dm"
+                | "__byte_addressed"
+                | "__word_addressed"
+                | "size_t"
+                | "ptrdiff_t"
+                | "intptr_t"
+                | "uintptr_t"
         );
     }
     false
@@ -132,7 +139,8 @@ impl<'a> Parser<'a> {
             } else if self.current == Token::Volatile {
                 has_volatile = true;
                 self.advance()?;
-            } else if matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed" | "__section" | "__attribute__" | "__inline" | "__inline__" | "inline" | "__restrict" | "restrict" | "__restrict__")) {
+            } else if matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed" | "__section" | "__attribute__" | "__inline" | "__inline__" | "inline" | "__restrict" | "restrict" | "__restrict__"))
+            {
                 let is_attribute =
                     matches!(&self.current, Token::Ident(name) if name == "__attribute__");
                 self.advance()?;
@@ -140,15 +148,21 @@ impl<'a> Parser<'a> {
                 if self.current == Token::LParen {
                     let mut depth = 0;
                     loop {
-                        if self.current == Token::LParen { depth += 1; }
-                        if self.current == Token::RParen { depth -= 1; }
+                        if self.current == Token::LParen {
+                            depth += 1;
+                        }
+                        if self.current == Token::RParen {
+                            depth -= 1;
+                        }
                         if is_attribute
                             && matches!(&self.current, Token::Ident(name) if name == "weak")
                         {
                             self.pending_weak_attr = true;
                         }
                         self.advance()?;
-                        if depth == 0 { break; }
+                        if depth == 0 {
+                            break;
+                        }
                     }
                 }
             } else {
@@ -171,38 +185,100 @@ impl<'a> Parser<'a> {
 
         loop {
             match &self.current {
-                Token::Unsigned => { has_unsigned = true; consumed_specifier = true; self.advance()?; }
-                Token::Signed => { consumed_specifier = true; self.advance()?; }
-                Token::Long => { long_count += 1; consumed_specifier = true; self.advance()?; }
-                Token::Short => { has_short = true; consumed_specifier = true; self.advance()?; }
-                Token::Int => { consumed_specifier = true; self.advance()?; }
-                Token::Char => { has_char = true; consumed_specifier = true; self.advance()?; }
-                Token::Float => { has_float = true; consumed_specifier = true; self.advance()?; }
-                Token::Double => { has_double = true; consumed_specifier = true; self.advance()?; }
-                Token::Void => { has_void = true; consumed_specifier = true; self.advance()?; }
-                Token::Complex => { has_complex = true; consumed_specifier = true; self.advance()?; }
-                Token::Imaginary => { has_imaginary = true; consumed_specifier = true; self.advance()?; }
-                Token::Const => { has_const = true; self.advance()?; }
-                Token::Volatile => { has_volatile = true; self.advance()?; }
+                Token::Unsigned => {
+                    has_unsigned = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Signed => {
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Long => {
+                    long_count += 1;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Short => {
+                    has_short = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Int => {
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Char => {
+                    has_char = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Float => {
+                    has_float = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Double => {
+                    has_double = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Void => {
+                    has_void = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Complex => {
+                    has_complex = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Imaginary => {
+                    has_imaginary = true;
+                    consumed_specifier = true;
+                    self.advance()?;
+                }
+                Token::Const => {
+                    has_const = true;
+                    self.advance()?;
+                }
+                Token::Volatile => {
+                    has_volatile = true;
+                    self.advance()?;
+                }
                 _ => break,
             }
         }
 
         // If we consumed simple specifiers, resolve the type.
         if consumed_specifier {
-            let mut ty = if has_void { Type::Void }
-                else if has_float { Type::Float }
-                else if has_double { Type::Double }
-                else if has_char && has_unsigned { Type::Unsigned(Box::new(Type::Char)) }
-                else if has_char { Type::Char }
-                else if has_short && has_unsigned { Type::Unsigned(Box::new(Type::Short)) }
-                else if has_short { Type::Short }
-                else if long_count >= 2 && has_unsigned { Type::ULongLong }
-                else if long_count >= 2 { Type::LongLong }
-                else if long_count == 1 && has_unsigned { Type::Unsigned(Box::new(Type::Long)) }
-                else if long_count == 1 { Type::Long }
-                else if has_unsigned { Type::Unsigned(Box::new(Type::Int)) }
-                else { Type::Int }; // int, or bare signed
+            let mut ty = if has_void {
+                Type::Void
+            } else if has_float {
+                Type::Float
+            } else if has_double {
+                Type::Double
+            } else if has_char && has_unsigned {
+                Type::Unsigned(Box::new(Type::Char))
+            } else if has_char {
+                Type::Char
+            } else if has_short && has_unsigned {
+                Type::Unsigned(Box::new(Type::Short))
+            } else if has_short {
+                Type::Short
+            } else if long_count >= 2 && has_unsigned {
+                Type::ULongLong
+            } else if long_count >= 2 {
+                Type::LongLong
+            } else if long_count == 1 && has_unsigned {
+                Type::Unsigned(Box::new(Type::Long))
+            } else if long_count == 1 {
+                Type::Long
+            } else if has_unsigned {
+                Type::Unsigned(Box::new(Type::Int))
+            } else {
+                Type::Int
+            }; // int, or bare signed
             if has_complex {
                 ty = Type::Complex(Box::new(ty));
             } else if has_imaginary {
@@ -251,8 +327,7 @@ impl<'a> Parser<'a> {
                         if self.block_depth > 0 {
                             // Inside a function body: collect for a
                             // block-scoped `Stmt::EnumDecl`.
-                            self.pending_block_enum_consts
-                                .push((const_name, next_val));
+                            self.pending_block_enum_consts.push((const_name, next_val));
                         } else {
                             self.enum_constants.push((const_name, next_val));
                         }
@@ -318,24 +393,27 @@ impl<'a> Parser<'a> {
                 {
                     return *v;
                 }
-                if let Some((_, v)) = self
-                    .enum_constants
-                    .iter()
-                    .rev()
-                    .find(|(n, _)| n == name)
-                {
+                if let Some((_, v)) = self.enum_constants.iter().rev().find(|(n, _)| n == name) {
                     return *v;
                 }
                 0
             }
-            Expr::Unary { op: UnaryOp::Neg, operand } => -self.eval_enum_init(operand),
-            Expr::Unary { op: UnaryOp::BitNot, operand } => !self.eval_enum_init(operand),
-            Expr::Unary { op: UnaryOp::LogNot, operand }
-                if self.eval_enum_init(operand) == 0 =>
-            {
-                1
-            }
-            Expr::Unary { op: UnaryOp::LogNot, .. } => 0,
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => -self.eval_enum_init(operand),
+            Expr::Unary {
+                op: UnaryOp::BitNot,
+                operand,
+            } => !self.eval_enum_init(operand),
+            Expr::Unary {
+                op: UnaryOp::LogNot,
+                operand,
+            } if self.eval_enum_init(operand) == 0 => 1,
+            Expr::Unary {
+                op: UnaryOp::LogNot,
+                ..
+            } => 0,
             Expr::Binary { op, lhs, rhs } => {
                 let l = self.eval_enum_init(lhs);
                 let r = self.eval_enum_init(rhs);
@@ -343,8 +421,20 @@ impl<'a> Parser<'a> {
                     BinaryOp::Add => l + r,
                     BinaryOp::Sub => l - r,
                     BinaryOp::Mul => l * r,
-                    BinaryOp::Div => if r == 0 { 0 } else { l / r },
-                    BinaryOp::Mod => if r == 0 { 0 } else { l % r },
+                    BinaryOp::Div => {
+                        if r == 0 {
+                            0
+                        } else {
+                            l / r
+                        }
+                    }
+                    BinaryOp::Mod => {
+                        if r == 0 {
+                            0
+                        } else {
+                            l % r
+                        }
+                    }
                     BinaryOp::Shl => l << r,
                     BinaryOp::Shr => l >> r,
                     BinaryOp::BitAnd => l & r,
@@ -360,7 +450,11 @@ impl<'a> Parser<'a> {
                     BinaryOp::LogOr => ((l != 0) || (r != 0)) as i64,
                 }
             }
-            Expr::Ternary { cond, then_expr, else_expr } => {
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 if self.eval_enum_init(cond) != 0 {
                     self.eval_enum_init(then_expr)
                 } else {
@@ -415,12 +509,7 @@ impl<'a> Parser<'a> {
             {
                 return Some(*v);
             }
-            if let Some((_, v)) = self
-                .enum_constants
-                .iter()
-                .rev()
-                .find(|(n, _)| n == name)
-            {
+            if let Some((_, v)) = self.enum_constants.iter().rev().find(|(n, _)| n == name) {
                 return Some(*v);
             }
             return None;
@@ -460,8 +549,20 @@ impl<'a> Parser<'a> {
                     BinaryOp::Add => Some(l + r),
                     BinaryOp::Sub => Some(l - r),
                     BinaryOp::Mul => Some(l * r),
-                    BinaryOp::Div => if r == 0 { None } else { Some(l / r) },
-                    BinaryOp::Mod => if r == 0 { None } else { Some(l % r) },
+                    BinaryOp::Div => {
+                        if r == 0 {
+                            None
+                        } else {
+                            Some(l / r)
+                        }
+                    }
+                    BinaryOp::Mod => {
+                        if r == 0 {
+                            None
+                        } else {
+                            Some(l % r)
+                        }
+                    }
                     BinaryOp::BitAnd => Some(l & r),
                     BinaryOp::BitOr => Some(l | r),
                     BinaryOp::BitXor => Some(l ^ r),
@@ -476,7 +577,11 @@ impl<'a> Parser<'a> {
                     BinaryOp::LogAnd | BinaryOp::LogOr => unreachable!(),
                 }
             }
-            Expr::Ternary { cond, then_expr, else_expr } => {
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
                 let c = self.try_const_eval_with_enums(cond)?;
                 if c != 0 {
                     self.try_const_eval_with_enums(then_expr)
@@ -514,7 +619,8 @@ impl<'a> Parser<'a> {
                 if self.current == Token::LParen && self.is_fnptr_declarator() {
                     self.advance()?; // (
                     let (stars, alias, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
-                    let final_ty = self.finish_paren_ptr_type(ty, stars, has_brackets, array_dim)?;
+                    let final_ty =
+                        self.finish_paren_ptr_type(ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias.clone());
                     typedefs.push((alias, final_ty));
@@ -596,14 +702,23 @@ impl<'a> Parser<'a> {
 
             // Standalone struct/union definition: `struct foo { ... };`
             if self.current == Token::Semicolon
-                && matches!(&ty, Type::Struct { .. } | Type::Union { .. } | Type::Enum { .. })
+                && matches!(
+                    &ty,
+                    Type::Struct { .. } | Type::Union { .. } | Type::Enum { .. }
+                )
             {
                 self.advance()?;
                 // Record struct/union definition in struct_defs.
                 // Skip forward declarations (empty fields).
                 match &ty {
-                    Type::Struct { name: Some(n), fields } |
-                    Type::Union { name: Some(n), fields } if !fields.is_empty() => {
+                    Type::Struct {
+                        name: Some(n),
+                        fields,
+                    }
+                    | Type::Union {
+                        name: Some(n),
+                        fields,
+                    } if !fields.is_empty() => {
                         struct_defs.push((n.clone(), fields.clone()));
                     }
                     _ => {}
@@ -689,86 +804,89 @@ impl<'a> Parser<'a> {
                     }
                 } else {
                     if self.current != Token::RParen {
-                    loop {
-                        if self.current == Token::Ellipsis {
-                            self.advance()?;
-                            is_variadic = true;
-                            break;
-                        }
-                        let pty = self.parse_type()?;
-                        let pty = self.parse_pointer_type(pty);
-                        // C89/C99 6.7.5.3/10: `(void)` as the sole
-                        // parameter list means "no arguments", not
-                        // "one parameter of type void". It must be
-                        // unnamed and immediately followed by `)`.
-                        if matches!(pty, crate::types::Type::Void)
-                            && params.is_empty()
-                            && !is_variadic
-                            && self.current == Token::RParen
-                        {
-                            break;
-                        }
-                        // Check for function pointer or pointer-to-array parameter
-                        if self.current == Token::LParen && self.is_fnptr_declarator() {
-                            self.advance()?; // (
-                            self.expect(&Token::Star)?;
-                            // Name is optional: void (*)(void) vs void (*fp)(void)
-                            let pname = if let Token::Ident(_) = &self.current {
-                                self.expect_ident()?
-                            } else {
-                                format!("__param{}", params.len())
-                            };
-                            self.expect(&Token::RParen)?;
-                            let param_ty = if self.current == Token::LParen {
-                                let fp_params = self.parse_fnptr_params()?;
-                                Type::FunctionPtr {
-                                    return_type: Box::new(pty),
-                                    params: fp_params,
-                                }
-                            } else {
-                                // Pointer to array: int (*m)[N]
-                                let (arr_ty, _) = self.parse_array_dimensions(pty)?;
-                                Type::Pointer(Box::new(arr_ty))
-                            };
-                            params.push((pname, param_ty));
-                        } else if self.current == Token::RParen || self.current == Token::Comma {
-                            // Unnamed parameter (declaration only).
-                            let pname = format!("__param{}", params.len());
-                            params.push((pname, pty));
-                        } else {
-                            // Skip const/volatile/__restrict between type and parameter name
-                            while matches!(self.current, Token::Const | Token::Volatile)
-                                || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__restrict" | "restrict" | "__restrict__"))
-                            {
+                        loop {
+                            if self.current == Token::Ellipsis {
                                 self.advance()?;
+                                is_variadic = true;
+                                break;
                             }
-                            let pname = self.expect_ident()?;
-                            // Array parameter decay: int arr[N] -> int *arr
-                            // C99 6.7.5.3: allows static/const/restrict/volatile inside []
-                            let pty = if self.current == Token::LBracket {
-                                self.advance()?;
-                                // Skip qualifiers inside []: static, const, restrict, volatile
-                                while matches!(self.current, Token::Static | Token::Const | Token::Volatile)
-                                    || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "restrict" | "__restrict" | "__restrict__"))
+                            let pty = self.parse_type()?;
+                            let pty = self.parse_pointer_type(pty);
+                            // C89/C99 6.7.5.3/10: `(void)` as the sole
+                            // parameter list means "no arguments", not
+                            // "one parameter of type void". It must be
+                            // unnamed and immediately followed by `)`.
+                            if matches!(pty, crate::types::Type::Void)
+                                && params.is_empty()
+                                && !is_variadic
+                                && self.current == Token::RParen
+                            {
+                                break;
+                            }
+                            // Check for function pointer or pointer-to-array parameter
+                            if self.current == Token::LParen && self.is_fnptr_declarator() {
+                                self.advance()?; // (
+                                self.expect(&Token::Star)?;
+                                // Name is optional: void (*)(void) vs void (*fp)(void)
+                                let pname = if let Token::Ident(_) = &self.current {
+                                    self.expect_ident()?
+                                } else {
+                                    format!("__param{}", params.len())
+                                };
+                                self.expect(&Token::RParen)?;
+                                let param_ty = if self.current == Token::LParen {
+                                    let fp_params = self.parse_fnptr_params()?;
+                                    Type::FunctionPtr {
+                                        return_type: Box::new(pty),
+                                        params: fp_params,
+                                    }
+                                } else {
+                                    // Pointer to array: int (*m)[N]
+                                    let (arr_ty, _) = self.parse_array_dimensions(pty)?;
+                                    Type::Pointer(Box::new(arr_ty))
+                                };
+                                params.push((pname, param_ty));
+                            } else if self.current == Token::RParen || self.current == Token::Comma
+                            {
+                                // Unnamed parameter (declaration only).
+                                let pname = format!("__param{}", params.len());
+                                params.push((pname, pty));
+                            } else {
+                                // Skip const/volatile/__restrict between type and parameter name
+                                while matches!(self.current, Token::Const | Token::Volatile)
+                                    || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__restrict" | "restrict" | "__restrict__"))
                                 {
                                     self.advance()?;
                                 }
-                                if self.current != Token::RBracket {
-                                    self.parse_expr()?; // consume size, discard
-                                }
-                                self.expect(&Token::RBracket)?;
-                                Type::Pointer(Box::new(pty))
+                                let pname = self.expect_ident()?;
+                                // Array parameter decay: int arr[N] -> int *arr
+                                // C99 6.7.5.3: allows static/const/restrict/volatile inside []
+                                let pty = if self.current == Token::LBracket {
+                                    self.advance()?;
+                                    // Skip qualifiers inside []: static, const, restrict, volatile
+                                    while matches!(
+                                        self.current,
+                                        Token::Static | Token::Const | Token::Volatile
+                                    ) || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "restrict" | "__restrict" | "__restrict__"))
+                                    {
+                                        self.advance()?;
+                                    }
+                                    if self.current != Token::RBracket {
+                                        self.parse_expr()?; // consume size, discard
+                                    }
+                                    self.expect(&Token::RBracket)?;
+                                    Type::Pointer(Box::new(pty))
+                                } else {
+                                    pty
+                                };
+                                params.push((pname, pty));
+                            }
+                            if self.current == Token::Comma {
+                                self.advance()?;
                             } else {
-                                pty
-                            };
-                            params.push((pname, pty));
+                                break;
+                            }
                         }
-                        if self.current == Token::Comma {
-                            self.advance()?;
-                        } else {
-                            break;
-                        }
-                    }
                     }
                     self.expect(&Token::RParen)?;
                 }
@@ -896,7 +1014,11 @@ impl<'a> Parser<'a> {
             globals,
             typedefs,
             struct_defs,
-            enum_constants: self.enum_constants.drain(..).chain(enum_constants).collect(),
+            enum_constants: self
+                .enum_constants
+                .drain(..)
+                .chain(enum_constants)
+                .collect(),
             variadic_functions: variadic_decls,
             variadic_named_counts,
             complex_arg_callees,
@@ -928,8 +1050,10 @@ impl<'a> Parser<'a> {
                 // Check for function pointer or pointer-to-array field
                 if self.current == Token::LParen && self.is_fnptr_declarator() {
                     self.advance()?; // (
-                    let (stars, field_name, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
-                    let final_ty = self.finish_paren_ptr_type(field_ty, stars, has_brackets, array_dim)?;
+                    let (stars, field_name, has_brackets, array_dim) =
+                        self.parse_paren_ptr_decl()?;
+                    let final_ty =
+                        self.finish_paren_ptr_type(field_ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
                     fields.push((field_name, final_ty));
                     continue;
@@ -1049,9 +1173,21 @@ impl<'a> Parser<'a> {
         }
         !matches!(
             word,
-            b"void" | b"int" | b"char" | b"short" | b"long" | b"float" | b"double"
-                | b"unsigned" | b"signed" | b"struct" | b"union" | b"enum" | b"const"
-                | b"volatile" | b"_Bool"
+            b"void"
+                | b"int"
+                | b"char"
+                | b"short"
+                | b"long"
+                | b"float"
+                | b"double"
+                | b"unsigned"
+                | b"signed"
+                | b"struct"
+                | b"union"
+                | b"enum"
+                | b"const"
+                | b"volatile"
+                | b"_Bool"
         )
     }
 
@@ -1127,12 +1263,13 @@ impl<'a> Parser<'a> {
                 ty = Type::Pointer(Box::new(ty));
             }
             if has_brackets {
-                let dim = array_dim.map(|d| match d {
-                    Expr::IntLit(n, _) => Ok(n as usize),
-                    _ => Err(self.err(
-                        "non-constant array dimension for function pointer array".into(),
-                    )),
-                }).transpose()?;
+                let dim = array_dim
+                    .map(|d| match d {
+                        Expr::IntLit(n, _) => Ok(n as usize),
+                        _ => Err(self
+                            .err("non-constant array dimension for function pointer array".into())),
+                    })
+                    .transpose()?;
                 Ok(Type::Array(Box::new(ty), dim))
             } else {
                 Ok(ty)
@@ -1329,7 +1466,9 @@ impl<'a> Parser<'a> {
                         if self.current == Token::LParen {
                             depth += 1;
                         } else if self.current == Token::RParen {
-                            if depth == 0 { break; } // outer RParen
+                            if depth == 0 {
+                                break;
+                            } // outer RParen
                             depth -= 1;
                         } else if self.current == Token::Colon && depth == 0 {
                             break; // next operand section
@@ -1364,6 +1503,7 @@ impl<'a> Parser<'a> {
                     self.typedef_names.insert(alias);
                 } else {
                     let alias = self.expect_ident()?;
+                    let _ = self.parse_array_dimensions(_ty)?;
                     self.typedef_names.insert(alias);
                     self.expect(&Token::Semicolon)?;
                 }
@@ -1391,9 +1531,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 self.parse_var_decl_static(false)
             }
-            t if is_type_start(t) => {
-                self.parse_var_decl_static(false)
-            }
+            t if is_type_start(t) => self.parse_var_decl_static(false),
             Token::Ident(name) if self.typedef_names.contains(name) => {
                 self.parse_var_decl_static(false)
             }
@@ -1451,8 +1589,14 @@ impl<'a> Parser<'a> {
         if self.current == Token::Semicolon {
             self.advance()?;
             match &base_ty {
-                Type::Struct { name: Some(_), fields }
-                | Type::Union { name: Some(_), fields } if !fields.is_empty() => {
+                Type::Struct {
+                    name: Some(_),
+                    fields,
+                }
+                | Type::Union {
+                    name: Some(_),
+                    fields,
+                } if !fields.is_empty() => {
                     let var_decl = Stmt::VarDecl {
                         name: String::new(),
                         ty: base_ty,
@@ -1497,7 +1641,13 @@ impl<'a> Parser<'a> {
                 None
             };
             self.expect(&Token::Semicolon)?;
-            let var_decl = Stmt::VarDecl { name, ty: final_ty, init, is_static, vla_dim: None };
+            let var_decl = Stmt::VarDecl {
+                name,
+                ty: final_ty,
+                init,
+                is_static,
+                vla_dim: None,
+            };
             if let Some(enum_decl) = leading_enum_decl {
                 return Ok(Stmt::DeclGroup(vec![enum_decl, var_decl]));
             }
@@ -1527,7 +1677,13 @@ impl<'a> Parser<'a> {
             }
             _ => (ty, vla_dim),
         };
-        stmts.push(Stmt::VarDecl { name, ty, init, is_static, vla_dim });
+        stmts.push(Stmt::VarDecl {
+            name,
+            ty,
+            init,
+            is_static,
+            vla_dim,
+        });
 
         // Parse additional comma-separated declarators.  Each declarator
         // applies its own pointer/array syntax to the declaration specifier
@@ -1562,7 +1718,13 @@ impl<'a> Parser<'a> {
                 }
                 _ => (decl_ty, decl_vla_dim),
             };
-            stmts.push(Stmt::VarDecl { name: decl_name, ty: decl_ty, init: decl_init, is_static, vla_dim: decl_vla_dim });
+            stmts.push(Stmt::VarDecl {
+                name: decl_name,
+                ty: decl_ty,
+                init: decl_init,
+                is_static,
+                vla_dim: decl_vla_dim,
+            });
         }
 
         self.expect(&Token::Semicolon)?;
@@ -1807,7 +1969,6 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Switch { expr, body })
     }
 
-
     fn parse_do_while(&mut self) -> Result<Stmt, Error> {
         self.expect(&Token::Do)?;
 
@@ -2043,7 +2204,10 @@ impl<'a> Parser<'a> {
                     // if the expr is an Ident, otherwise create an indirect call.
                     match expr {
                         Expr::Ident(ref name) => {
-                            expr = Expr::Call { name: name.clone(), args };
+                            expr = Expr::Call {
+                                name: name.clone(),
+                                args,
+                            };
                         }
                         _ => {
                             // Indirect call through function pointer expression.
@@ -2220,10 +2384,7 @@ impl<'a> Parser<'a> {
                     Ok(expr)
                 }
             }
-            _ => Err(self.err(format!(
-                "expected expression, got {:?}",
-                self.current
-            ))),
+            _ => Err(self.err(format!("expected expression, got {:?}", self.current))),
         }
     }
 }
@@ -2234,12 +2395,35 @@ fn const_eval(expr: &Expr) -> i64 {
     match expr {
         Expr::IntLit(v, _) => *v,
         Expr::CharLit(v) => *v,
-        Expr::Unary { op: UnaryOp::Neg, operand } => -const_eval(operand),
-        Expr::Binary { op: BinaryOp::Add, lhs, rhs } => const_eval(lhs) + const_eval(rhs),
-        Expr::Binary { op: BinaryOp::Sub, lhs, rhs } => const_eval(lhs) - const_eval(rhs),
-        Expr::Binary { op: BinaryOp::Mul, lhs, rhs } => const_eval(lhs) * const_eval(rhs),
-        Expr::Binary { op: BinaryOp::Shl, lhs, rhs } => const_eval(lhs) << const_eval(rhs),
-        Expr::Binary { op: BinaryOp::Shr, lhs, rhs } => const_eval(lhs) >> const_eval(rhs),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => -const_eval(operand),
+        Expr::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } => const_eval(lhs) + const_eval(rhs),
+        Expr::Binary {
+            op: BinaryOp::Sub,
+            lhs,
+            rhs,
+        } => const_eval(lhs) - const_eval(rhs),
+        Expr::Binary {
+            op: BinaryOp::Mul,
+            lhs,
+            rhs,
+        } => const_eval(lhs) * const_eval(rhs),
+        Expr::Binary {
+            op: BinaryOp::Shl,
+            lhs,
+            rhs,
+        } => const_eval(lhs) << const_eval(rhs),
+        Expr::Binary {
+            op: BinaryOp::Shr,
+            lhs,
+            rhs,
+        } => const_eval(lhs) >> const_eval(rhs),
         _ => 0,
     }
 }
@@ -2316,7 +2500,11 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
                 BinaryOp::LogAnd | BinaryOp::LogOr => unreachable!(),
             }
         }
-        Expr::Ternary { cond, then_expr, else_expr } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
             let c = try_const_eval(cond)?;
             if c != 0 {
                 try_const_eval(then_expr)
@@ -2334,7 +2522,8 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
                 // this expression as non-constant; arrays of unknown
                 // constant dimension become VLAs downstream and are
                 // sized correctly once struct_defs is in scope.
-                if matches!(ty.unqualified(), Type::Struct { fields, .. } | Type::Union { fields, .. } if fields.is_empty()) {
+                if matches!(ty.unqualified(), Type::Struct { fields, .. } | Type::Union { fields, .. } if fields.is_empty())
+                {
                     return None;
                 }
                 Some(ty.size_bytes() as i64)
@@ -2488,7 +2677,10 @@ mod tests {
         let unit = parse("int f() { int x; return x; }").unwrap();
         match &unit.functions[0].body[0] {
             Stmt::VarDecl {
-                name, ty, init: None, ..
+                name,
+                ty,
+                init: None,
+                ..
             } => {
                 assert_eq!(name, "x");
                 assert_eq!(*ty, Type::Int);
@@ -2666,14 +2858,12 @@ mod tests {
                 op: BinaryOp::Eq,
                 lhs,
                 ..
-            })) => {
-                match lhs.as_ref() {
-                    Expr::Binary {
-                        op: BinaryOp::Lt, ..
-                    } => {}
-                    other => panic!("expected < on lhs of ==, got {other:?}"),
-                }
-            }
+            })) => match lhs.as_ref() {
+                Expr::Binary {
+                    op: BinaryOp::Lt, ..
+                } => {}
+                other => panic!("expected < on lhs of ==, got {other:?}"),
+            },
             other => panic!("expected ==, got {other:?}"),
         }
     }
@@ -2688,15 +2878,13 @@ mod tests {
                 op: BinaryOp::BitOr,
                 rhs,
                 ..
-            })) => {
-                match rhs.as_ref() {
-                    Expr::Binary {
-                        op: BinaryOp::BitAnd,
-                        ..
-                    } => {}
-                    other => panic!("expected & on rhs of |, got {other:?}"),
-                }
-            }
+            })) => match rhs.as_ref() {
+                Expr::Binary {
+                    op: BinaryOp::BitAnd,
+                    ..
+                } => {}
+                other => panic!("expected & on rhs of |, got {other:?}"),
+            },
             other => panic!("expected |, got {other:?}"),
         }
     }
@@ -2711,14 +2899,12 @@ mod tests {
                 op: BinaryOp::Shl,
                 lhs,
                 ..
-            })) => {
-                match lhs.as_ref() {
-                    Expr::Binary {
-                        op: BinaryOp::Add, ..
-                    } => {}
-                    other => panic!("expected + on lhs of <<, got {other:?}"),
-                }
-            }
+            })) => match lhs.as_ref() {
+                Expr::Binary {
+                    op: BinaryOp::Add, ..
+                } => {}
+                other => panic!("expected + on lhs of <<, got {other:?}"),
+            },
             other => panic!("expected <<, got {other:?}"),
         }
     }
@@ -2804,17 +2990,15 @@ mod tests {
             Stmt::Return(Some(Expr::Unary {
                 op: UnaryOp::LogNot,
                 operand,
-            })) => {
-                match operand.as_ref() {
-                    Expr::Unary {
-                        op: UnaryOp::LogNot,
-                        operand,
-                    } => {
-                        assert_eq!(operand.as_ref(), &Expr::IntLit(1, IntSuffix::None));
-                    }
-                    other => panic!("expected nested !, got {other:?}"),
+            })) => match operand.as_ref() {
+                Expr::Unary {
+                    op: UnaryOp::LogNot,
+                    operand,
+                } => {
+                    assert_eq!(operand.as_ref(), &Expr::IntLit(1, IntSuffix::None));
                 }
-            }
+                other => panic!("expected nested !, got {other:?}"),
+            },
             other => panic!("expected !!, got {other:?}"),
         }
     }
@@ -2913,12 +3097,16 @@ mod tests {
     fn parse_post_increment() {
         let src = "int f() { int x; x++; return x; }";
         let unit = parse(src).unwrap();
-        assert!(matches!(&unit.functions[0].body[1], Stmt::Expr(Expr::PostInc(_))));
+        assert!(matches!(
+            &unit.functions[0].body[1],
+            Stmt::Expr(Expr::PostInc(_))
+        ));
     }
 
     #[test]
     fn parse_switch_test() {
-        let src = "int f(int x) { switch(x) { case 0: return 1; case 1: return 2; default: return 0; } }";
+        let src =
+            "int f(int x) { switch(x) { case 0: return 1; case 1: return 2; default: return 0; } }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
             Stmt::Switch { expr, body } => {
@@ -2965,7 +3153,11 @@ mod tests {
         let src = "int f(int x) { return x ? 1 : 0; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::Return(Some(Expr::Ternary { cond, then_expr, else_expr })) => {
+            Stmt::Return(Some(Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            })) => {
                 assert_eq!(cond.as_ref(), &Expr::Ident("x".into()));
                 assert_eq!(then_expr.as_ref(), &Expr::IntLit(1, IntSuffix::None));
                 assert_eq!(else_expr.as_ref(), &Expr::IntLit(0, IntSuffix::None));
@@ -2980,7 +3172,10 @@ mod tests {
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
             Stmt::Return(Some(Expr::Sizeof(arg))) => {
-                assert!(matches!(arg.as_ref(), crate::ast::SizeofArg::Type(Type::Int)));
+                assert!(matches!(
+                    arg.as_ref(),
+                    crate::ast::SizeofArg::Type(Type::Int)
+                ));
             }
             other => panic!("expected sizeof, got {other:?}"),
         }
@@ -3027,7 +3222,10 @@ mod tests {
         let src = "struct point { int x; int y; }; int f() { struct point p; return 0; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { ty: Type::Struct { name: Some(n), .. }, .. } => {
+            Stmt::VarDecl {
+                ty: Type::Struct { name: Some(n), .. },
+                ..
+            } => {
                 assert_eq!(n, "point");
             }
             other => panic!("expected struct point var, got {other:?}"),
@@ -3048,7 +3246,10 @@ mod tests {
     fn parse_global_var_test() {
         let unit = parse("int g = 42; int f() { return 0; }").unwrap();
         assert_eq!(unit.globals[0].name, "g");
-        assert_eq!(unit.globals[0].init, Some(Expr::IntLit(42, IntSuffix::None)));
+        assert_eq!(
+            unit.globals[0].init,
+            Some(Expr::IntLit(42, IntSuffix::None))
+        );
     }
 
     #[test]
@@ -3069,7 +3270,10 @@ mod tests {
     fn parse_string_lit_expr() {
         let unit = parse(r#"int f() { char *s = "hello"; return 0; }"#).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { init: Some(Expr::StringLit(s)), .. } => assert_eq!(s, "hello"),
+            Stmt::VarDecl {
+                init: Some(Expr::StringLit(s)),
+                ..
+            } => assert_eq!(s, "hello"),
             other => panic!("expected string lit, got {other:?}"),
         }
     }
@@ -3077,7 +3281,10 @@ mod tests {
     #[test]
     fn parse_char_lit_expr() {
         let unit = parse("int f() { return 'A'; }").unwrap();
-        assert!(matches!(&unit.functions[0].body[0], Stmt::Return(Some(Expr::CharLit(65)))));
+        assert!(matches!(
+            &unit.functions[0].body[0],
+            Stmt::Return(Some(Expr::CharLit(65)))
+        ));
     }
 
     #[test]
@@ -3104,10 +3311,34 @@ mod tests {
         let src = "int f(int x) { x -= 2; x *= 3; x /= 4; x %= 5; return x; }";
         let unit = parse(src).unwrap();
         let stmts = &unit.functions[0].body;
-        assert!(matches!(&stmts[0], Stmt::Expr(Expr::CompoundAssign { op: BinaryOp::Sub, .. })));
-        assert!(matches!(&stmts[1], Stmt::Expr(Expr::CompoundAssign { op: BinaryOp::Mul, .. })));
-        assert!(matches!(&stmts[2], Stmt::Expr(Expr::CompoundAssign { op: BinaryOp::Div, .. })));
-        assert!(matches!(&stmts[3], Stmt::Expr(Expr::CompoundAssign { op: BinaryOp::Mod, .. })));
+        assert!(matches!(
+            &stmts[0],
+            Stmt::Expr(Expr::CompoundAssign {
+                op: BinaryOp::Sub,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &stmts[1],
+            Stmt::Expr(Expr::CompoundAssign {
+                op: BinaryOp::Mul,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &stmts[2],
+            Stmt::Expr(Expr::CompoundAssign {
+                op: BinaryOp::Div,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &stmts[3],
+            Stmt::Expr(Expr::CompoundAssign {
+                op: BinaryOp::Mod,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3138,7 +3369,12 @@ mod tests {
         let unit = parse(src).unwrap();
         assert_eq!(unit.functions.len(), 1);
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { name, ty, init: Some(Expr::InitList(items)), .. } => {
+            Stmt::VarDecl {
+                name,
+                ty,
+                init: Some(Expr::InitList(items)),
+                ..
+            } => {
                 assert_eq!(name, "arr");
                 assert_eq!(*ty, Type::Array(Box::new(Type::Int), Some(3)));
                 assert_eq!(items.len(), 3);
@@ -3176,7 +3412,12 @@ mod tests {
         let unit = parse(src).unwrap();
         assert_eq!(unit.functions.len(), 1);
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { name, is_static, init, .. } => {
+            Stmt::VarDecl {
+                name,
+                is_static,
+                init,
+                ..
+            } => {
                 assert_eq!(name, "count");
                 assert!(*is_static);
                 assert_eq!(*init, Some(Expr::IntLit(0, IntSuffix::None)));
@@ -3202,7 +3443,11 @@ mod tests {
         let src = "int f() { int arr[4] = {1, 2}; return arr[0]; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { ty, init: Some(Expr::InitList(items)), .. } => {
+            Stmt::VarDecl {
+                ty,
+                init: Some(Expr::InitList(items)),
+                ..
+            } => {
                 assert_eq!(*ty, Type::Array(Box::new(Type::Int), Some(4)));
                 assert_eq!(items.len(), 2);
             }
@@ -3242,7 +3487,10 @@ mod tests {
         assert_eq!(unit.typedefs.len(), 1);
         assert_eq!(unit.typedefs[0].0, "fn_t");
         match &unit.typedefs[0].1 {
-            Type::FunctionPtr { return_type, params } => {
+            Type::FunctionPtr {
+                return_type,
+                params,
+            } => {
                 assert_eq!(**return_type, Type::Int);
                 assert_eq!(params.len(), 2);
             }
@@ -3256,7 +3504,10 @@ mod tests {
         let unit = parse(src).unwrap();
         assert_eq!(unit.functions[0].params.len(), 2);
         match &unit.functions[0].params[0].1 {
-            Type::FunctionPtr { return_type, params } => {
+            Type::FunctionPtr {
+                return_type,
+                params,
+            } => {
                 assert_eq!(**return_type, Type::Int);
                 assert_eq!(params.len(), 1);
             }
@@ -3275,10 +3526,7 @@ mod tests {
                 // int m[2][3] -> Array(Array(Int, Some(3)), Some(2))
                 assert_eq!(
                     *ty,
-                    Type::Array(
-                        Box::new(Type::Array(Box::new(Type::Int), Some(3))),
-                        Some(2)
-                    )
+                    Type::Array(Box::new(Type::Array(Box::new(Type::Int), Some(3))), Some(2))
                 );
             }
             other => panic!("expected var decl, got {other:?}"),
@@ -3290,7 +3538,10 @@ mod tests {
         let src = "int f() { int a = (1, 2, 3); return a; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { init: Some(Expr::Comma(..)), .. } => {}
+            Stmt::VarDecl {
+                init: Some(Expr::Comma(..)),
+                ..
+            } => {}
             other => panic!("expected comma expr init, got {other:?}"),
         }
     }
@@ -3416,7 +3667,10 @@ mod tests {
     fn parse_array_param() {
         let src = "void f(int arr[10]) { arr[0] = 1; }";
         let unit = parse(src).unwrap();
-        assert_eq!(unit.functions[0].params[0].1, Type::Pointer(Box::new(Type::Int)));
+        assert_eq!(
+            unit.functions[0].params[0].1,
+            Type::Pointer(Box::new(Type::Int))
+        );
     }
 
     #[test]
@@ -3465,7 +3719,8 @@ mod tests {
 
     #[test]
     fn parse_anonymous_struct_member() {
-        let src = "struct s { union { int a; float b; }; int c; };\nint f(struct s *p) { return p->c; }";
+        let src =
+            "struct s { union { int a; float b; }; int c; };\nint f(struct s *p) { return p->c; }";
         let unit = parse(src).unwrap();
         assert_eq!(unit.functions.len(), 1);
     }
@@ -3506,7 +3761,10 @@ mod tests {
         let src = r#"int f() { int *p = L"hello"; return 0; }"#;
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { init: Some(Expr::WideStringLit(chars)), .. } => {
+            Stmt::VarDecl {
+                init: Some(Expr::WideStringLit(chars)),
+                ..
+            } => {
                 assert_eq!(chars, &vec![104, 101, 108, 108, 111]);
             }
             other => panic!("expected wide string lit init, got {other:?}"),
@@ -3518,7 +3776,9 @@ mod tests {
         let src = "int f(int n) { int a[n]; return 0; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { name, ty, vla_dim, .. } => {
+            Stmt::VarDecl {
+                name, ty, vla_dim, ..
+            } => {
                 assert_eq!(name, "a");
                 assert_eq!(*ty, Type::Array(Box::new(Type::Int), None));
                 assert!(vla_dim.is_some());
@@ -3529,12 +3789,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_local_array_typedef() {
+        let src = "int f() { typedef char sa[(sizeof(int) == 4) ? 1 : -1]; return 0; }";
+        let unit = parse(src).unwrap();
+        assert_eq!(unit.functions[0].body.len(), 2);
+        assert!(matches!(unit.functions[0].body[0], Stmt::Block(_)));
+    }
+
+    #[test]
     fn parse_wide_narrow_concat() {
         // L"foo" "bar" -> wide string "foobar"
         let src = r#"int f() { int *p = L"foo" "bar"; return 0; }"#;
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { init: Some(Expr::WideStringLit(chars)), .. } => {
+            Stmt::VarDecl {
+                init: Some(Expr::WideStringLit(chars)),
+                ..
+            } => {
                 let expected: Vec<u32> = "foobar".chars().map(|c| c as u32).collect();
                 assert_eq!(chars, &expected);
             }
@@ -3547,7 +3818,11 @@ mod tests {
         let src = "int f(int n) { int a[n + 1]; return 0; }";
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { vla_dim: Some(_), ty, .. } => {
+            Stmt::VarDecl {
+                vla_dim: Some(_),
+                ty,
+                ..
+            } => {
                 assert_eq!(*ty, Type::Array(Box::new(Type::Int), None));
             }
             other => panic!("expected VLA var decl, got {other:?}"),
@@ -3560,7 +3835,10 @@ mod tests {
         let src = r#"int f() { int *p = "foo" L"bar"; return 0; }"#;
         let unit = parse(src).unwrap();
         match &unit.functions[0].body[0] {
-            Stmt::VarDecl { init: Some(Expr::WideStringLit(chars)), .. } => {
+            Stmt::VarDecl {
+                init: Some(Expr::WideStringLit(chars)),
+                ..
+            } => {
                 let expected: Vec<u32> = "foobar".chars().map(|c| c as u32).collect();
                 assert_eq!(chars, &expected);
             }
@@ -3625,7 +3903,10 @@ mod tests {
                     Expr::ArrayDesignator { index, value } => {
                         assert_eq!(**index, Expr::IntLit(1, IntSuffix::None));
                         match value.as_ref() {
-                            Expr::ArrayDesignator { index: i2, value: v2 } => {
+                            Expr::ArrayDesignator {
+                                index: i2,
+                                value: v2,
+                            } => {
                                 assert_eq!(**i2, Expr::IntLit(2, IntSuffix::None));
                                 assert_eq!(**v2, Expr::IntLit(99, IntSuffix::None));
                             }
@@ -3662,7 +3943,9 @@ mod tests {
                                         assert_eq!(field, "b");
                                         assert_eq!(**value, Expr::IntLit(7, IntSuffix::None));
                                     }
-                                    other => panic!("expected inner designated init, got {other:?}"),
+                                    other => {
+                                        panic!("expected inner designated init, got {other:?}")
+                                    }
                                 }
                             }
                             other => panic!("expected array designator, got {other:?}"),

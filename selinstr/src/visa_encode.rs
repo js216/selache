@@ -11,9 +11,7 @@
 //! The encoding strategy reuses the proven ISA encoder and works backward
 //! from the VISA decoder's bit layouts in `visa.rs`.
 
-use crate::encode::{
-    AluOp, ComputeOp, FaluOp, Instruction, MulOp, ShiftOp,
-};
+use crate::encode::{AluOp, ComputeOp, FaluOp, Instruction, MulOp, ShiftOp};
 
 /// Result of VISA compression.
 #[derive(Debug, Clone)]
@@ -54,12 +52,7 @@ impl VisaEncoded {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             VisaEncoded::W16(v) => vec![(v >> 8) as u8, *v as u8],
-            VisaEncoded::W32(v) => vec![
-                (v >> 24) as u8,
-                (v >> 16) as u8,
-                (v >> 8) as u8,
-                *v as u8,
-            ],
+            VisaEncoded::W32(v) => vec![(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, *v as u8],
             VisaEncoded::W48(b) => b.to_vec(),
         }
     }
@@ -91,13 +84,23 @@ fn try_16bit(instr: &Instruction) -> Option<u16> {
         Instruction::Idle => Some(0x0081),
         Instruction::EmuIdle => Some(0x00C1),
         Instruction::Rframe => Some(0x1901),
-        Instruction::Return { interrupt: false, cond: 31, delayed: true, lr: false, compute: None } => {
-            Some(0x0AFE)
-        }
+        Instruction::Return {
+            interrupt: false,
+            cond: 31,
+            delayed: true,
+            lr: false,
+            compute: None,
+        } => Some(0x0AFE),
         Instruction::Compute { cond: 31, compute } => try_type2c(&compute),
         Instruction::UregDagMove {
-            pm: false, write, ureg, i_reg, m_reg, cond: 31,
-            compute: None, ..
+            pm: false,
+            write,
+            ureg,
+            i_reg,
+            m_reg,
+            cond: 31,
+            compute: None,
+            ..
         } => try_type3c(write, ureg, i_reg, m_reg),
         _ => None,
     }
@@ -110,27 +113,15 @@ fn try_16bit(instr: &Instruction) -> Option<u16> {
 fn try_type2c(compute: &ComputeOp) -> Option<u16> {
     let (op, rn, ry) = match *compute {
         // Integer ALU ops where rn==rx
-        ComputeOp::Alu(AluOp::Add { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (0, rn, ry)
-        }
-        ComputeOp::Alu(AluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (1, rn, ry)
-        }
-        ComputeOp::Alu(AluOp::Pass { rn, rx }) if rn < 16 && rx < 16 => {
-            (2, rn, rx)
-        }
-        ComputeOp::Alu(AluOp::Comp { rx, ry }) if rx < 16 && ry < 16 => {
-            (3, rx, ry)
-        }
+        ComputeOp::Alu(AluOp::Add { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (0, rn, ry),
+        ComputeOp::Alu(AluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (1, rn, ry),
+        ComputeOp::Alu(AluOp::Pass { rn, rx }) if rn < 16 && rx < 16 => (2, rn, rx),
+        ComputeOp::Alu(AluOp::Comp { rx, ry }) if rx < 16 && ry < 16 => (3, rx, ry),
         ComputeOp::Falu(FaluOp::Add { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
             (4, rn, ry)
         }
-        ComputeOp::Alu(AluOp::Inc { rn, rx }) if rn < 16 && rx < 16 => {
-            (5, rn, rx)
-        }
-        ComputeOp::Alu(AluOp::Dec { rn, rx }) if rn < 16 && rx < 16 => {
-            (6, rn, rx)
-        }
+        ComputeOp::Alu(AluOp::Inc { rn, rx }) if rn < 16 && rx < 16 => (5, rn, rx),
+        ComputeOp::Alu(AluOp::Dec { rn, rx }) if rn < 16 && rx < 16 => (6, rn, rx),
         ComputeOp::Alu(AluOp::AddCi { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
             (7, rn, ry)
         }
@@ -146,21 +137,11 @@ fn try_type2c(compute: &ComputeOp) -> Option<u16> {
         ComputeOp::Falu(FaluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
             (10, rn, ry)
         }
-        ComputeOp::Falu(FaluOp::Pass { rn, rx }) if rn < 16 && rx < 16 => {
-            (11, rn, rx)
-        }
-        ComputeOp::Alu(AluOp::And { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (12, rn, ry)
-        }
-        ComputeOp::Alu(AluOp::Or { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (13, rn, ry)
-        }
-        ComputeOp::Alu(AluOp::Xor { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (14, rn, ry)
-        }
-        ComputeOp::Alu(AluOp::Not { rn, rx }) if rn < 16 && rx < 16 => {
-            (15, rn, rx)
-        }
+        ComputeOp::Falu(FaluOp::Pass { rn, rx }) if rn < 16 && rx < 16 => (11, rn, rx),
+        ComputeOp::Alu(AluOp::And { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (12, rn, ry),
+        ComputeOp::Alu(AluOp::Or { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (13, rn, ry),
+        ComputeOp::Alu(AluOp::Xor { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (14, rn, ry),
+        ComputeOp::Alu(AluOp::Not { rn, rx }) if rn < 16 && rx < 16 => (15, rn, rx),
         _ => return None,
     };
     Some(0b110u16 << 13 | (op as u16) << 8 | rn << 4 | ry)
@@ -201,26 +182,45 @@ fn try_type3c(write: bool, ureg: u16, i_reg: u8, m_reg: u8) -> Option<u16> {
 fn try_32bit(instr: &Instruction) -> Option<u32> {
     match *instr {
         Instruction::Compute { cond, compute } => try_type2b(cond, &compute),
-        Instruction::DagModify { pm, i_reg, m_reg, cond, compute: None } => {
-            try_type7b(pm, i_reg, m_reg, cond)
-        }
+        Instruction::DagModify {
+            pm,
+            i_reg,
+            m_reg,
+            cond,
+            compute: None,
+        } => try_type7b(pm, i_reg, m_reg, cond),
         Instruction::LoadImm { ureg, value } => try_type17b(ureg, value),
         Instruction::UregDagMove {
-            pm: false, write, ureg, i_reg, m_reg, cond,
-            compute: None, ..
+            pm: false,
+            write,
+            ureg,
+            i_reg,
+            m_reg,
+            cond,
+            compute: None,
+            ..
         } => try_type3b(write, ureg, i_reg, m_reg, cond),
         Instruction::ComputeLoadStore {
-            compute: None, access, dreg, offset, cond,
-        } if !access.pm => {
-            try_type4b(access.write, access.i_reg, dreg, offset, cond)
-        }
+            compute: None,
+            access,
+            dreg,
+            offset,
+            cond,
+        } if !access.pm => try_type4b(access.write, access.i_reg, dreg, offset, cond),
         Instruction::URegMove { dest, src } => try_type5b_move(dest, src),
-        Instruction::UregTransfer { src_ureg, dst_ureg, compute: None } => {
-            try_type5b_move(dst_ureg, src_ureg)
-        }
-        Instruction::IndirectBranch { call, cond, pm_i, pm_m, delayed, compute: None } => {
-            try_type9a_32bit(call, cond, pm_i, pm_m, delayed)
-        }
+        Instruction::UregTransfer {
+            src_ureg,
+            dst_ureg,
+            compute: None,
+        } => try_type5b_move(dst_ureg, src_ureg),
+        Instruction::IndirectBranch {
+            call,
+            cond,
+            pm_i,
+            pm_m,
+            delayed,
+            compute: None,
+        } => try_type9a_32bit(call, cond, pm_i, pm_m, delayed),
         _ => None,
     }
 }
@@ -244,14 +244,8 @@ fn try_type9a_32bit(call: bool, cond: u8, pm_i: u8, pm_m: u8, delayed: bool) -> 
     let pmm_off = pm_m - 8;
     let j = if call { 1u16 } else { 0 };
     let db = if delayed { 1u16 } else { 0 };
-    let p1 = (0b01000u16 << 8)
-        | (j << 6)
-        | ((cond as u16 & 0x1F) << 1)
-        | 1;
-    let p2 = ((pmi_off as u16 & 3) << 14)
-        | ((pmm_off as u16 & 7) << 11)
-        | (db << 10)
-        | 0x3f;
+    let p1 = (0b01000u16 << 8) | (j << 6) | ((cond as u16 & 0x1F) << 1) | 1;
+    let p2 = ((pmi_off as u16 & 3) << 14) | ((pmm_off as u16 & 7) << 11) | (db << 10) | 0x3f;
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -294,13 +288,9 @@ fn try_type7b(pm: bool, i_reg: u8, m_reg: u8, cond: u8) -> Option<u32> {
     let m_local = m_reg & 7;
     let dest_xor = 0u16; // i_dest == i_src
 
-    let p1 = (0b00000100u16 << 8)
-        | (g << 6)
-        | ((cond as u16 & 0x1F) << 1)
-        | ((i_local as u16 >> 2) & 1);
-    let p2 = ((i_local as u16 & 3) << 14)
-        | ((m_local as u16) << 11)
-        | (dest_xor << 8);
+    let p1 =
+        (0b00000100u16 << 8) | (g << 6) | ((cond as u16 & 0x1F) << 1) | ((i_local as u16 >> 2) & 1);
+    let p2 = ((i_local as u16 & 3) << 14) | ((m_local as u16) << 11) | (dest_xor << 8);
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -356,9 +346,7 @@ fn try_type3b(write: bool, ureg: u16, i_reg: u8, m_reg: u8, cond: u8) -> Option<
     // p2: d, sw=0, ureg, then 0x3f marker in the low 6 bits. The VISA
     // width disambiguator keys off `p2 & 0x3F >= 0x38` for top3=010 to
     // decide 32-bit vs 48-bit, so the low 6 bits must all be set.
-    let p2 = (d << 15)
-        | ((ureg & 0x7F) << 7)
-        | 0x3f;
+    let p2 = (d << 15) | ((ureg & 0x7F) << 7) | 0x3f;
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -381,8 +369,8 @@ fn try_type4b(write: bool, i_reg: u8, dreg: u16, offset: i8, cond: u8) -> Option
     }
     let d = if write { 1u16 } else { 0 };
     let raw6 = (offset as u8 as u16) & 0x3F;
-    let off_hi = (raw6 >> 5) & 1;  // bit 5 → p1[0]
-    let off_lo = raw6 & 0x1F;      // bits 4:0 → p2[15:11]
+    let off_hi = (raw6 >> 5) & 1; // bit 5 → p1[0]
+    let off_lo = raw6 & 0x1F; // bits 4:0 → p2[15:11]
 
     // p1: top3=011, sub varies, d at bit10, i at bits[12:9]
     // From the decoder, p1[6]=0 means offset-first order. Let's use p1[6]=0.
@@ -391,9 +379,7 @@ fn try_type4b(write: bool, i_reg: u8, dreg: u16, offset: i8, cond: u8) -> Option
         | (d << 10)
         | ((cond as u16 & 0x1F) << 1)
         | off_hi;
-    let p2 = (off_lo << 11)
-        | ((dreg & 0xF) << 7)
-        | 0b11u16; // normal word
+    let p2 = (off_lo << 11) | ((dreg & 0xF) << 7) | 0b11u16; // normal word
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -428,8 +414,7 @@ fn try_type5b_move(dest: u16, src: u16) -> Option<u32> {
         | ((src_idx >> 2) & 1) << 6
         | (cond << 1)
         | ((src_idx >> 1) & 1);
-    let p2 = (src_idx & 1) << 15
-        | ((dest & 0x7F) << 7);
+    let p2 = (src_idx & 1) << 15 | ((dest & 0x7F) << 7);
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
@@ -484,12 +469,7 @@ fn alu_to_23bit(alu: &AluOp) -> Option<u32> {
         return None;
     }
     // cu=0 (ALU), multi=0
-    Some(
-        (opcode as u32) << 12
-        | (rn as u32) << 8
-        | (rx as u32) << 4
-        | ry as u32,
-    )
+    Some((opcode as u32) << 12 | (rn as u32) << 8 | (rx as u32) << 4 | ry as u32)
 }
 
 fn falu_to_23bit(falu: &FaluOp) -> Option<u32> {
@@ -524,12 +504,7 @@ fn falu_to_23bit(falu: &FaluOp) -> Option<u32> {
         return None;
     }
     // cu=0 (ALU — FP opcodes share the ALU CU), multi=0
-    Some(
-        (opcode as u32) << 12
-        | (rn as u32) << 8
-        | (rx as u32) << 4
-        | ry as u32,
-    )
+    Some((opcode as u32) << 12 | (rn as u32) << 8 | (rx as u32) << 4 | ry as u32)
 }
 
 fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
@@ -559,13 +534,7 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
         return None;
     }
     // cu=1 (MUL), multi=0
-    Some(
-        1u32 << 20
-        | (opcode as u32) << 12
-        | (rn as u32) << 8
-        | (rx as u32) << 4
-        | ry as u32,
-    )
+    Some(1u32 << 20 | (opcode as u32) << 12 | (rn as u32) << 8 | (rx as u32) << 4 | ry as u32)
 }
 
 fn shift_to_23bit(shift: &ShiftOp) -> Option<u32> {
@@ -594,13 +563,7 @@ fn shift_to_23bit(shift: &ShiftOp) -> Option<u32> {
         return None;
     }
     // cu=2 (SHIFT), multi=0
-    Some(
-        2u32 << 20
-        | (opcode as u32) << 12
-        | (rn as u32) << 8
-        | (rx as u32) << 4
-        | ry as u32,
-    )
+    Some(2u32 << 20 | (opcode as u32) << 12 | (rn as u32) << 8 | (rx as u32) << 4 | ry as u32)
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +610,11 @@ mod tests {
         // R3 = R3 + R5 → Type 2c, op=0
         let instr = Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 3, rx: 3, ry: 5 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 3,
+                rx: 3,
+                ry: 5,
+            }),
         };
         let isa = encode_isa(&instr);
         let result = visa_encode(&instr, &isa);
@@ -664,7 +631,11 @@ mod tests {
         // R3 = R4 + R5: rn != rx, cannot use Type 2c
         let instr = Instruction::Compute {
             cond: 31,
-            compute: ComputeOp::Alu(AluOp::Add { rn: 3, rx: 4, ry: 5 }),
+            compute: ComputeOp::Alu(AluOp::Add {
+                rn: 3,
+                rx: 4,
+                ry: 5,
+            }),
         };
         let isa = encode_isa(&instr);
         let result = visa_encode(&instr, &isa);
@@ -674,7 +645,10 @@ mod tests {
 
     #[test]
     fn load_imm16_compresses() {
-        let instr = Instruction::LoadImm { ureg: 0x06, value: 0x1234 };
+        let instr = Instruction::LoadImm {
+            ureg: 0x06,
+            value: 0x1234,
+        };
         let isa = encode_isa(&instr);
         let result = visa_encode(&instr, &isa);
         match result {
@@ -690,7 +664,10 @@ mod tests {
 
     #[test]
     fn load_imm32_stays_48() {
-        let instr = Instruction::LoadImm { ureg: 0x06, value: 0x12345678 };
+        let instr = Instruction::LoadImm {
+            ureg: 0x06,
+            value: 0x12345678,
+        };
         let isa = encode_isa(&instr);
         let result = visa_encode(&instr, &isa);
         assert!(matches!(result, VisaEncoded::W48(_)));

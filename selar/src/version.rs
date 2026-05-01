@@ -74,8 +74,8 @@ pub fn synthesize_version_elf(info: &VersionInfo) -> Vec<u8> {
 
     // .adi.attributes section (processor-specific constant blob)
     let adi_attrs: Vec<u8> = vec![
-        0x41, 0x00, 0x00, 0x00, 0x13, 0x41, 0x6e, 0x6f, 0x6e, 0x41, 0x44, 0x49, 0x00, 0x01,
-        0x00, 0x00, 0x00, 0x07, 0x08, 0x01,
+        0x41, 0x00, 0x00, 0x00, 0x13, 0x41, 0x6e, 0x6f, 0x6e, 0x41, 0x44, 0x49, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x07, 0x08, 0x01,
     ];
 
     // Build shstrtab (section name string table)
@@ -141,7 +141,7 @@ pub fn synthesize_version_elf(info: &VersionInfo) -> Vec<u8> {
     out[4] = 1; // ELFCLASS32
     out[5] = elf::ELFDATA2MSB;
     out[6] = 1; // EV_CURRENT
-    // e_type = ET_EXEC (2)
+                // e_type = ET_EXEC (2)
     out[16..18].copy_from_slice(&e.write_u16(2));
     // e_machine = 0
     out[18..20].copy_from_slice(&e.write_u16(0));

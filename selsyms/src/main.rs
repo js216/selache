@@ -10,8 +10,7 @@ use std::io::{self, Write};
 use std::process;
 
 use selelf::elf::{
-    self, Elf32Header, Elf32Shdr, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
-    STT_FUNC, STT_OBJECT,
+    self, Elf32Header, Elf32Shdr, SHT_SYMTAB, STB_GLOBAL, STB_WEAK, STT_FUNC, STT_OBJECT,
 };
 
 fn main() {
@@ -44,20 +43,14 @@ fn run(args: &[String], w: &mut dyn Write) -> error::Result<()> {
     }
 
     for path in &opts.files {
-        let data = fs::read(path).map_err(|e| {
-            error::Error::Usage(format!("{path}: {e}"))
-        })?;
+        let data = fs::read(path).map_err(|e| error::Error::Usage(format!("{path}: {e}")))?;
         print_symbols(&data, &opts, w)?;
     }
 
     Ok(())
 }
 
-fn print_symbols(
-    data: &[u8],
-    opts: &cli::Options,
-    w: &mut dyn Write,
-) -> error::Result<()> {
+fn print_symbols(data: &[u8], opts: &cli::Options, w: &mut dyn Write) -> error::Result<()> {
     let hdr = elf::parse_header(data)?;
     let sections = parse_sections(data, &hdr)?;
 
@@ -102,9 +95,7 @@ fn print_symbols(
                 continue;
             }
 
-            if !opts.include_syms.is_empty()
-                && !opts.include_syms.iter().any(|s| s == name)
-            {
+            if !opts.include_syms.is_empty() && !opts.include_syms.iter().any(|s| s == name) {
                 continue;
             }
 
@@ -119,44 +110,29 @@ fn print_symbols(
     Ok(())
 }
 
-fn parse_sections(
-    data: &[u8],
-    hdr: &Elf32Header,
-) -> error::Result<Vec<Elf32Shdr>> {
+fn parse_sections(data: &[u8], hdr: &Elf32Header) -> error::Result<Vec<Elf32Shdr>> {
     let mut sections = Vec::with_capacity(hdr.e_shnum as usize);
     for i in 0..hdr.e_shnum as usize {
-        let off =
-            hdr.e_shoff as usize + i * hdr.e_shentsize as usize;
+        let off = hdr.e_shoff as usize + i * hdr.e_shentsize as usize;
         if off + hdr.e_shentsize as usize > data.len() {
-            return Err(selelf::error::Error::InvalidElf(
-                "section header out of bounds".into(),
-            )
-            .into());
+            return Err(
+                selelf::error::Error::InvalidElf("section header out of bounds".into()).into(),
+            );
         }
         sections.push(elf::parse_section_header(&data[off..], hdr.ei_data));
     }
     Ok(sections)
 }
 
-fn load_strtab(
-    data: &[u8],
-    sections: &[Elf32Shdr],
-    idx: usize,
-) -> error::Result<Vec<u8>> {
+fn load_strtab(data: &[u8], sections: &[Elf32Shdr], idx: usize) -> error::Result<Vec<u8>> {
     if idx >= sections.len() {
-        return Err(selelf::error::Error::InvalidElf(
-            "strtab index out of bounds".into(),
-        )
-        .into());
+        return Err(selelf::error::Error::InvalidElf("strtab index out of bounds".into()).into());
     }
     let sec = &sections[idx];
     let off = sec.sh_offset as usize;
     let sz = sec.sh_size as usize;
     if off + sz > data.len() {
-        return Err(selelf::error::Error::InvalidElf(
-            "strtab data out of bounds".into(),
-        )
-        .into());
+        return Err(selelf::error::Error::InvalidElf("strtab data out of bounds".into()).into());
     }
     Ok(data[off..off + sz].to_vec())
 }
@@ -303,11 +279,7 @@ mod tests {
 
     #[test]
     fn test_no_symbols() {
-        let data = testutil::make_elf_object(
-            0x85,
-            selelf::elf::ELFDATA2LSB,
-            &[],
-        );
+        let data = testutil::make_elf_object(0x85, selelf::elf::ELFDATA2LSB, &[]);
         let opts = cli::Options {
             files: Vec::new(),
             include_syms: Vec::new(),

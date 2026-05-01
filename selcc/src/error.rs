@@ -13,10 +13,24 @@ pub enum Error {
     MissingInput,
     MissingArgument(String),
     NotImplemented(String),
-    Lex { line: u32, col: u32, msg: String },
-    Parse { line: u32, col: u32, msg: String },
-    Preprocess { file: String, line: u32, msg: String },
-    Compile { msg: String },
+    Lex {
+        line: u32,
+        col: u32,
+        msg: String,
+    },
+    Parse {
+        line: u32,
+        col: u32,
+        msg: String,
+    },
+    Preprocess {
+        file: String,
+        line: u32,
+        msg: String,
+    },
+    Compile {
+        msg: String,
+    },
 }
 
 impl fmt::Display for Error {

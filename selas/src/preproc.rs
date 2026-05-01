@@ -116,8 +116,7 @@ impl Preprocessor {
             .insert("__ADSP21000__".to_string(), simple("1"));
         self.defines
             .insert("__SIMDSHARC__".to_string(), simple("1"));
-        self.defines
-            .insert("__BA_SHARC__".to_string(), simple("1"));
+        self.defines.insert("__BA_SHARC__".to_string(), simple("1"));
         self.defines
             .insert("__BYTE_ADDRESSING__".to_string(), simple("1"));
         self.defines
@@ -139,12 +138,7 @@ impl Preprocessor {
     }
 
     /// Inner recursive processor (used for #include).
-    fn process_inner(
-        &mut self,
-        input: &str,
-        filename: &str,
-        output: &mut String,
-    ) -> Result<()> {
+    fn process_inner(&mut self, input: &str, filename: &str, output: &mut String) -> Result<()> {
         // First, strip block comments while preserving line count.
         let stripped = strip_block_comments(input);
 
@@ -157,32 +151,32 @@ impl Preprocessor {
 
             // Handle backslash line continuation: join lines ending with '\'
             if let Some(without_backslash) = trimmed.strip_suffix('\\') {
-            if trim_directive(trimmed).is_some() {
-                let mut joined = without_backslash.to_string();
-                let mut extra_lines = 0;
-                i += 1;
-                while i < lines.len() {
-                    extra_lines += 1;
-                    let next = lines[i].trim();
-                    if let Some(stripped) = next.strip_suffix('\\') {
-                        joined.push_str(stripped);
-                        i += 1;
-                    } else {
-                        joined.push_str(next);
-                        i += 1;
-                        break;
+                if trim_directive(trimmed).is_some() {
+                    let mut joined = without_backslash.to_string();
+                    let mut extra_lines = 0;
+                    i += 1;
+                    while i < lines.len() {
+                        extra_lines += 1;
+                        let next = lines[i].trim();
+                        if let Some(stripped) = next.strip_suffix('\\') {
+                            joined.push_str(stripped);
+                            i += 1;
+                        } else {
+                            joined.push_str(next);
+                            i += 1;
+                            break;
+                        }
                     }
-                }
-                let joined_trimmed = joined.trim();
-                if let Some(directive_body) = trim_directive(joined_trimmed) {
-                    self.handle_directive(directive_body, filename, line_num, output)?;
-                    // Emit blank lines for the continuation lines
-                    for _ in 0..extra_lines {
-                        output.push('\n');
+                    let joined_trimmed = joined.trim();
+                    if let Some(directive_body) = trim_directive(joined_trimmed) {
+                        self.handle_directive(directive_body, filename, line_num, output)?;
+                        // Emit blank lines for the continuation lines
+                        for _ in 0..extra_lines {
+                            output.push('\n');
+                        }
                     }
+                    continue;
                 }
-                continue;
-            }
             }
 
             i += 1;
@@ -263,14 +257,8 @@ impl Preprocessor {
             }
             "ELIF" => {
                 // Extract parent_active before mutable borrow
-                let parent_active = self
-                    .if_stack
-                    .last()
-                    .is_none_or(|s| s.parent_active);
-                let already_true = self
-                    .if_stack
-                    .last()
-                    .is_some_and(|s| s.seen_true);
+                let parent_active = self.if_stack.last().is_none_or(|s| s.parent_active);
+                let already_true = self.if_stack.last().is_some_and(|s| s.seen_true);
                 let cond = if already_true || !parent_active {
                     false
                 } else {
@@ -363,12 +351,10 @@ impl Preprocessor {
                 // There's stuff after the closing paren - handle as binary op
                 let rest = expr[close + 1..].trim();
                 if let Some(stripped) = rest.strip_prefix("&&") {
-                    return self.eval_expr(&expr[..=close])
-                        && self.eval_expr(stripped);
+                    return self.eval_expr(&expr[..=close]) && self.eval_expr(stripped);
                 }
                 if let Some(stripped) = rest.strip_prefix("||") {
-                    return self.eval_expr(&expr[..=close])
-                        || self.eval_expr(stripped);
+                    return self.eval_expr(&expr[..=close]) || self.eval_expr(stripped);
                 }
             }
         }
@@ -398,10 +384,7 @@ impl Preprocessor {
         let upper = expr.to_uppercase();
         if upper.starts_with("DEFINED") {
             let rest = expr[7..].trim();
-            if let Some(inner) = rest
-                .strip_prefix('(')
-                .and_then(|s| s.strip_suffix(')'))
-            {
+            if let Some(inner) = rest.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
                 let sym = inner.trim();
                 return self.defines.contains_key(sym);
             }
@@ -437,7 +420,10 @@ impl Preprocessor {
         let expanded = expanded.trim();
 
         // Hex literal
-        if let Some(hex) = expanded.strip_prefix("0x").or_else(|| expanded.strip_prefix("0X")) {
+        if let Some(hex) = expanded
+            .strip_prefix("0x")
+            .or_else(|| expanded.strip_prefix("0X"))
+        {
             let hex = hex.trim_end_matches(['u', 'U', 'l', 'L']);
             return i64::from_str_radix(hex, 16).unwrap_or(0);
         }
@@ -491,13 +477,8 @@ impl Preprocessor {
         } else {
             // Simple macro: #define NAME value
             let body = after_name.trim().to_string();
-            self.defines.insert(
-                name.to_string(),
-                MacroDef {
-                    params: None,
-                    body,
-                },
-            );
+            self.defines
+                .insert(name.to_string(), MacroDef { params: None, body });
         }
     }
 
@@ -552,10 +533,7 @@ impl Preprocessor {
 
                 // Emit #line to return to the parent file at the line after
                 // the #include directive.
-                output.push_str(&format!(
-                    "#line {} \"{current_file}\"\n",
-                    line_num + 1
-                ));
+                output.push_str(&format!("#line {} \"{current_file}\"\n", line_num + 1));
             }
             None => {
                 // File not found: emit a blank line (the standard does the same
@@ -659,11 +637,9 @@ impl Preprocessor {
         while pos <= bytes.len().saturating_sub(name_bytes.len()) {
             if &bytes[pos..pos + name_bytes.len()] == name_bytes {
                 // Check word boundaries
-                let before_ok = pos == 0
-                    || !is_ident_char(bytes[pos - 1]);
+                let before_ok = pos == 0 || !is_ident_char(bytes[pos - 1]);
                 let after_pos = pos + name_bytes.len();
-                let after_ok = after_pos >= bytes.len()
-                    || !is_ident_char(bytes[after_pos]);
+                let after_ok = after_pos >= bytes.len() || !is_ident_char(bytes[after_pos]);
 
                 if before_ok && after_ok {
                     result.push_str(&def.body);
@@ -689,12 +665,7 @@ impl Preprocessor {
         }
     }
 
-    fn expand_parameterized(
-        &self,
-        name: &str,
-        def: &MacroDef,
-        text: &str,
-    ) -> Option<String> {
+    fn expand_parameterized(&self, name: &str, def: &MacroDef, text: &str) -> Option<String> {
         let params = def.params.as_ref()?;
 
         let mut result = String::new();
@@ -708,8 +679,7 @@ impl Preprocessor {
                 && &bytes[pos..pos + name_bytes.len()] == name_bytes
             {
                 // Check word boundary before
-                let before_ok =
-                    pos == 0 || !is_ident_char(bytes[pos - 1]);
+                let before_ok = pos == 0 || !is_ident_char(bytes[pos - 1]);
                 let after_pos = pos + name_bytes.len();
 
                 if before_ok {
@@ -725,8 +695,7 @@ impl Preprocessor {
                         // Found macro invocation: parse arguments
                         if let Some((args, end)) = parse_macro_args(text, paren_pos) {
                             if args.len() == params.len() {
-                                let expanded =
-                                    substitute_params(&def.body, params, &args);
+                                let expanded = substitute_params(&def.body, params, &args);
                                 result.push_str(&expanded);
                                 pos = end;
                                 did_replace = true;
@@ -853,11 +822,7 @@ fn find_top_level_op(expr: &str, op: &str) -> Option<usize> {
             // For multi-char ops this is fine; for single-char < and >,
             // make sure they're not part of <= >= << >>
             if op.len() == 1 && (op == "<" || op == ">") {
-                let next = if i + 1 < bytes.len() {
-                    bytes[i + 1]
-                } else {
-                    0
-                };
+                let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
                 let prev = if i > 0 { bytes[i - 1] } else { 0 };
                 if next == b'=' || next == bytes[i] || prev == bytes[i] {
                     i += 1;
@@ -933,11 +898,9 @@ fn substitute_params(body: &str, params: &[String], args: &[String]) -> String {
             if pos + param_bytes.len() <= bytes.len()
                 && &bytes[pos..pos + param_bytes.len()] == param_bytes
             {
-                let before_ok =
-                    pos == 0 || !is_ident_char(bytes[pos - 1]);
+                let before_ok = pos == 0 || !is_ident_char(bytes[pos - 1]);
                 let after_pos = pos + param_bytes.len();
-                let after_ok =
-                    after_pos >= bytes.len() || !is_ident_char(bytes[after_pos]);
+                let after_ok = after_pos >= bytes.len() || !is_ident_char(bytes[after_pos]);
                 if before_ok && after_ok {
                     new.push_str(arg);
                     pos += param_bytes.len();
@@ -964,7 +927,7 @@ fn handle_token_concat(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '#' && chars.peek() == Some(&'#') {
             chars.next(); // consume second #
-            // Trim trailing whitespace from result
+                          // Trim trailing whitespace from result
             while result.ends_with(' ') || result.ends_with('\t') {
                 result.pop();
             }

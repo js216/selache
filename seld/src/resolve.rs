@@ -91,22 +91,25 @@ pub fn read_symbols(obj: &InputObject) -> Vec<(Elf32Sym, String)> {
         if sec.sh_type != SHT_SYMTAB {
             continue;
         }
-        let entsize = if sec.sh_entsize > 0 { sec.sh_entsize as usize } else { 16 };
+        let entsize = if sec.sh_entsize > 0 {
+            sec.sh_entsize as usize
+        } else {
+            16
+        };
         let strtab_idx = sec.sh_link as usize;
-        let strtab = if strtab_idx < obj.sections.len()
-            && obj.sections[strtab_idx].sh_type == SHT_STRTAB
-        {
-            let s = &obj.sections[strtab_idx];
-            let off = s.sh_offset as usize;
-            let sz = s.sh_size as usize;
-            if off + sz <= obj.data.len() {
-                &obj.data[off..off + sz]
+        let strtab =
+            if strtab_idx < obj.sections.len() && obj.sections[strtab_idx].sh_type == SHT_STRTAB {
+                let s = &obj.sections[strtab_idx];
+                let off = s.sh_offset as usize;
+                let sz = s.sh_size as usize;
+                if off + sz <= obj.data.len() {
+                    &obj.data[off..off + sz]
+                } else {
+                    &[] as &[u8]
+                }
             } else {
                 &[] as &[u8]
-            }
-        } else {
-            &[] as &[u8]
-        };
+            };
 
         let sym_off = sec.sh_offset as usize;
         let sym_sz = sec.sh_size as usize;
@@ -336,11 +339,8 @@ mod tests {
 
     #[test]
     fn read_symbols_from_object() {
-        let data = testutil::make_elf_object(
-            0x85,
-            ELFDATA2LSB,
-            &[("_main", true), ("_helper", true)],
-        );
+        let data =
+            testutil::make_elf_object(0x85, ELFDATA2LSB, &[("_main", true), ("_helper", true)]);
         let obj = load_object("test.doj", data).unwrap();
         let syms = read_symbols(&obj);
         let names: Vec<&str> = syms.iter().map(|(_, n)| n.as_str()).collect();

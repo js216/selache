@@ -356,7 +356,10 @@ mod tests {
         info.apply_tx_file("UserVersion 2.0\nCustomField hello world\n");
         assert_eq!(info.user_version.as_deref(), Some("2.0"));
         assert_eq!(info.user_defined.len(), 1);
-        assert_eq!(info.user_defined[0], ("CustomField".to_string(), "hello world".to_string()));
+        assert_eq!(
+            info.user_defined[0],
+            ("CustomField".to_string(), "hello world".to_string())
+        );
     }
 
     #[test]

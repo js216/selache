@@ -5,9 +5,8 @@
 use std::collections::HashMap;
 
 use selelf::elf::{
-    Endian, ELFDATA2LSB, ELF_MAGIC, ET_EXEC, PF_R, PF_W, PF_X, PT_LOAD, SHF_ALLOC,
-    SHF_EXECINSTR, SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, SHT_STRTAB, SHT_SYMTAB, STB_LOCAL,
-    STT_SECTION,
+    Endian, ELFDATA2LSB, ELF_MAGIC, ET_EXEC, PF_R, PF_W, PF_X, PT_LOAD, SHF_ALLOC, SHF_EXECINSTR,
+    SHF_WRITE, SHT_NOBITS, SHT_PROGBITS, SHT_STRTAB, SHT_SYMTAB, STB_LOCAL, STT_SECTION,
 };
 
 use crate::error::Result;
@@ -80,7 +79,10 @@ pub fn generate(
     };
 
     // Compute program headers (one per loadable output section)
-    let loadable_count = output_sections.iter().filter(|s| !s.is_nobits || s.size > 0).count();
+    let loadable_count = output_sections
+        .iter()
+        .filter(|s| !s.is_nobits || s.size > 0)
+        .count();
 
     // Layout: ELF header -> program headers -> section data -> symtab -> strtab -> shstrtab -> section headers
     let phdr_offset = ELF_HEADER_SIZE;
@@ -172,7 +174,11 @@ pub fn generate(
     let symtab_data: Vec<u8> = sym_entries.iter().flat_map(|e| e.iter().copied()).collect();
 
     // Compute file offsets for metadata sections
-    let padding_before_symtab = if has_symtab { (4 - (current_offset % 4)) % 4 } else { 0 };
+    let padding_before_symtab = if has_symtab {
+        (4 - (current_offset % 4)) % 4
+    } else {
+        0
+    };
     current_offset += padding_before_symtab;
 
     let symtab_file_off = current_offset as u32;
@@ -233,7 +239,11 @@ pub fn generate(
         out[phdr_pos + 4..phdr_pos + 8].copy_from_slice(&e.write_u32(section_file_offsets[i]));
         out[phdr_pos + 8..phdr_pos + 12].copy_from_slice(&e.write_u32(sec.elf_address()));
         out[phdr_pos + 12..phdr_pos + 16].copy_from_slice(&e.write_u32(sec.elf_address())); // p_paddr
-        let filesz = if sec.is_nobits { 0 } else { sec.data.len() as u32 };
+        let filesz = if sec.is_nobits {
+            0
+        } else {
+            sec.data.len() as u32
+        };
         out[phdr_pos + 16..phdr_pos + 20].copy_from_slice(&e.write_u32(filesz));
         out[phdr_pos + 20..phdr_pos + 24].copy_from_slice(&e.write_u32(sec.size));
         out[phdr_pos + 24..phdr_pos + 28].copy_from_slice(&e.write_u32(flags));
@@ -274,7 +284,11 @@ pub fn generate(
 
     // Output sections
     for (i, sec) in output_sections.iter().enumerate() {
-        let sh_type = if sec.is_nobits { SHT_NOBITS } else { SHT_PROGBITS };
+        let sh_type = if sec.is_nobits {
+            SHT_NOBITS
+        } else {
+            SHT_PROGBITS
+        };
         let mut sh_flags = SHF_ALLOC;
         if sec.is_executable {
             sh_flags |= SHF_EXECINSTR;
@@ -283,18 +297,27 @@ pub fn generate(
             sh_flags |= SHF_WRITE;
         }
 
-        write_shdr(&mut out, shdr_pos, e, &ShdrFields {
-            sh_name: shstrtab_offsets[i + 1],
-            sh_type,
-            sh_flags,
-            sh_addr: sec.elf_address(),
-            sh_offset: section_file_offsets[i],
-            sh_size: if sec.is_nobits { sec.size } else { sec.data.len() as u32 },
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 4,
-            sh_entsize: if sec.is_short_word { 1 } else { 0 },
-        });
+        write_shdr(
+            &mut out,
+            shdr_pos,
+            e,
+            &ShdrFields {
+                sh_name: shstrtab_offsets[i + 1],
+                sh_type,
+                sh_flags,
+                sh_addr: sec.elf_address(),
+                sh_offset: section_file_offsets[i],
+                sh_size: if sec.is_nobits {
+                    sec.size
+                } else {
+                    sec.data.len() as u32
+                },
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 4,
+                sh_entsize: if sec.is_short_word { 1 } else { 0 },
+            },
+        );
         shdr_pos += SHDR_SIZE;
     }
 
@@ -303,49 +326,64 @@ pub fn generate(
         let symtab_sec_idx = 1 + num_output_secs;
         let strtab_sec_idx = symtab_sec_idx + 1;
 
-        write_shdr(&mut out, shdr_pos, e, &ShdrFields {
-            sh_name: symtab_name_off,
-            sh_type: SHT_SYMTAB,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: symtab_file_off,
-            sh_size: symtab_data.len() as u32,
-            sh_link: strtab_sec_idx as u32,
-            sh_info: first_global as u32,
-            sh_addralign: 4,
-            sh_entsize: SYM_ENTRY_SIZE as u32,
-        });
+        write_shdr(
+            &mut out,
+            shdr_pos,
+            e,
+            &ShdrFields {
+                sh_name: symtab_name_off,
+                sh_type: SHT_SYMTAB,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: symtab_file_off,
+                sh_size: symtab_data.len() as u32,
+                sh_link: strtab_sec_idx as u32,
+                sh_info: first_global as u32,
+                sh_addralign: 4,
+                sh_entsize: SYM_ENTRY_SIZE as u32,
+            },
+        );
         shdr_pos += SHDR_SIZE;
 
         // .strtab
-        write_shdr(&mut out, shdr_pos, e, &ShdrFields {
-            sh_name: strtab_name_off,
-            sh_type: SHT_STRTAB,
-            sh_flags: 0,
-            sh_addr: 0,
-            sh_offset: strtab_file_off,
-            sh_size: sym_strtab.len() as u32,
-            sh_link: 0,
-            sh_info: 0,
-            sh_addralign: 1,
-            sh_entsize: 0,
-        });
+        write_shdr(
+            &mut out,
+            shdr_pos,
+            e,
+            &ShdrFields {
+                sh_name: strtab_name_off,
+                sh_type: SHT_STRTAB,
+                sh_flags: 0,
+                sh_addr: 0,
+                sh_offset: strtab_file_off,
+                sh_size: sym_strtab.len() as u32,
+                sh_link: 0,
+                sh_info: 0,
+                sh_addralign: 1,
+                sh_entsize: 0,
+            },
+        );
         shdr_pos += SHDR_SIZE;
     }
 
     // .shstrtab
-    write_shdr(&mut out, shdr_pos, e, &ShdrFields {
-        sh_name: shstrtab_name_off,
-        sh_type: SHT_STRTAB,
-        sh_flags: 0,
-        sh_addr: 0,
-        sh_offset: shstrtab_file_off,
-        sh_size: shstrtab.len() as u32,
-        sh_link: 0,
-        sh_info: 0,
-        sh_addralign: 1,
-        sh_entsize: 0,
-    });
+    write_shdr(
+        &mut out,
+        shdr_pos,
+        e,
+        &ShdrFields {
+            sh_name: shstrtab_name_off,
+            sh_type: SHT_STRTAB,
+            sh_flags: 0,
+            sh_addr: 0,
+            sh_offset: shstrtab_file_off,
+            sh_size: shstrtab.len() as u32,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: 1,
+            sh_entsize: 0,
+        },
+    );
 
     Ok(out)
 }
@@ -381,7 +419,6 @@ impl MergedSection {
             self.address
         }
     }
-
 }
 
 fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
@@ -398,15 +435,16 @@ fn collect_output_sections(placed: &[PlacedSection]) -> Vec<MergedSection> {
             // code and need SHF_EXECINSTR so dis-assemblers and
             // loaders recognise them, but the backing memory is still
             // writable RAM so they keep SHF_WRITE as well.
-            let is_exec = matches!(
-                ps.qualifier,
-                SectionQualifier::Pm | SectionQualifier::Sw
-            );
+            let is_exec = matches!(ps.qualifier, SectionQualifier::Pm | SectionQualifier::Sw);
             let is_write = matches!(
                 ps.qualifier,
-                SectionQualifier::Dm | SectionQualifier::Bw | SectionQualifier::Sw
-                    | SectionQualifier::ZeroInit | SectionQualifier::NoInit
-                    | SectionQualifier::Data64 | SectionQualifier::None
+                SectionQualifier::Dm
+                    | SectionQualifier::Bw
+                    | SectionQualifier::Sw
+                    | SectionQualifier::ZeroInit
+                    | SectionQualifier::NoInit
+                    | SectionQualifier::Data64
+                    | SectionQualifier::None
             );
             let is_sw = matches!(ps.qualifier, SectionQualifier::Sw);
 
@@ -555,11 +593,23 @@ mod tests {
     fn write_shdr_roundtrip() {
         let e = Endian::Little;
         let mut buf = vec![0u8; SHDR_SIZE];
-        write_shdr(&mut buf, 0, e, &ShdrFields {
-            sh_name: 1, sh_type: 2, sh_flags: 3, sh_addr: 4,
-            sh_offset: 5, sh_size: 6, sh_link: 7, sh_info: 8,
-            sh_addralign: 9, sh_entsize: 10,
-        });
+        write_shdr(
+            &mut buf,
+            0,
+            e,
+            &ShdrFields {
+                sh_name: 1,
+                sh_type: 2,
+                sh_flags: 3,
+                sh_addr: 4,
+                sh_offset: 5,
+                sh_size: 6,
+                sh_link: 7,
+                sh_info: 8,
+                sh_addralign: 9,
+                sh_entsize: 10,
+            },
+        );
         let shdr = selelf::elf::parse_section_header(&buf, e);
         assert_eq!(shdr.sh_name, 1);
         assert_eq!(shdr.sh_type, 2);

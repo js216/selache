@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(table.offsets[0], None); // short name
         assert_eq!(table.offsets[1], Some(0)); // long name at offset 0
         assert_eq!(table.offsets[2], None); // short name
-        // Verify delimiter
+                                            // Verify delimiter
         assert!(table.data.contains(&b'\n'));
         let parsed = lookup(&table.data, 0).unwrap();
         assert_eq!(parsed, "very_long_member_name.doj");

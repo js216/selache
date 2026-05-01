@@ -166,8 +166,7 @@ pub fn layout(
     // spec placed in several output sections would duplicate every
     // library member's `seg_pmco` into each of them, overflowing the
     // destination memory segments.
-    let mut claimed: std::collections::HashSet<(usize, usize)> =
-        std::collections::HashSet::new();
+    let mut claimed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
 
     // Reserve allocations. Keyed by reserve base name; the value is a
     // mutable (start, length) pair in byte units. Each entry is
@@ -211,8 +210,12 @@ pub fn layout(
             if !r.expand || r.name.is_empty() {
                 continue;
             }
-            let Some(entry) = reserves.get_mut(&r.name) else { continue };
-            let Some(cur) = cursors.get_mut(&out_sec.target_memory) else { continue };
+            let Some(entry) = reserves.get_mut(&r.name) else {
+                continue;
+            };
+            let Some(cur) = cursors.get_mut(&out_sec.target_memory) else {
+                continue;
+            };
             // The current cursor position marks the first byte
             // beyond all claimed reserves and placements. The
             // segment extends through `end` (inclusive, in unit
@@ -221,8 +224,7 @@ pub fn layout(
             // already starts past the cursor (because it was carved
             // before later placements) keeps its original start and
             // only its length changes.
-            let end_byte_exclusive = cur.end.saturating_add(1)
-                .saturating_mul(cur.byte_stride);
+            let end_byte_exclusive = cur.end.saturating_add(1).saturating_mul(cur.byte_stride);
             let start_byte = entry.0;
             if end_byte_exclusive > start_byte {
                 entry.1 = end_byte_exclusive - start_byte;
@@ -456,10 +458,7 @@ fn place_output_section(
 }
 
 /// Resolve a variable reference like `$OBJECTS` into a list of file paths/names.
-fn resolve_object_refs(
-    var_name: &str,
-    variables: &HashMap<String, Vec<String>>,
-) -> Vec<String> {
+fn resolve_object_refs(var_name: &str, variables: &HashMap<String, Vec<String>>) -> Vec<String> {
     resolve_object_refs_inner(var_name, variables, 0)
 }
 
@@ -511,9 +510,8 @@ fn object_matches(path: &str, refs: &[String]) -> bool {
         Some(idx) if basename.ends_with(')') => &basename[..idx],
         _ => basename,
     };
-    refs.iter().any(|r| {
-        r == path || r == basename || r == archive_stem
-    })
+    refs.iter()
+        .any(|r| r == path || r == basename || r == archive_stem)
 }
 
 fn find_entry_address(
@@ -528,7 +526,11 @@ fn find_entry_address(
             if sec.sh_type != SHT_SYMTAB {
                 continue;
             }
-            let entsize = if sec.sh_entsize > 0 { sec.sh_entsize as usize } else { 16 };
+            let entsize = if sec.sh_entsize > 0 {
+                sec.sh_entsize as usize
+            } else {
+                16
+            };
             let strtab_idx = sec.sh_link as usize;
             if strtab_idx >= obj.sections.len() {
                 continue;

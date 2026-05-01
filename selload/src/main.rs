@@ -22,7 +22,9 @@ fn print_usage() {
     eprintln!("  -proc processor    Target processor (ADSP-21569, ADSP-21568, etc.)");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -b mode            Boot mode: SPI|SPIHOST|LPHOST|UARTHOST|OSPI|eMMC (default: SPI)");
+    eprintln!(
+        "  -b mode            Boot mode: SPI|SPIHOST|LPHOST|UARTHOST|OSPI|eMMC (default: SPI)"
+    );
     eprintln!("  -bcode #           BCODE field value for SPI boot");
     eprintln!("  -o filename        Output file (default: input stem + .ldr)");
     eprintln!("  -f format          Output format: binary|hex|ascii|include (default: binary)");

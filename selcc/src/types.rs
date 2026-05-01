@@ -53,7 +53,10 @@ pub trait TypeCtx {
     /// Look up the fields of a struct or union declared by tag.
     fn resolve_tag(&self, name: &str) -> Option<&[(String, Type)]>;
     /// Look up the target type of a typedef name.
-    fn resolve_typedef(&self, name: &str) -> Option<&Type> { let _ = name; None }
+    fn resolve_typedef(&self, name: &str) -> Option<&Type> {
+        let _ = name;
+        None
+    }
 }
 
 /// An empty context: no tag lookups possible. Used as a degenerate
@@ -61,7 +64,9 @@ pub trait TypeCtx {
 /// that build types inline with full field lists).
 pub struct NullCtx;
 impl TypeCtx for NullCtx {
-    fn resolve_tag(&self, _name: &str) -> Option<&[(String, Type)]> { None }
+    fn resolve_tag(&self, _name: &str) -> Option<&[(String, Type)]> {
+        None
+    }
 }
 
 /// Size in bytes, resolving tag-only struct/union references and
@@ -97,12 +102,20 @@ pub fn size_bytes_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
             if fields.is_empty() {
                 if let Some(uname) = name {
                     if let Some(def) = ctx.resolve_tag(uname) {
-                        return def.iter().map(|(_, t)| size_bytes_ctx(t, ctx)).max().unwrap_or(0);
+                        return def
+                            .iter()
+                            .map(|(_, t)| size_bytes_ctx(t, ctx))
+                            .max()
+                            .unwrap_or(0);
                     }
                 }
                 0
             } else {
-                fields.iter().map(|(_, t)| size_bytes_ctx(t, ctx)).max().unwrap_or(0)
+                fields
+                    .iter()
+                    .map(|(_, t)| size_bytes_ctx(t, ctx))
+                    .max()
+                    .unwrap_or(0)
             }
         }
         Type::Enum { .. } => 4,
@@ -128,8 +141,13 @@ pub fn size_bytes_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
 pub fn size_words_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
     match ty {
         Type::Void => 0,
-        Type::Bool | Type::Char | Type::Short | Type::Int | Type::Long
-        | Type::Float | Type::Double => 1,
+        Type::Bool
+        | Type::Char
+        | Type::Short
+        | Type::Int
+        | Type::Long
+        | Type::Float
+        | Type::Double => 1,
         Type::LongLong | Type::ULongLong => 2,
         Type::Unsigned(inner) => size_words_ctx(inner, ctx),
         Type::Pointer(_) | Type::FunctionPtr { .. } => 1,
@@ -154,12 +172,20 @@ pub fn size_words_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
             if fields.is_empty() {
                 if let Some(uname) = name {
                     if let Some(def) = ctx.resolve_tag(uname) {
-                        return def.iter().map(|(_, t)| size_words_ctx(t, ctx)).max().unwrap_or(0);
+                        return def
+                            .iter()
+                            .map(|(_, t)| size_words_ctx(t, ctx))
+                            .max()
+                            .unwrap_or(0);
                     }
                 }
                 0
             } else {
-                fields.iter().map(|(_, t)| size_words_ctx(t, ctx)).max().unwrap_or(0)
+                fields
+                    .iter()
+                    .map(|(_, t)| size_words_ctx(t, ctx))
+                    .max()
+                    .unwrap_or(0)
             }
         }
         Type::Enum { .. } => 1,
@@ -195,24 +221,40 @@ pub fn alignment_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
             if fields.is_empty() {
                 if let Some(sname) = name {
                     if let Some(def) = ctx.resolve_tag(sname) {
-                        return def.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1);
+                        return def
+                            .iter()
+                            .map(|(_, t)| alignment_ctx(t, ctx))
+                            .max()
+                            .unwrap_or(1);
                     }
                 }
                 1
             } else {
-                fields.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1)
+                fields
+                    .iter()
+                    .map(|(_, t)| alignment_ctx(t, ctx))
+                    .max()
+                    .unwrap_or(1)
             }
         }
         Type::Union { name, fields } => {
             if fields.is_empty() {
                 if let Some(uname) = name {
                     if let Some(def) = ctx.resolve_tag(uname) {
-                        return def.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1);
+                        return def
+                            .iter()
+                            .map(|(_, t)| alignment_ctx(t, ctx))
+                            .max()
+                            .unwrap_or(1);
                     }
                 }
                 1
             } else {
-                fields.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1)
+                fields
+                    .iter()
+                    .map(|(_, t)| alignment_ctx(t, ctx))
+                    .max()
+                    .unwrap_or(1)
             }
         }
         Type::Enum { .. } => 4,
@@ -221,7 +263,11 @@ pub fn alignment_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
                 return alignment_ctx(target, ctx);
             }
             if let Some(def) = ctx.resolve_tag(name) {
-                return def.iter().map(|(_, t)| alignment_ctx(t, ctx)).max().unwrap_or(1);
+                return def
+                    .iter()
+                    .map(|(_, t)| alignment_ctx(t, ctx))
+                    .max()
+                    .unwrap_or(1);
             }
             4
         }
@@ -256,13 +302,17 @@ pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u3
                 offset += bit_offset.div_ceil(8);
                 let align = alignment_ctx(base, ctx);
                 offset = align_up(offset, align);
-                if align > max_align { max_align = align; }
+                if align > max_align {
+                    max_align = align;
+                }
                 bit_offset = w;
             } else {
                 if bit_offset == 0 {
                     let align = alignment_ctx(base, ctx);
                     offset = align_up(offset, align);
-                    if align > max_align { max_align = align; }
+                    if align > max_align {
+                        max_align = align;
+                    }
                 }
                 bit_offset += w;
             }
@@ -273,7 +323,9 @@ pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u3
             }
             let align = alignment_ctx(ty, ctx);
             offset = align_up(offset, align);
-            if align > max_align { max_align = align; }
+            if align > max_align {
+                max_align = align;
+            }
             offset += size_bytes_ctx(ty, ctx);
         }
     }
@@ -339,12 +391,16 @@ pub fn struct_field_layout_ctx(
             if name.starts_with("__anon") {
                 match ty {
                     Type::Struct { fields: inner, .. } => {
-                        if let Some((nested_off, bo, bw)) = struct_field_layout_ctx(inner, target, ctx) {
+                        if let Some((nested_off, bo, bw)) =
+                            struct_field_layout_ctx(inner, target, ctx)
+                        {
                             return Some((offset + nested_off, bo, bw));
                         }
                     }
                     Type::Union { fields: inner, .. } => {
-                        if let Some((nested_off, bo, bw)) = struct_field_layout_ctx(inner, target, ctx) {
+                        if let Some((nested_off, bo, bw)) =
+                            struct_field_layout_ctx(inner, target, ctx)
+                        {
                             return Some((offset + nested_off, bo, bw));
                         }
                     }
@@ -381,14 +437,18 @@ fn struct_size_bytes(fields: &[(String, Type)]) -> u32 {
                 offset += bit_offset.div_ceil(8);
                 let align = base.alignment();
                 offset = align_up(offset, align);
-                if align > max_align { max_align = align; }
+                if align > max_align {
+                    max_align = align;
+                }
                 bit_offset = w;
             } else {
                 // Fits in current storage unit.
                 if bit_offset == 0 {
                     let align = base.alignment();
                     offset = align_up(offset, align);
-                    if align > max_align { max_align = align; }
+                    if align > max_align {
+                        max_align = align;
+                    }
                 }
                 bit_offset += w;
             }
@@ -400,7 +460,9 @@ fn struct_size_bytes(fields: &[(String, Type)]) -> u32 {
             }
             let align = ty.alignment();
             offset = align_up(offset, align);
-            if align > max_align { max_align = align; }
+            if align > max_align {
+                max_align = align;
+            }
             offset += ty.size_bytes();
         }
     }
@@ -488,7 +550,9 @@ pub fn struct_field_layout(
 
 /// Round `val` up to the next multiple of `align`.
 fn align_up(val: u32, align: u32) -> u32 {
-    if align == 0 { return val; }
+    if align == 0 {
+        return val;
+    }
     val.div_ceil(align) * align
 }
 
@@ -498,8 +562,7 @@ impl Type {
         match self {
             Type::Void => 0,
             Type::Bool => 1, // occupies 1 word on SHARC
-            Type::Char | Type::Short | Type::Int | Type::Long
-            | Type::Float | Type::Double => 1,
+            Type::Char | Type::Short | Type::Int | Type::Long | Type::Float | Type::Double => 1,
             Type::LongLong | Type::ULongLong => 2,
             Type::Unsigned(inner) => inner.size_words(),
             Type::Pointer(_) => 1,
@@ -517,9 +580,11 @@ impl Type {
                 // Round up bytes to words.
                 struct_size_bytes(fields).div_ceil(4)
             }
-            Type::Union { fields, .. } => {
-                fields.iter().map(|(_, ty)| ty.size_words()).max().unwrap_or(0)
-            }
+            Type::Union { fields, .. } => fields
+                .iter()
+                .map(|(_, ty)| ty.size_words())
+                .max()
+                .unwrap_or(0),
             Type::Enum { .. } => 1,
             Type::Typedef(_) => 1, // resolved during sema
             Type::Volatile(inner) => inner.size_words(),
@@ -545,9 +610,11 @@ impl Type {
             Type::Array(elem, Some(n)) => elem.size_bytes() * (*n as u32),
             Type::Array(_, None) => 0,
             Type::Struct { fields, .. } => struct_size_bytes(fields),
-            Type::Union { fields, .. } => {
-                fields.iter().map(|(_, ty)| ty.size_bytes()).max().unwrap_or(0)
-            }
+            Type::Union { fields, .. } => fields
+                .iter()
+                .map(|(_, ty)| ty.size_bytes())
+                .max()
+                .unwrap_or(0),
             Type::Enum { .. } => 4,
             Type::Typedef(_) => 4,
             Type::Volatile(inner) => inner.size_bytes(),
@@ -563,8 +630,14 @@ impl Type {
     pub fn is_integer(&self) -> bool {
         matches!(
             self,
-            Type::Bool | Type::Char | Type::Short | Type::Int | Type::Long
-            | Type::LongLong | Type::ULongLong | Type::Enum { .. }
+            Type::Bool
+                | Type::Char
+                | Type::Short
+                | Type::Int
+                | Type::Long
+                | Type::LongLong
+                | Type::ULongLong
+                | Type::Enum { .. }
         ) || matches!(self, Type::Unsigned(inner) if inner.is_integer())
             || matches!(self, Type::Volatile(inner) if inner.is_integer())
             || matches!(self, Type::Const(inner) if inner.is_integer())
@@ -588,7 +661,11 @@ impl Type {
     /// Whether this is a scalar type (arithmetic or pointer).
     /// C99 6.2.5p21: scalar types are arithmetic types and pointer types.
     pub fn is_scalar(&self) -> bool {
-        self.is_integer() || self.is_float() || self.is_pointer() || self.is_complex() || self.is_imaginary()
+        self.is_integer()
+            || self.is_float()
+            || self.is_pointer()
+            || self.is_complex()
+            || self.is_imaginary()
     }
 
     /// Whether this is a complex type.
@@ -625,12 +702,16 @@ impl Type {
             Type::Unsigned(inner) => inner.alignment(),
             Type::Pointer(_) | Type::FunctionPtr { .. } => 4,
             Type::Array(elem, _) => elem.alignment(),
-            Type::Struct { fields, .. } => {
-                fields.iter().map(|(_, ty)| ty.alignment()).max().unwrap_or(1)
-            }
-            Type::Union { fields, .. } => {
-                fields.iter().map(|(_, ty)| ty.alignment()).max().unwrap_or(1)
-            }
+            Type::Struct { fields, .. } => fields
+                .iter()
+                .map(|(_, ty)| ty.alignment())
+                .max()
+                .unwrap_or(1),
+            Type::Union { fields, .. } => fields
+                .iter()
+                .map(|(_, ty)| ty.alignment())
+                .max()
+                .unwrap_or(1),
             Type::Enum { .. } => 4,
             Type::Typedef(_) => 4,
             Type::Volatile(inner) | Type::Const(inner) => inner.alignment(),
@@ -680,7 +761,9 @@ impl Type {
     pub fn usual_arithmetic_conversion(a: &Type, b: &Type) -> Type {
         // If either is float/double, promote (handled by caller).
         if a.is_float() || b.is_float() {
-            return if matches!(a.unqualified(), Type::Double) || matches!(b.unqualified(), Type::Double) {
+            return if matches!(a.unqualified(), Type::Double)
+                || matches!(b.unqualified(), Type::Double)
+            {
                 Type::Double
             } else {
                 Type::Float
@@ -691,7 +774,9 @@ impl Type {
         let pb = b.integer_promoted();
 
         // If both have the same type, done.
-        if pa == pb { return pa; }
+        if pa == pb {
+            return pa;
+        }
 
         let a_unsigned = pa.is_unsigned();
         let b_unsigned = pb.is_unsigned();
@@ -700,7 +785,11 @@ impl Type {
 
         if a_unsigned == b_unsigned {
             // Same signedness: use the higher rank.
-            if a_rank >= b_rank { pa } else { pb }
+            if a_rank >= b_rank {
+                pa
+            } else {
+                pb
+            }
         } else {
             // Different signedness.
             let (unsigned_ty, signed_rank, unsigned_rank) = if a_unsigned {
@@ -713,7 +802,11 @@ impl Type {
             } else {
                 // Signed type can represent all values of unsigned type.
                 // On SHARC, int (32 bits) can represent all unsigned short values.
-                if a_unsigned { pb } else { pa }
+                if a_unsigned {
+                    pb
+                } else {
+                    pa
+                }
             }
         }
     }
@@ -731,7 +824,11 @@ impl Type {
             Type::Bitfield(_, width) => {
                 // Bitfields promote to int if width fits in int (always true
                 // for 32-bit int).
-                if (*width as u32) < 32 { Type::Int } else { self.clone() }
+                if (*width as u32) < 32 {
+                    Type::Int
+                } else {
+                    self.clone()
+                }
             }
             _ => self.clone(),
         }
@@ -776,10 +873,7 @@ mod tests {
     fn size_words_struct() {
         let s = Type::Struct {
             name: Some("point".into()),
-            fields: vec![
-                ("x".into(), Type::Int),
-                ("y".into(), Type::Int),
-            ],
+            fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)],
         };
         assert_eq!(s.size_words(), 2);
     }
@@ -871,9 +965,18 @@ mod tests {
         let s = Type::Struct {
             name: None,
             fields: vec![
-                ("x".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 3)),
-                ("y".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 5)),
-                ("z".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 1)),
+                (
+                    "x".into(),
+                    Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 3),
+                ),
+                (
+                    "y".into(),
+                    Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 5),
+                ),
+                (
+                    "z".into(),
+                    Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 1),
+                ),
             ],
         };
         assert_eq!(s.size_bytes(), 4);
@@ -888,8 +991,14 @@ mod tests {
         let s = Type::Struct {
             name: None,
             fields: vec![
-                ("a".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 30)),
-                ("b".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 10)),
+                (
+                    "a".into(),
+                    Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 30),
+                ),
+                (
+                    "b".into(),
+                    Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 10),
+                ),
             ],
         };
         assert_eq!(s.size_bytes(), 8);
@@ -898,8 +1007,14 @@ mod tests {
     #[test]
     fn bitfield_field_layout() {
         let fields = vec![
-            ("x".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 3)),
-            ("y".into(), Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 5)),
+            (
+                "x".into(),
+                Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 3),
+            ),
+            (
+                "y".into(),
+                Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 5),
+            ),
         ];
         let (off, bit, width) = struct_field_layout(&fields, "x").unwrap();
         assert_eq!(off, 0);
@@ -916,11 +1031,11 @@ mod tests {
     fn struct_padding() {
         // struct { char a; int b; } should have 3 bytes padding after a.
         // Total: 1 (a) + 3 (pad) + 4 (b) = 8 bytes.
-        let fields = vec![
-            ("a".into(), Type::Char),
-            ("b".into(), Type::Int),
-        ];
-        let s = Type::Struct { name: None, fields: fields.clone() };
+        let fields = vec![("a".into(), Type::Char), ("b".into(), Type::Int)];
+        let s = Type::Struct {
+            name: None,
+            fields: fields.clone(),
+        };
         assert_eq!(s.size_bytes(), 8);
 
         // offsetof(s, a) = 0, offsetof(s, b) = 4
@@ -935,10 +1050,7 @@ mod tests {
         // struct { int x; char y; } should be 8 bytes (padded to int alignment).
         let s = Type::Struct {
             name: None,
-            fields: vec![
-                ("x".into(), Type::Int),
-                ("y".into(), Type::Char),
-            ],
+            fields: vec![("x".into(), Type::Int), ("y".into(), Type::Char)],
         };
         assert_eq!(s.size_bytes(), 8);
     }
@@ -948,10 +1060,7 @@ mod tests {
         // struct { int x; int y; } should be 8 bytes (no padding).
         let s = Type::Struct {
             name: None,
-            fields: vec![
-                ("x".into(), Type::Int),
-                ("y".into(), Type::Int),
-            ],
+            fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)],
         };
         assert_eq!(s.size_bytes(), 8);
     }

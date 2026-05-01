@@ -163,15 +163,20 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         }
         let mut wstr_remap: Vec<usize> = Vec::with_capacity(fr.wide_strings.len());
         for ws in fr.wide_strings {
-            let idx = all_wide_strings.iter().position(|e| e == &ws).unwrap_or_else(|| {
-                all_wide_strings.push(ws);
-                all_wide_strings.len() - 1
-            });
+            let idx = all_wide_strings
+                .iter()
+                .position(|e| e == &ws)
+                .unwrap_or_else(|| {
+                    all_wide_strings.push(ws);
+                    all_wide_strings.len() - 1
+                });
             wstr_remap.push(idx);
         }
         let mut instrs = fr.instrs;
         for mi in instrs.iter_mut() {
-            let Some(r) = mi.reloc.as_mut() else { continue; };
+            let Some(r) = mi.reloc.as_mut() else {
+                continue;
+            };
             if let Some(rest) = r.symbol.strip_prefix(".str") {
                 if let Ok(local) = rest.parse::<usize>() {
                     if let Some(&g) = str_remap.get(local) {
@@ -213,8 +218,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     // function and closes over call / address-taken relocs. Any
     // `static` function not reached is dropped from the emitted
     // module; its referenced externs are not emitted either.
-    let fn_names: HashSet<String> =
-        compiled.iter().map(|c| c.name.clone()).collect();
+    let fn_names: HashSet<String> = compiled.iter().map(|c| c.name.clone()).collect();
     let mut reachable: HashSet<String> = compiled
         .iter()
         .filter(|c| !c.is_static)
@@ -243,7 +247,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         }
     }
     while let Some(name) = worklist.pop() {
-        let Some(cf) = by_name.get(name.as_str()) else { continue };
+        let Some(cf) = by_name.get(name.as_str()) else {
+            continue;
+        };
         for mi in &cf.instrs {
             if let Some(r) = &mi.reloc {
                 if r.symbol.starts_with(".L") {
@@ -264,7 +270,12 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     let defined_syms: HashSet<String> = compiled
         .iter()
         .map(|c| c.name.clone())
-        .chain(unit.globals.iter().filter(|g| !g.is_extern).map(|g| g.name.clone()))
+        .chain(
+            unit.globals
+                .iter()
+                .filter(|g| !g.is_extern)
+                .map(|g| g.name.clone()),
+        )
         .chain(all_static_locals.iter().map(|sl| sl.symbol.clone()))
         .collect();
 
@@ -318,7 +329,8 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                         let _ = writeln!(out, "{lbl}:");
                     }
                 }
-                let line = emit_instr_line(mi).map_err(|e| Error::NotImplemented(format!("encode: {e}")))?;
+                let line = emit_instr_line(mi)
+                    .map_err(|e| Error::NotImplemented(format!("encode: {e}")))?;
                 let _ = writeln!(out, "    {line};");
             }
             // Emit any trailing labels whose position sits at
@@ -389,7 +401,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", global.name);
                     // Fall back to zero-init so the symbol is still defined.
-                    let words = crate::types::size_bytes_ctx(&global.ty, &unit_tctx).div_ceil(4).max(1);
+                    let words = crate::types::size_bytes_ctx(&global.ty, &unit_tctx)
+                        .div_ceil(4)
+                        .max(1);
                     data_entries.push(DataEntry {
                         name: global.name.clone(),
                         values: vec![InitWord::Num(0); words as usize],
@@ -421,7 +435,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 }),
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", sl.symbol);
-                    let words = crate::types::size_bytes_ctx(&sl.ty, &unit_tctx).div_ceil(4).max(1);
+                    let words = crate::types::size_bytes_ctx(&sl.ty, &unit_tctx)
+                        .div_ceil(4)
+                        .max(1);
                     data_entries.push(DataEntry {
                         name: sl.symbol.clone(),
                         values: vec![InitWord::Num(0); words as usize],
@@ -451,7 +467,10 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     // alias symbol at the named word offset of the target entry; the
     // emitter resolves multiple symbols on the same word via `.SET`.
     for req in &interior_reqs {
-        if let Some(entry) = data_entries.iter_mut().find(|e| e.name == req.target_global) {
+        if let Some(entry) = data_entries
+            .iter_mut()
+            .find(|e| e.name == req.target_global)
+        {
             // Pad the entry's word vector if the requested offset is
             // past the materialised initialisers (e.g. trailing zero
             // tail of a sized array). The bytes were going to be zero
@@ -459,7 +478,11 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             if req.word_offset >= entry.values.len() {
                 entry.values.resize(req.word_offset + 1, InitWord::Num(0));
             }
-            if !entry.interior.iter().any(|(o, l)| *o == req.word_offset && l == &req.label) {
+            if !entry
+                .interior
+                .iter()
+                .any(|(o, l)| *o == req.word_offset && l == &req.label)
+            {
                 entry.interior.push((req.word_offset, req.label.clone()));
             }
         }
@@ -483,13 +506,22 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         if global.is_extern {
             continue;
         }
-        if global.init.is_none() && !data_names.contains(&global.name) && bss_seen.insert(global.name.clone()) {
-            bss_entries.push((global.name.clone(), crate::types::size_bytes_ctx(&global.ty, &unit_tctx)));
+        if global.init.is_none()
+            && !data_names.contains(&global.name)
+            && bss_seen.insert(global.name.clone())
+        {
+            bss_entries.push((
+                global.name.clone(),
+                crate::types::size_bytes_ctx(&global.ty, &unit_tctx),
+            ));
         }
     }
     for sl in &all_static_locals {
         if sl.init.is_none() {
-            bss_entries.push((sl.symbol.clone(), crate::types::size_bytes_ctx(&sl.ty, &unit_tctx)));
+            bss_entries.push((
+                sl.symbol.clone(),
+                crate::types::size_bytes_ctx(&sl.ty, &unit_tctx),
+            ));
         }
     }
     if !bss_entries.is_empty() {
@@ -524,8 +556,10 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let _ = writeln!(out, ".GLOBAL {name};");
             let mut bytes: Vec<u8> = s.as_bytes().to_vec();
             bytes.push(0);
-            let words: Vec<InitWord> =
-                pack_bytes_le(&bytes).into_iter().map(InitWord::Num).collect();
+            let words: Vec<InitWord> = pack_bytes_le(&bytes)
+                .into_iter()
+                .map(InitWord::Num)
+                .collect();
             emit_var_bytes(&mut out, &name, &words, &[]);
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
@@ -593,12 +627,7 @@ enum InitWord {
 /// produced for `&array[N]` / `&obj.field` file-scope initialisers so
 /// the linker can resolve those addresses by symbol rather than by an
 /// (unsupported) `sym + offset` relocation.
-fn emit_var_bytes(
-    out: &mut String,
-    sym: &str,
-    values: &[InitWord],
-    interior: &[(usize, String)],
-) {
+fn emit_var_bytes(out: &mut String, sym: &str, values: &[InitWord], interior: &[(usize, String)]) {
     if values.is_empty() {
         let _ = writeln!(out, ".VAR {sym};");
         return;
@@ -613,7 +642,8 @@ fn emit_var_bytes(
         // owned by the entry's primary name; later words use the first
         // requested interior label (if any), with any further labels
         // aliased via `.SET`.
-        let labels_here: Vec<&String> = interior.iter()
+        let labels_here: Vec<&String> = interior
+            .iter()
             .filter(|(i, _)| *i == idx)
             .map(|(_, l)| l)
             .collect();
@@ -682,8 +712,7 @@ fn collect_init_symbol_refs(
                 collect_init_symbol_refs(item, fn_names, reachable, worklist);
             }
         }
-        Expr::ArrayDesignator { value, .. }
-        | Expr::DesignatedInit { value, .. } => {
+        Expr::ArrayDesignator { value, .. } | Expr::DesignatedInit { value, .. } => {
             collect_init_symbol_refs(value, fn_names, reachable, worklist);
         }
         _ => {}
@@ -700,7 +729,9 @@ fn resolve_struct_fields<'a>(
     use crate::types::Type;
     match ty {
         Type::Const(inner) | Type::Volatile(inner) => resolve_struct_fields(inner, tctx),
-        Type::Typedef(name) => tctx.resolve_typedef(name).and_then(|t| resolve_struct_fields(t, tctx)),
+        Type::Typedef(name) => tctx
+            .resolve_typedef(name)
+            .and_then(|t| resolve_struct_fields(t, tctx)),
         Type::Struct { name, fields } | Type::Union { name, fields } => {
             if !fields.is_empty() {
                 Some(fields.as_slice())
@@ -755,7 +786,10 @@ fn build_init_words(
             // zero-fill tail elements match the declaration.
             let declared = size_bytes.max(bytes.len() as u32) as usize;
             bytes.resize(declared, 0);
-            Ok(pack_bytes_le(&bytes).into_iter().map(InitWord::Num).collect())
+            Ok(pack_bytes_le(&bytes)
+                .into_iter()
+                .map(InitWord::Num)
+                .collect())
         }
         Expr::InitList(items) => {
             // Honour designated initializers (`[n] = v`, `.field = v`).
@@ -790,15 +824,19 @@ fn build_init_words(
             let mut field_map: Vec<(String, usize, &Type)> = Vec::new();
             if let Some(fields) = struct_fields {
                 for (fname, fty) in fields {
-                    let (byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, fname, tctx)
-                        .ok_or_else(|| Error::Compile { msg: format!(
-                            "internal: field {fname} not found in own struct"
-                        ) })?;
+                    let (byte_off, _, _) = crate::types::struct_field_layout_ctx(
+                        fields, fname, tctx,
+                    )
+                    .ok_or_else(|| Error::Compile {
+                        msg: format!("internal: field {fname} not found in own struct"),
+                    })?;
                     if byte_off % 4 != 0 {
-                        return Err(Error::Compile { msg: format!(
-                            "field {fname} at byte offset {byte_off} is not word-aligned; \
+                        return Err(Error::Compile {
+                            msg: format!(
+                                "field {fname} at byte offset {byte_off} is not word-aligned; \
                              sub-word struct fields in global initializers are not supported"
-                        ) });
+                            ),
+                        });
                     }
                     field_map.push((fname.clone(), (byte_off / 4) as usize, fty));
                 }
@@ -812,13 +850,17 @@ fn build_init_words(
                 match item {
                     Expr::DesignatedInit { field, value } => {
                         // Struct field designator. Locate the field by name.
-                        let (fidx, woff, fty) = field_map.iter().enumerate()
+                        let (fidx, woff, fty) = field_map
+                            .iter()
+                            .enumerate()
                             .find(|(_, (n, _, _))| n == field)
                             .map(|(i, (_, w, t))| (i, *w, *t))
-                            .ok_or_else(|| Error::Compile { msg: format!(
-                                "designated initializer .{field} has no matching struct field \
+                            .ok_or_else(|| Error::Compile {
+                                msg: format!(
+                                    "designated initializer .{field} has no matching struct field \
                                  (type info missing or field undefined)"
-                            ) })?;
+                                ),
+                            })?;
                         // Recursively build the value's words and place
                         // them at the field's word offset.
                         let fsize = crate::types::size_bytes_ctx(fty, tctx);
@@ -1002,16 +1044,16 @@ fn eval_init_word(
             // initializer words, queue it as an extra data entry, and
             // return a symbolic reference so the linker patches in the
             // runtime address.
-            Expr::Cast(ty, init_inner)
-                if matches!(init_inner.as_ref(), Expr::InitList(_)) =>
-            {
+            Expr::Cast(ty, init_inner) if matches!(init_inner.as_ref(), Expr::InitList(_)) => {
                 let name = format!(".complit{}", *ictx.complit_counter);
                 *ictx.complit_counter += 1;
                 let size = crate::types::size_bytes_ctx(ty, tctx);
-                let values = build_init_words(
-                    init_inner, size, tctx, Some(ty), ictx,
-                )?;
-                ictx.extra_data.push(DataEntry { name: name.clone(), values, interior: Vec::new() });
+                let values = build_init_words(init_inner, size, tctx, Some(ty), ictx)?;
+                ictx.extra_data.push(DataEntry {
+                    name: name.clone(),
+                    values,
+                    interior: Vec::new(),
+                });
                 Ok(InitWord::Sym(name))
             }
             // Bare compound literal without an explicit cast (rare,
@@ -1021,10 +1063,12 @@ fn eval_init_word(
             Expr::InitList(_) => {
                 let name = format!(".complit{}", *ictx.complit_counter);
                 *ictx.complit_counter += 1;
-                let values = build_init_words(
-                    inner, 4, tctx, None, ictx,
-                )?;
-                ictx.extra_data.push(DataEntry { name: name.clone(), values, interior: Vec::new() });
+                let values = build_init_words(inner, 4, tctx, None, ictx)?;
+                ictx.extra_data.push(DataEntry {
+                    name: name.clone(),
+                    values,
+                    interior: Vec::new(),
+                });
                 Ok(InitWord::Sym(name))
             }
             // `&array[N]`, `&obj.field`, `&array[N].field`, `&obj.field[N]`,
@@ -1038,11 +1082,13 @@ fn eval_init_word(
                     resolve_static_lvalue(inner, tctx, ictx.global_types)
                 {
                     if byte_off % 4 != 0 {
-                        return Err(Error::Compile { msg: format!(
-                            "address-of `{root}` interior at byte {byte_off} is not \
+                        return Err(Error::Compile {
+                            msg: format!(
+                                "address-of `{root}` interior at byte {byte_off} is not \
                              word-aligned; sub-word interior addresses in file-scope \
                              initializers are not supported"
-                        ) });
+                            ),
+                        });
                     }
                     let label = format!(".addrof_{}_{}", root, byte_off / 4);
                     ictx.interior_reqs.push(InteriorReq {
@@ -1067,36 +1113,69 @@ fn eval_const_expr(expr: &Expr, tctx: &dyn crate::types::TypeCtx) -> Result<i32>
         Expr::IntLit(n, _) => Ok(*n as i32),
         Expr::FloatLit(f) => Ok((*f as f32).to_bits() as i32),
         Expr::CharLit(n) => Ok(*n as i32),
-        Expr::Unary { op: UnaryOp::Neg, operand } => Ok(-eval_const_expr(operand, tctx)?),
-        Expr::Binary { op: BinaryOp::Add, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)?.wrapping_add(eval_const_expr(rhs, tctx)?))
-        }
-        Expr::Binary { op: BinaryOp::Sub, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)?.wrapping_sub(eval_const_expr(rhs, tctx)?))
-        }
-        Expr::Binary { op: BinaryOp::Mul, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)?.wrapping_mul(eval_const_expr(rhs, tctx)?))
-        }
-        Expr::Binary { op: BinaryOp::Div, lhs, rhs } => {
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => Ok(-eval_const_expr(operand, tctx)?),
+        Expr::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)?.wrapping_add(eval_const_expr(rhs, tctx)?)),
+        Expr::Binary {
+            op: BinaryOp::Sub,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)?.wrapping_sub(eval_const_expr(rhs, tctx)?)),
+        Expr::Binary {
+            op: BinaryOp::Mul,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)?.wrapping_mul(eval_const_expr(rhs, tctx)?)),
+        Expr::Binary {
+            op: BinaryOp::Div,
+            lhs,
+            rhs,
+        } => {
             let r = eval_const_expr(rhs, tctx)?;
-            if r == 0 { Ok(0) } else { Ok(eval_const_expr(lhs, tctx)? / r) }
+            if r == 0 {
+                Ok(0)
+            } else {
+                Ok(eval_const_expr(lhs, tctx)? / r)
+            }
         }
-        Expr::Binary { op: BinaryOp::Mod, lhs, rhs } => {
+        Expr::Binary {
+            op: BinaryOp::Mod,
+            lhs,
+            rhs,
+        } => {
             let r = eval_const_expr(rhs, tctx)?;
-            if r == 0 { Ok(0) } else { Ok(eval_const_expr(lhs, tctx)? % r) }
+            if r == 0 {
+                Ok(0)
+            } else {
+                Ok(eval_const_expr(lhs, tctx)? % r)
+            }
         }
-        Expr::Binary { op: BinaryOp::BitOr, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)? | eval_const_expr(rhs, tctx)?)
-        }
-        Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)? & eval_const_expr(rhs, tctx)?)
-        }
-        Expr::Binary { op: BinaryOp::Shl, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)? << eval_const_expr(rhs, tctx)?)
-        }
-        Expr::Binary { op: BinaryOp::Shr, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)? >> eval_const_expr(rhs, tctx)?)
-        }
+        Expr::Binary {
+            op: BinaryOp::BitOr,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)? | eval_const_expr(rhs, tctx)?),
+        Expr::Binary {
+            op: BinaryOp::BitAnd,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)? & eval_const_expr(rhs, tctx)?),
+        Expr::Binary {
+            op: BinaryOp::Shl,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)? << eval_const_expr(rhs, tctx)?),
+        Expr::Binary {
+            op: BinaryOp::Shr,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)? >> eval_const_expr(rhs, tctx)?),
         Expr::Comma(_l, r) => eval_const_expr(r, tctx),
         Expr::DesignatedInit { value, .. } => eval_const_expr(value, tctx),
         Expr::ArrayDesignator { value, .. } => eval_const_expr(value, tctx),
@@ -1108,7 +1187,11 @@ fn eval_const_expr(expr: &Expr, tctx: &dyn crate::types::TypeCtx) -> Result<i32>
             };
             Ok(size as i32)
         }
-        Expr::Ternary { cond, then_expr, else_expr } => {
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
             let c = eval_const_expr(cond, tctx)?;
             if c != 0 {
                 eval_const_expr(then_expr, tctx)
@@ -1116,39 +1199,116 @@ fn eval_const_expr(expr: &Expr, tctx: &dyn crate::types::TypeCtx) -> Result<i32>
                 eval_const_expr(else_expr, tctx)
             }
         }
-        Expr::Binary { op: BinaryOp::Eq, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? == eval_const_expr(rhs, tctx)? { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::Ne, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? != eval_const_expr(rhs, tctx)? { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::Lt, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? < eval_const_expr(rhs, tctx)? { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::Gt, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? > eval_const_expr(rhs, tctx)? { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::Le, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? <= eval_const_expr(rhs, tctx)? { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::Ge, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? >= eval_const_expr(rhs, tctx)? { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::BitXor, lhs, rhs } => {
-            Ok(eval_const_expr(lhs, tctx)? ^ eval_const_expr(rhs, tctx)?)
-        }
-        Expr::Binary { op: BinaryOp::LogAnd, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? != 0 && eval_const_expr(rhs, tctx)? != 0 { 1 } else { 0 })
-        }
-        Expr::Binary { op: BinaryOp::LogOr, lhs, rhs } => {
-            Ok(if eval_const_expr(lhs, tctx)? != 0 || eval_const_expr(rhs, tctx)? != 0 { 1 } else { 0 })
-        }
-        Expr::Unary { op: UnaryOp::BitNot, operand } => Ok(!eval_const_expr(operand, tctx)?),
-        Expr::Unary { op: UnaryOp::LogNot, operand } => {
-            Ok(if eval_const_expr(operand, tctx)? == 0 { 1 } else { 0 })
-        }
-        Expr::AddrOf(_) | Expr::Ident(_) | Expr::StringLit(_)
-        | Expr::WideStringLit(_) | Expr::Deref(_) => Ok(0),
+        Expr::Binary {
+            op: BinaryOp::Eq,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? == eval_const_expr(rhs, tctx)? {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::Ne,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? != eval_const_expr(rhs, tctx)? {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::Lt,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? < eval_const_expr(rhs, tctx)? {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::Gt,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? > eval_const_expr(rhs, tctx)? {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::Le,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? <= eval_const_expr(rhs, tctx)? {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::Ge,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? >= eval_const_expr(rhs, tctx)? {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::BitXor,
+            lhs,
+            rhs,
+        } => Ok(eval_const_expr(lhs, tctx)? ^ eval_const_expr(rhs, tctx)?),
+        Expr::Binary {
+            op: BinaryOp::LogAnd,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? != 0 && eval_const_expr(rhs, tctx)? != 0 {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Binary {
+            op: BinaryOp::LogOr,
+            lhs,
+            rhs,
+        } => Ok(
+            if eval_const_expr(lhs, tctx)? != 0 || eval_const_expr(rhs, tctx)? != 0 {
+                1
+            } else {
+                0
+            },
+        ),
+        Expr::Unary {
+            op: UnaryOp::BitNot,
+            operand,
+        } => Ok(!eval_const_expr(operand, tctx)?),
+        Expr::Unary {
+            op: UnaryOp::LogNot,
+            operand,
+        } => Ok(if eval_const_expr(operand, tctx)? == 0 {
+            1
+        } else {
+            0
+        }),
+        Expr::AddrOf(_)
+        | Expr::Ident(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::Deref(_) => Ok(0),
         Expr::InitList(items) => {
             if let Some(first) = items.first() {
                 eval_const_expr(first, tctx)
@@ -1156,7 +1316,9 @@ fn eval_const_expr(expr: &Expr, tctx: &dyn crate::types::TypeCtx) -> Result<i32>
                 Ok(0)
             }
         }
-        other => Err(Error::NotImplemented(format!("non-constant initializer: {other:?}"))),
+        other => Err(Error::NotImplemented(format!(
+            "non-constant initializer: {other:?}"
+        ))),
     }
 }
 
@@ -1279,8 +1441,13 @@ fn emit_function_instrs(
     unit: &UnitCtx<'_>,
 ) -> Result<FnEmitResult> {
     let lower_result = lower::lower_function_with_known(
-        func, global_types, unit.struct_defs, unit.enum_constants,
-        unit.typedefs, unit.known_functions, unit.function_return_types,
+        func,
+        global_types,
+        unit.struct_defs,
+        unit.enum_constants,
+        unit.typedefs,
+        unit.known_functions,
+        unit.function_return_types,
     )?;
     let strings = lower_result.strings;
     let wide_strings = lower_result.wide_strings;
@@ -1300,16 +1467,19 @@ fn emit_function_instrs(
     // a regalloc latent bug that the extra pressure would expose for
     // every function in the TU instead of just the few that touch R1
     // through one of these ABI paths.
-    let reserves_r1 = ir.iter().any(|op| matches!(op,
-        crate::ir::IrOp::RetStruct { .. }
-        | crate::ir::IrOp::LoadStructRetPtr(_)
-        | crate::ir::IrOp::CallStruct { .. }
-        | crate::ir::IrOp::CallIndirectStruct { .. }
-        | crate::ir::IrOp::Div64(..)
-        | crate::ir::IrOp::UDiv64(..)
-        | crate::ir::IrOp::Mod64(..)
-        | crate::ir::IrOp::UMod64(..)
-    ));
+    let reserves_r1 = ir.iter().any(|op| {
+        matches!(
+            op,
+            crate::ir::IrOp::RetStruct { .. }
+                | crate::ir::IrOp::LoadStructRetPtr(_)
+                | crate::ir::IrOp::CallStruct { .. }
+                | crate::ir::IrOp::CallIndirectStruct { .. }
+                | crate::ir::IrOp::Div64(..)
+                | crate::ir::IrOp::UDiv64(..)
+                | crate::ir::IrOp::Mod64(..)
+                | crate::ir::IrOp::UMod64(..)
+        )
+    });
 
     // Pin one vreg per ABI argument *slot*, not per parameter. Struct-
     // by-value parameters consume multiple ABI slots (one 32-bit word
@@ -1317,8 +1487,7 @@ fn emit_function_instrs(
     // trailing struct words unpinned — regalloc then assigns those
     // vregs to arbitrary registers and reads uninitialised data for
     // every field past the first ABI slot of a multi-word struct.
-    let num_params = (lower_result.arg_slots as usize)
-        .min(target::ARG_REGS.len()) as u16;
+    let num_params = (lower_result.arg_slots as usize).min(target::ARG_REGS.len()) as u16;
 
     // Renumber IR virtual registers into a tag-bit-safe u8 range
     // *before* instruction selection truncates `VReg` (u32) to `u8`
@@ -1335,8 +1504,12 @@ fn emit_function_instrs(
     let ir = crate::ir::renumber_vregs(&ir, num_params as u32);
 
     let isel_result = isel::select_with_name(
-        &ir, &func.name, unit.variadic_callees, unit.variadic_named_counts,
-        unit.complex_arg_callees);
+        &ir,
+        &func.name,
+        unit.variadic_callees,
+        unit.variadic_named_counts,
+        unit.complex_arg_callees,
+    );
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} num_params={} ===", func.name, num_params);
         eprintln!("=== {} IR/isel ===", func.name);
@@ -1361,22 +1534,15 @@ fn emit_function_instrs(
     let num_saved = used_callee_saved.len() as i8;
 
     let local_slots_pre = count_local_slots(&allocated);
-    let (adjusted, adjust_map) =
-        adjust_frame_offsets(&allocated, num_saved, local_slots_pre);
+    let (adjusted, adjust_map) = adjust_frame_offsets(&allocated, num_saved, local_slots_pre);
 
     let mut label_map: HashMap<Label, usize> = HashMap::new();
     for &(label, old_idx) in &isel_result.label_positions {
         // Thread the isel-level position through regalloc's spill
         // insertions, then through adjust_frame_offsets's access
         // expansions, to land on the right instruction in `adjusted`.
-        let alloc_idx = alloc_map
-            .get(old_idx)
-            .copied()
-            .unwrap_or(allocated.len());
-        let adj_idx = adjust_map
-            .get(alloc_idx)
-            .copied()
-            .unwrap_or(adjusted.len());
+        let alloc_idx = alloc_map.get(old_idx).copied().unwrap_or(allocated.len());
+        let adj_idx = adjust_map.get(alloc_idx).copied().unwrap_or(adjusted.len());
         label_map.insert(label, adj_idx);
     }
 
@@ -1394,7 +1560,9 @@ fn emit_function_instrs(
 
     let body_depth = count_local_slots(&optimized);
     let frame_size = body_depth.max(used_callee_saved.len() as u32);
-    let has_calls = optimized.iter().any(|mi| matches!(mi.instr, Instruction::CJump { .. }));
+    let has_calls = optimized
+        .iter()
+        .any(|mi| matches!(mi.instr, Instruction::CJump { .. }));
     let prologue = build_prologue(frame_size, &used_callee_saved, has_calls);
     let epilogue = build_epilogue(frame_size, &used_callee_saved, has_calls);
 
@@ -1447,7 +1615,10 @@ fn emit_function_instrs(
         } else {
             abs_idx
         };
-        rebased_label_insertions.entry(new_abs).or_default().extend(labels);
+        rebased_label_insertions
+            .entry(new_abs)
+            .or_default()
+            .extend(labels);
     }
     let mut label_insertions = rebased_label_insertions;
 
@@ -1501,7 +1672,10 @@ fn emit_function_instrs(
     }
 
     for (old_idx, labels) in label_insertions {
-        new_label_insertions.entry(old_idx).or_default().extend(labels);
+        new_label_insertions
+            .entry(old_idx)
+            .or_default()
+            .extend(labels);
     }
 
     Ok(FnEmitResult {
@@ -1594,11 +1768,28 @@ fn splice_epilogues(
 fn callee_saved_used(instrs: &[MachInstr]) -> Vec<u16> {
     let mut used = Vec::new();
     for &reg in target::CALLEE_SAVED {
-        if instrs.iter().any(|mi| instr_uses_reg(&mi.instr, reg as u16)) {
-            used.push(reg as u16);
+        let reg = reg as u16;
+        if instrs
+            .iter()
+            .any(|mi| instr_uses_reg(&mi.instr, reg) || runtime_helper_clobbers_reg(mi, reg))
+        {
+            used.push(reg);
         }
     }
     used
+}
+
+fn runtime_helper_clobbers_reg(mi: &MachInstr, reg: u16) -> bool {
+    let Some(reloc) = &mi.reloc else {
+        return false;
+    };
+    if !matches!(mi.instr, Instruction::CJump { .. }) {
+        return false;
+    }
+    matches!(
+        reloc.symbol.as_str(),
+        "___div32" | "___udiv32" | "___mod32" | "___umod32"
+    ) && reg == 12
 }
 
 fn instr_uses_reg(instr: &Instruction, reg: u16) -> bool {
@@ -1608,9 +1799,7 @@ fn instr_uses_reg(instr: &Instruction, reg: u16) -> bool {
         Instruction::ComputeLoadStore { dreg, compute, .. } => {
             dreg == reg || compute.is_some_and(|c| compute_uses_reg(&c, reg))
         }
-        Instruction::Return { compute, .. } => {
-            compute.is_some_and(|c| compute_uses_reg(&c, reg))
-        }
+        Instruction::Return { compute, .. } => compute.is_some_and(|c| compute_uses_reg(&c, reg)),
         Instruction::Modify { .. } => false,
         _ => false,
     }
@@ -1630,10 +1819,17 @@ fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u16) -> bool {
 fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u16) -> bool {
     use selinstr::encode::AluOp::*;
     match *op {
-        Add { rn, rx, ry } | Sub { rn, rx, ry } | And { rn, rx, ry }
-        | Or { rn, rx, ry } | Xor { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
-        Pass { rn, rx } | Neg { rn, rx } | Not { rn, rx }
-        | Inc { rn, rx } | Dec { rn, rx } | Abs { rn, rx } => rn == reg || rx == reg,
+        Add { rn, rx, ry }
+        | Sub { rn, rx, ry }
+        | And { rn, rx, ry }
+        | Or { rn, rx, ry }
+        | Xor { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
+        Pass { rn, rx }
+        | Neg { rn, rx }
+        | Not { rn, rx }
+        | Inc { rn, rx }
+        | Dec { rn, rx }
+        | Abs { rn, rx } => rn == reg || rx == reg,
         Comp { rx, ry } | CompU { rx, ry } => rx == reg || ry == reg,
         _ => false,
     }
@@ -1660,13 +1856,39 @@ fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u16) -> bool {
 fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u16) -> bool {
     use selinstr::encode::MultiOp::*;
     match *op {
-        MulAlu { rm, ra, rxm, rym, rxa, rya, .. } => {
-            rm == reg || ra == reg || rxm == reg || (rym + 4) == reg
-                || (rxa + 8) == reg || (rya + 12) == reg
+        MulAlu {
+            rm,
+            ra,
+            rxm,
+            rym,
+            rxa,
+            rya,
+            ..
+        } => {
+            rm == reg
+                || ra == reg
+                || rxm == reg
+                || (rym + 4) == reg
+                || (rxa + 8) == reg
+                || (rya + 12) == reg
         }
-        MulDualAddSub { rm, ra, rs, rxm, rym, rxa, rya, .. } => {
-            rm == reg || ra == reg || rs == reg || rxm == reg || (rym + 4) == reg
-                || (rxa + 8) == reg || (rya + 12) == reg
+        MulDualAddSub {
+            rm,
+            ra,
+            rs,
+            rxm,
+            rym,
+            rxa,
+            rya,
+            ..
+        } => {
+            rm == reg
+                || ra == reg
+                || rs == reg
+                || rxm == reg
+                || (rym + 4) == reg
+                || (rxa + 8) == reg
+                || (rya + 12) == reg
         }
     }
 }
@@ -1675,8 +1897,9 @@ fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u16) -> bool {
     use selinstr::encode::FaluOp::*;
     match *op {
         Add { rn, rx, ry } | Sub { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
-        Pass { rn, rx } | Neg { rn, rx } | Abs { rn, rx }
-        | Float { rn, rx } | Fix { rn, rx } => rn == reg || rx == reg,
+        Pass { rn, rx } | Neg { rn, rx } | Abs { rn, rx } | Float { rn, rx } | Fix { rn, rx } => {
+            rn == reg || rx == reg
+        }
         Comp { rx, ry } => rx == reg || ry == reg,
         _ => false,
     }
@@ -1715,7 +1938,9 @@ const CJUMP_PUSH_RESERVE: i32 = 2;
 
 fn build_prologue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec<MachInstr> {
     debug_assert!(
-        callee_saved.iter().all(|r| target::CALLER_SAVED.iter().all(|c| (*c as u16) != *r)),
+        callee_saved
+            .iter()
+            .all(|r| target::CALLER_SAVED.iter().all(|c| (*c as u16) != *r)),
         "callee-saved register overlaps with caller-saved set"
     );
     if frame_size == 0 && callee_saved.is_empty() {
@@ -1843,11 +2068,13 @@ fn adjust_frame_offsets(
     local_slots: u32,
 ) -> (Vec<MachInstr>, Vec<usize>) {
     if num_saved == 0 && local_slots == 0 {
-        let has_positive_offsets = instrs.iter().any(|mi| matches!(
-            mi.instr,
-            Instruction::ComputeLoadStore { access, offset, .. }
-                if access.i_reg == target::FRAME_PTR && !access.pm && offset >= 0
-        ));
+        let has_positive_offsets = instrs.iter().any(|mi| {
+            matches!(
+                mi.instr,
+                Instruction::ComputeLoadStore { access, offset, .. }
+                    if access.i_reg == target::FRAME_PTR && !access.pm && offset >= 0
+            )
+        });
         if !has_positive_offsets {
             let map = (0..instrs.len()).collect();
             return (instrs.to_vec(), map);
@@ -1868,28 +2095,27 @@ fn adjust_frame_offsets(
         if let (
             Instruction::Modify { i_reg, value, .. },
             Some(MachInstr {
-                instr: Instruction::ComputeLoadStore {
-                    compute,
-                    access,
-                    dreg,
-                    offset: 0,
-                    cond,
-                },
+                instr:
+                    Instruction::ComputeLoadStore {
+                        compute,
+                        access,
+                        dreg,
+                        offset: 0,
+                        cond,
+                    },
                 reloc,
             }),
             Some(MachInstr {
-                instr: Instruction::Modify {
-                    i_reg: restore_i_reg,
-                    value: restore_value,
-                    ..
-                },
+                instr:
+                    Instruction::Modify {
+                        i_reg: restore_i_reg,
+                        value: restore_value,
+                        ..
+                    },
                 ..
             }),
-        ) = (
-            mi.instr,
-            instrs.get(i + 1),
-            instrs.get(i + 2),
-        ) {
+        ) = (mi.instr, instrs.get(i + 1), instrs.get(i + 2))
+        {
             if i_reg == target::FRAME_PTR
                 && *restore_i_reg == target::FRAME_PTR
                 && value != 0
@@ -1923,9 +2149,13 @@ fn adjust_frame_offsets(
             }
         }
         match mi.instr {
-            Instruction::ComputeLoadStore { compute, access, dreg, offset, cond }
-                if access.i_reg == target::FRAME_PTR && !access.pm =>
-            {
+            Instruction::ComputeLoadStore {
+                compute,
+                access,
+                dreg,
+                offset,
+                cond,
+            } if access.i_reg == target::FRAME_PTR && !access.pm => {
                 let orig = offset as i32;
                 let new_offset = if orig < 0 {
                     orig - shift
@@ -1945,7 +2175,11 @@ fn adjust_frame_offsets(
             Instruction::Modify { i_reg, value, .. }
                 if i_reg == target::FRAME_PTR && value != 0 =>
             {
-                let new_value = if value < 0 { value - shift } else { value + shift };
+                let new_value = if value < 0 {
+                    value - shift
+                } else {
+                    value + shift
+                };
                 result.push(MachInstr {
                     instr: Instruction::Modify {
                         i_reg,
@@ -2027,7 +2261,14 @@ fn emit_adjusted_access(
 fn expand_large_frame_offsets(instrs: &[MachInstr]) -> Vec<MachInstr> {
     let mut result = Vec::with_capacity(instrs.len());
     for mi in instrs {
-        if let Instruction::ComputeLoadStore { compute, access, dreg, offset, cond } = mi.instr {
+        if let Instruction::ComputeLoadStore {
+            compute,
+            access,
+            dreg,
+            offset,
+            cond,
+        } = mi.instr
+        {
             let off = offset as i32;
             if access.i_reg == target::FRAME_PTR && !access.pm && !(-32..=31).contains(&off) {
                 emit_adjusted_access(
@@ -2047,10 +2288,7 @@ fn expand_large_frame_offsets(instrs: &[MachInstr]) -> Vec<MachInstr> {
     result
 }
 
-fn eliminate_copies(
-    instrs: &[MachInstr],
-    label_map: &mut HashMap<Label, usize>,
-) -> Vec<MachInstr> {
+fn eliminate_copies(instrs: &[MachInstr], label_map: &mut HashMap<Label, usize>) -> Vec<MachInstr> {
     let mut use_count: HashMap<u16, u32> = HashMap::new();
     for mi in instrs {
         for reg in source_regs(&mi.instr) {
@@ -2065,8 +2303,7 @@ fn eliminate_copies(
     // about to rewrite), a jump from elsewhere lands on an instruction
     // whose operands depend on a value that was never produced on that
     // path. Build the target set once from the label map.
-    let branch_targets: std::collections::HashSet<usize> =
-        label_map.values().copied().collect();
+    let branch_targets: std::collections::HashSet<usize> = label_map.values().copied().collect();
 
     let mut removed = Vec::new();
     let mut result = Vec::with_capacity(instrs.len());
@@ -2120,7 +2357,11 @@ fn eliminate_copies(
                 instrs.get(i + 1).map(|m| &m.instr),
                 Some(Instruction::CJump { .. })
                     | Some(Instruction::IndirectBranch { call: true, .. })
-                    | Some(Instruction::IndirectBranch { call: false, pm_m: 5, .. }),
+                    | Some(Instruction::IndirectBranch {
+                        call: false,
+                        pm_m: 5,
+                        ..
+                    }),
             );
 
             let dst_count = use_count.get(&dst).copied().unwrap_or(0);
@@ -2191,11 +2432,31 @@ fn rewrite_dest(mi: &MachInstr, old_dst: u16, new_dst: u16) -> Option<MachInstr>
             let new_compute = match compute {
                 ComputeOp::Alu(alu) => {
                     let new_alu = match alu {
-                        AluOp::Add { rn, rx, ry } if rn == old_dst => AluOp::Add { rn: new_dst, rx, ry },
-                        AluOp::Sub { rn, rx, ry } if rn == old_dst => AluOp::Sub { rn: new_dst, rx, ry },
-                        AluOp::And { rn, rx, ry } if rn == old_dst => AluOp::And { rn: new_dst, rx, ry },
-                        AluOp::Or { rn, rx, ry } if rn == old_dst => AluOp::Or { rn: new_dst, rx, ry },
-                        AluOp::Xor { rn, rx, ry } if rn == old_dst => AluOp::Xor { rn: new_dst, rx, ry },
+                        AluOp::Add { rn, rx, ry } if rn == old_dst => AluOp::Add {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        AluOp::Sub { rn, rx, ry } if rn == old_dst => AluOp::Sub {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        AluOp::And { rn, rx, ry } if rn == old_dst => AluOp::And {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        AluOp::Or { rn, rx, ry } if rn == old_dst => AluOp::Or {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        AluOp::Xor { rn, rx, ry } if rn == old_dst => AluOp::Xor {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
                         AluOp::Pass { rn, rx } if rn == old_dst => AluOp::Pass { rn: new_dst, rx },
                         AluOp::Neg { rn, rx } if rn == old_dst => AluOp::Neg { rn: new_dst, rx },
                         AluOp::Not { rn, rx } if rn == old_dst => AluOp::Not { rn: new_dst, rx },
@@ -2208,31 +2469,60 @@ fn rewrite_dest(mi: &MachInstr, old_dst: u16, new_dst: u16) -> Option<MachInstr>
                 }
                 ComputeOp::Mul(mul) => {
                     let new_mul = match mul {
-                        MulOp::MulSsf { rn, rx, ry } if rn == old_dst => MulOp::MulSsf { rn: new_dst, rx, ry },
-                        MulOp::MulSsi { rn, rx, ry } if rn == old_dst => MulOp::MulSsi { rn: new_dst, rx, ry },
-                        MulOp::FMul { rn, rx, ry } if rn == old_dst => MulOp::FMul { rn: new_dst, rx, ry },
+                        MulOp::MulSsf { rn, rx, ry } if rn == old_dst => MulOp::MulSsf {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        MulOp::MulSsi { rn, rx, ry } if rn == old_dst => MulOp::MulSsi {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        MulOp::FMul { rn, rx, ry } if rn == old_dst => MulOp::FMul {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
                         _ => return None,
                     };
                     ComputeOp::Mul(new_mul)
                 }
                 ComputeOp::Shift(shift) => {
                     let new_shift = match shift {
-                        ShiftOp::Lshift { rn, rx, ry } if rn == old_dst => ShiftOp::Lshift { rn: new_dst, rx, ry },
-                        ShiftOp::Ashift { rn, rx, ry } if rn == old_dst => ShiftOp::Ashift { rn: new_dst, rx, ry },
+                        ShiftOp::Lshift { rn, rx, ry } if rn == old_dst => ShiftOp::Lshift {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
+                        ShiftOp::Ashift { rn, rx, ry } if rn == old_dst => ShiftOp::Ashift {
+                            rn: new_dst,
+                            rx,
+                            ry,
+                        },
                         _ => return None,
                     };
                     ComputeOp::Shift(new_shift)
                 }
                 _ => return None,
             };
-            Instruction::Compute { cond, compute: new_compute }
+            Instruction::Compute {
+                cond,
+                compute: new_compute,
+            }
         }
         Instruction::LoadImm { ureg, value } if (ureg & 0xF) == old_dst && (ureg >> 4) == 0 => {
-            Instruction::LoadImm { ureg: (ureg & 0xF0) | new_dst, value }
+            Instruction::LoadImm {
+                ureg: (ureg & 0xF0) | new_dst,
+                value,
+            }
         }
         _ => return None,
     };
-    Some(MachInstr { instr: new_instr, reloc: mi.reloc.clone() })
+    Some(MachInstr {
+        instr: new_instr,
+        reloc: mi.reloc.clone(),
+    })
 }
 
 fn is_pass_copy(instr: &Instruction) -> Option<(u16, u16)> {
@@ -2249,7 +2539,12 @@ fn source_regs(instr: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
     match *instr {
         Instruction::Compute { compute, .. } => compute_source_regs(&compute, &mut regs),
-        Instruction::ComputeLoadStore { compute, access, dreg, .. } => {
+        Instruction::ComputeLoadStore {
+            compute,
+            access,
+            dreg,
+            ..
+        } => {
             if let Some(c) = compute {
                 compute_source_regs(&c, &mut regs);
             }
@@ -2257,10 +2552,14 @@ fn source_regs(instr: &Instruction) -> Vec<u16> {
                 regs.push(dreg);
             }
         }
-        Instruction::UregMemAccess { write: true, ureg, .. } if ureg < 0x10 => {
+        Instruction::UregMemAccess {
+            write: true, ureg, ..
+        } if ureg < 0x10 => {
             regs.push(ureg & 0xF);
         }
-        Instruction::Return { compute: Some(c), .. } => {
+        Instruction::Return {
+            compute: Some(c), ..
+        } => {
             compute_source_regs(&c, &mut regs);
         }
         Instruction::CJump { .. } => {
@@ -2296,14 +2595,20 @@ fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u16>) {
     use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
     match *op {
         ComputeOp::Alu(ref a) => match *a {
-            AluOp::Add { rx, ry, .. } | AluOp::Sub { rx, ry, .. }
-            | AluOp::And { rx, ry, .. } | AluOp::Or { rx, ry, .. }
+            AluOp::Add { rx, ry, .. }
+            | AluOp::Sub { rx, ry, .. }
+            | AluOp::And { rx, ry, .. }
+            | AluOp::Or { rx, ry, .. }
             | AluOp::Xor { rx, ry, .. } => {
                 regs.push(rx);
                 regs.push(ry);
             }
-            AluOp::Pass { rx, .. } | AluOp::Neg { rx, .. } | AluOp::Not { rx, .. }
-            | AluOp::Inc { rx, .. } | AluOp::Dec { rx, .. } | AluOp::Abs { rx, .. } => {
+            AluOp::Pass { rx, .. }
+            | AluOp::Neg { rx, .. }
+            | AluOp::Not { rx, .. }
+            | AluOp::Inc { rx, .. }
+            | AluOp::Dec { rx, .. }
+            | AluOp::Abs { rx, .. } => {
                 regs.push(rx);
             }
             AluOp::Comp { rx, ry } | AluOp::CompU { rx, ry } => {
@@ -2313,7 +2618,8 @@ fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u16>) {
             _ => {}
         },
         ComputeOp::Mul(ref m) => match *m {
-            MulOp::MulSsf { rx, ry, .. } | MulOp::MulSsi { rx, ry, .. }
+            MulOp::MulSsf { rx, ry, .. }
+            | MulOp::MulSsi { rx, ry, .. }
             | MulOp::FMul { rx, ry, .. } => {
                 regs.push(rx);
                 regs.push(ry);
@@ -2331,8 +2637,12 @@ fn compute_source_regs(op: &selinstr::encode::ComputeOp, regs: &mut Vec<u16>) {
         ComputeOp::Multi(ref mf) => {
             use selinstr::encode::MultiOp;
             match *mf {
-                MultiOp::MulAlu { rxm, rym, rxa, rya, .. }
-                | MultiOp::MulDualAddSub { rxm, rym, rxa, rya, .. } => {
+                MultiOp::MulAlu {
+                    rxm, rym, rxa, rya, ..
+                }
+                | MultiOp::MulDualAddSub {
+                    rxm, rym, rxa, rya, ..
+                } => {
                     regs.push(rxm);
                     regs.push(rym + 4);
                     regs.push(rxa + 8);
@@ -2349,9 +2659,19 @@ fn remap_sources(mi: &MachInstr, from: u16, to: u16) -> MachInstr {
             cond,
             compute: remap_compute_sources(&compute, from, to),
         },
-        Instruction::ComputeLoadStore { compute, access, dreg, offset, cond } => {
+        Instruction::ComputeLoadStore {
+            compute,
+            access,
+            dreg,
+            offset,
+            cond,
+        } => {
             let new_compute = compute.map(|c| remap_compute_sources(&c, from, to));
-            let new_dreg = if access.write && dreg == from { to } else { dreg };
+            let new_dreg = if access.write && dreg == from {
+                to
+            } else {
+                dreg
+            };
             Instruction::ComputeLoadStore {
                 compute: new_compute,
                 access,
@@ -2360,22 +2680,43 @@ fn remap_sources(mi: &MachInstr, from: u16, to: u16) -> MachInstr {
                 cond,
             }
         }
-        Instruction::UregMemAccess { pm, i_reg, write: true, lw, ureg, offset }
-            if ureg < 0x10 && (ureg & 0xF) == from =>
-        {
-            Instruction::UregMemAccess {
-                pm, i_reg, write: true, lw,
-                ureg: (ureg & 0xF0) | to,
-                offset,
-            }
-        }
-        Instruction::Return { interrupt, cond, delayed, lr, compute } => {
+        Instruction::UregMemAccess {
+            pm,
+            i_reg,
+            write: true,
+            lw,
+            ureg,
+            offset,
+        } if ureg < 0x10 && (ureg & 0xF) == from => Instruction::UregMemAccess {
+            pm,
+            i_reg,
+            write: true,
+            lw,
+            ureg: (ureg & 0xF0) | to,
+            offset,
+        },
+        Instruction::Return {
+            interrupt,
+            cond,
+            delayed,
+            lr,
+            compute,
+        } => {
             let new_compute = compute.map(|c| remap_compute_sources(&c, from, to));
-            Instruction::Return { interrupt, cond, delayed, lr, compute: new_compute }
+            Instruction::Return {
+                interrupt,
+                cond,
+                delayed,
+                lr,
+                compute: new_compute,
+            }
         }
         other => other,
     };
-    MachInstr { instr: new_instr, reloc: mi.reloc.clone() }
+    MachInstr {
+        instr: new_instr,
+        reloc: mi.reloc.clone(),
+    }
 }
 
 fn remap_compute_sources(
@@ -2387,30 +2728,76 @@ fn remap_compute_sources(
     let r = |reg: u16| if reg == from { to } else { reg };
     match *op {
         ComputeOp::Alu(ref a) => ComputeOp::Alu(match *a {
-            AluOp::Add { rn, rx, ry } => AluOp::Add { rn, rx: r(rx), ry: r(ry) },
-            AluOp::Sub { rn, rx, ry } => AluOp::Sub { rn, rx: r(rx), ry: r(ry) },
-            AluOp::And { rn, rx, ry } => AluOp::And { rn, rx: r(rx), ry: r(ry) },
-            AluOp::Or { rn, rx, ry } => AluOp::Or { rn, rx: r(rx), ry: r(ry) },
-            AluOp::Xor { rn, rx, ry } => AluOp::Xor { rn, rx: r(rx), ry: r(ry) },
+            AluOp::Add { rn, rx, ry } => AluOp::Add {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            AluOp::Sub { rn, rx, ry } => AluOp::Sub {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            AluOp::And { rn, rx, ry } => AluOp::And {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            AluOp::Or { rn, rx, ry } => AluOp::Or {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            AluOp::Xor { rn, rx, ry } => AluOp::Xor {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
             AluOp::Pass { rn, rx } => AluOp::Pass { rn, rx: r(rx) },
             AluOp::Neg { rn, rx } => AluOp::Neg { rn, rx: r(rx) },
             AluOp::Not { rn, rx } => AluOp::Not { rn, rx: r(rx) },
             AluOp::Inc { rn, rx } => AluOp::Inc { rn, rx: r(rx) },
             AluOp::Dec { rn, rx } => AluOp::Dec { rn, rx: r(rx) },
             AluOp::Abs { rn, rx } => AluOp::Abs { rn, rx: r(rx) },
-            AluOp::Comp { rx, ry } => AluOp::Comp { rx: r(rx), ry: r(ry) },
-            AluOp::CompU { rx, ry } => AluOp::CompU { rx: r(rx), ry: r(ry) },
+            AluOp::Comp { rx, ry } => AluOp::Comp {
+                rx: r(rx),
+                ry: r(ry),
+            },
+            AluOp::CompU { rx, ry } => AluOp::CompU {
+                rx: r(rx),
+                ry: r(ry),
+            },
             other => other,
         }),
         ComputeOp::Mul(ref m) => ComputeOp::Mul(match *m {
-            MulOp::MulSsf { rn, rx, ry } => MulOp::MulSsf { rn, rx: r(rx), ry: r(ry) },
-            MulOp::MulSsi { rn, rx, ry } => MulOp::MulSsi { rn, rx: r(rx), ry: r(ry) },
-            MulOp::FMul { rn, rx, ry } => MulOp::FMul { rn, rx: r(rx), ry: r(ry) },
+            MulOp::MulSsf { rn, rx, ry } => MulOp::MulSsf {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            MulOp::MulSsi { rn, rx, ry } => MulOp::MulSsi {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            MulOp::FMul { rn, rx, ry } => MulOp::FMul {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
             other => other,
         }),
         ComputeOp::Shift(ref s) => ComputeOp::Shift(match *s {
-            ShiftOp::Lshift { rn, rx, ry } => ShiftOp::Lshift { rn, rx: r(rx), ry: r(ry) },
-            ShiftOp::Ashift { rn, rx, ry } => ShiftOp::Ashift { rn, rx: r(rx), ry: r(ry) },
+            ShiftOp::Lshift { rn, rx, ry } => ShiftOp::Lshift {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
+            ShiftOp::Ashift { rn, rx, ry } => ShiftOp::Ashift {
+                rn,
+                rx: r(rx),
+                ry: r(ry),
+            },
             other => other,
         }),
         ComputeOp::Falu(_) => *op,
@@ -2465,7 +2852,10 @@ fn resolve_branches(
                         delayed: false,
                         target: BranchTarget::Absolute(0),
                     },
-                    Some(Reloc { symbol: name, kind: RelocKind::Addr24 }),
+                    Some(Reloc {
+                        symbol: name,
+                        kind: RelocKind::Addr24,
+                    }),
                 )
             }
             Instruction::DoLoop { counter, end_pc } => {
@@ -2485,12 +2875,18 @@ fn resolve_branches(
                 }
                 (
                     Instruction::DoLoop { counter, end_pc: 0 },
-                    Some(Reloc { symbol: name, kind: RelocKind::Addr24 }),
+                    Some(Reloc {
+                        symbol: name,
+                        kind: RelocKind::Addr24,
+                    }),
                 )
             }
             other => (other, mi.reloc.clone()),
         };
-        out.push(MachInstr { instr: new_instr, reloc: new_reloc });
+        out.push(MachInstr {
+            instr: new_instr,
+            reloc: new_reloc,
+        });
     }
     (out, label_insertions)
 }
@@ -2537,8 +2933,7 @@ mod tests {
         let shentsize = hdr.e_shentsize as usize;
         let shnum = hdr.e_shnum as usize;
         let strtab_off = shoff + hdr.e_shstrndx as usize * shentsize;
-        let strtab_shdr =
-            selelf::elf::parse_section_header(&data[strtab_off..], hdr.ei_data);
+        let strtab_shdr = selelf::elf::parse_section_header(&data[strtab_off..], hdr.ei_data);
         let strtab_start = strtab_shdr.sh_offset as usize;
         let strtab_end = strtab_start + strtab_shdr.sh_size as usize;
         let strtab = &data[strtab_start..strtab_end];
@@ -2670,9 +3065,7 @@ mod tests {
 
     #[test]
     fn rt_if_else_has_branch() {
-        let text = round_trip_disasm(
-            "int f(int x) { if (x) { return 1; } else { return 0; } }",
-        );
+        let text = round_trip_disasm("int f(int x) { if (x) { return 1; } else { return 0; } }");
         let has_branch = text.iter().any(|t| t.contains("JUMP") || t.contains("IF"));
         assert!(has_branch, "got: {text:?}");
     }
@@ -2685,9 +3078,8 @@ mod tests {
 
     #[test]
     fn rt_enum_value() {
-        let text = round_trip_disasm(
-            "enum color { RED, GREEN = 5, BLUE };\nint f() { return GREEN; }",
-        );
+        let text =
+            round_trip_disasm("enum color { RED, GREEN = 5, BLUE };\nint f() { return GREEN; }");
         assert!(text.iter().any(|t| t.contains("0x5")), "got: {text:?}");
     }
 
@@ -2715,18 +3107,14 @@ mod tests {
 
     #[test]
     fn rt_float_add() {
-        let text = round_trip_disasm(
-            "float f(float a, float b) { return a + b; }",
-        );
+        let text = round_trip_disasm("float f(float a, float b) { return a + b; }");
         let has_fadd = text.iter().any(|t| t.contains('F') && t.contains('+'));
         assert!(has_fadd, "got: {text:?}");
     }
 
     #[test]
     fn rt_float_mul() {
-        let text = round_trip_disasm(
-            "float f(float a, float b) { return a * b; }",
-        );
+        let text = round_trip_disasm("float f(float a, float b) { return a * b; }");
         let has_fmul = text.iter().any(|t| t.contains('F') && t.contains('*'));
         assert!(has_fmul, "got: {text:?}");
     }
@@ -2738,9 +3126,7 @@ mod tests {
         // empty body has end-PC = DO-PC, which the chip executes as
         // an infinite loop). `s += 1` provides exactly one body op
         // and does not reference the induction variable.
-        let text = round_trip_disasm(
-            "int g; void f() { int i; for (i = 0; i < 10; i++) g += 1; }",
-        );
+        let text = round_trip_disasm("int g; void f() { int i; for (i = 0; i < 10; i++) g += 1; }");
         let has_hw = text.iter().any(|t| t.contains("LCNTR") || t.contains("DO"));
         assert!(has_hw, "got: {text:?}");
     }
@@ -2824,10 +3210,7 @@ mod tests {
         // sequence (which rounded 100000/1000 to 99 because two Newton
         // iterations leave only 24 bits of mantissa precision).
         let text = round_trip_disasm("int f(int a, int b) { return a / b; }");
-        assert!(
-            text.iter().any(|t| t.contains("CJUMP")),
-            "got: {text:?}"
-        );
+        assert!(text.iter().any(|t| t.contains("CJUMP")), "got: {text:?}");
         assert!(
             !text.iter().any(|t| t.contains("RECIPS")),
             "inline reciprocal should no longer appear: {text:?}"
@@ -2839,13 +3222,9 @@ mod tests {
         // Unsigned 32-bit `/` should emit a CJUMP to `___udiv32` so
         // the shift-and-subtract helper is used (the test that motivated
         // this change: `100000UL / 1000 == 100`).
-        let text = round_trip_disasm(
-            "int f(unsigned long a, unsigned long b) { return (int)(a / b); }",
-        );
-        assert!(
-            text.iter().any(|t| t.contains("CJUMP")),
-            "got: {text:?}"
-        );
+        let text =
+            round_trip_disasm("int f(unsigned long a, unsigned long b) { return (int)(a / b); }");
+        assert!(text.iter().any(|t| t.contains("CJUMP")), "got: {text:?}");
     }
 
     #[test]
@@ -2884,11 +3263,10 @@ mod tests {
 
     #[test]
     fn rt_stack_frame_has_modify() {
-        let text = round_trip_disasm(
-            "int f() { int a = 1; int b = 2; return a + b; }",
-        );
+        let text = round_trip_disasm("int f() { int a = 1; int b = 2; return a + b; }");
         assert!(
-            text.iter().any(|t| t.contains("MODIFY") && t.contains("I7")),
+            text.iter()
+                .any(|t| t.contains("MODIFY") && t.contains("I7")),
             "expected MODIFY(I7) in prologue, got: {text:?}"
         );
     }
@@ -2908,10 +3286,11 @@ mod tests {
         let text = round_trip_disasm(src);
         let callee_saved = ["R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15"];
         let has_save = text.iter().any(|t| {
-            t.contains("DM") && t.contains("I6")
-                && callee_saved.iter().any(|r| {
-                    t.contains(&format!("= {r}")) || t.contains(&format!("={r}"))
-                })
+            t.contains("DM")
+                && t.contains("I6")
+                && callee_saved
+                    .iter()
+                    .any(|r| t.contains(&format!("= {r}")) || t.contains(&format!("={r}")))
         });
         assert!(has_save, "expected callee-saved save, got: {text:?}");
     }
@@ -2924,8 +3303,7 @@ mod tests {
         let text = round_trip_disasm(src);
         // Expect a frame-relative DM load (the 4th arg from the stack).
         let has_frame_load = text.iter().any(|t| {
-            t.contains("DM (-0x") && t.contains(",I6)")
-                && !t.contains("=R") // it's a READ, not a callee-save store
+            t.contains("DM (-0x") && t.contains(",I6)") && !t.contains("=R") // it's a READ, not a callee-save store
         });
         assert!(
             has_frame_load,
@@ -2959,9 +3337,7 @@ mod tests {
         // 2 instead of 1 for `a=0, b=5`. The fix must keep both Pass
         // copies of the second LNot, and the ADD must source them
         // (not the immediate-1 register directly).
-        let text = round_trip_disasm(
-            "int f(void) { int a = 0; int b = 5; return !a + !b; }",
-        );
+        let text = round_trip_disasm("int f(void) { int a = 0; int b = 5; return !a + !b; }");
         // At least four `= PASS` copies survive (two per LNot, one for
         // each arm). A successful fusion would have dropped one of the
         // LNot Passes; the count may be higher because the return-value
@@ -3003,9 +3379,7 @@ mod tests {
 
     #[test]
     fn rt_array_compiles() {
-        let text = round_trip_disasm(
-            "int f() { int arr[3] = {10, 20, 30}; return arr[1]; }",
-        );
+        let text = round_trip_disasm("int f() { int arr[3] = {10, 20, 30}; return arr[1]; }");
         assert!(
             text.iter().any(|t| t.contains("JUMP (M14,I12)")),
             "got: {text:?}"
@@ -3014,9 +3388,7 @@ mod tests {
 
     #[test]
     fn rt_multidim_array() {
-        let text = round_trip_disasm(
-            "int f() { int m[2][3]; m[0][1] = 5; return m[0][1]; }",
-        );
+        let text = round_trip_disasm("int f() { int m[2][3]; m[0][1] = 5; return m[0][1]; }");
         assert!(
             text.iter().any(|t| t.contains("JUMP (M14,I12)")),
             "got: {text:?}"
@@ -3094,9 +3466,7 @@ mod tests {
                 let strtab = &data[strtab_start..strtab_end];
                 let mut p = sym_start;
                 while p + 16 <= sym_end {
-                    let name_idx = u32::from_le_bytes(
-                        data[p..p + 4].try_into().unwrap(),
-                    );
+                    let name_idx = u32::from_le_bytes(data[p..p + 4].try_into().unwrap());
                     let sym_name = selelf::elf::read_string_at(strtab, name_idx);
                     if sym_name == name {
                         return true;

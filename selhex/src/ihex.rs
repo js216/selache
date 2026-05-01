@@ -89,8 +89,7 @@ pub fn parse_ihex(input: &str) -> Result<Vec<DataRecord>> {
                 if byte_count != 2 {
                     return Err(Error::Parse {
                         line: line_num,
-                        msg: "extended segment address record must have 2 data bytes"
-                            .to_string(),
+                        msg: "extended segment address record must have 2 data bytes".to_string(),
                     });
                 }
                 let segment = u16::from_be_bytes([data[0], data[1]]);
@@ -104,8 +103,7 @@ pub fn parse_ihex(input: &str) -> Result<Vec<DataRecord>> {
                 if byte_count != 2 {
                     return Err(Error::Parse {
                         line: line_num,
-                        msg: "extended linear address record must have 2 data bytes"
-                            .to_string(),
+                        msg: "extended linear address record must have 2 data bytes".to_string(),
                     });
                 }
                 let upper = u16::from_be_bytes([data[0], data[1]]);
@@ -187,11 +185,7 @@ mod tests {
     #[test]
     fn test_extended_segment_address() {
         // Extended segment address 0x1000 => base = 0x10000
-        let input = concat!(
-            ":020000021000EC\n",
-            ":01000000AA55\n",
-            ":00000001FF\n",
-        );
+        let input = concat!(":020000021000EC\n", ":01000000AA55\n", ":00000001FF\n",);
         let records = parse_ihex(input).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].address, 0x10000);
@@ -200,11 +194,7 @@ mod tests {
 
     #[test]
     fn test_multiple_data_records() {
-        let input = concat!(
-            ":02000000AABB99\n",
-            ":02000200CCDD53\n",
-            ":00000001FF\n",
-        );
+        let input = concat!(":02000000AABB99\n", ":02000200CCDD53\n", ":00000001FF\n",);
         let records = parse_ihex(input).unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].address, 0x0000);
@@ -242,11 +232,7 @@ mod tests {
     #[test]
     fn test_start_linear_address_ignored() {
         // Type 05: start linear address, should be ignored
-        let input = concat!(
-            ":0400000500010000F6\n",
-            ":0100000042BD\n",
-            ":00000001FF\n",
-        );
+        let input = concat!(":0400000500010000F6\n", ":0100000042BD\n", ":00000001FF\n",);
         let records = parse_ihex(input).unwrap();
         assert_eq!(records.len(), 1);
     }

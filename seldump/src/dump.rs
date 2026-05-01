@@ -8,10 +8,10 @@ use std::io::{self, Write};
 use selelf::archive::Archive;
 use selelf::elf::{
     self, Elf32Header, Elf32Shdr, SHF_EXECINSTR, SHT_DYNSYM, SHT_NOTE, SHT_PROGBITS, SHT_REL,
-    SHT_RELA, SHT_SHARC_ATTR, SHT_SHARC_ALIGN, SHT_SHARC_SYMCONSTR, SHT_STRTAB, SHT_SYMTAB,
+    SHT_RELA, SHT_SHARC_ALIGN, SHT_SHARC_ATTR, SHT_SHARC_SYMCONSTR, SHT_STRTAB, SHT_SYMTAB,
 };
-use selelf::glob;
 use selelf::extnames;
+use selelf::glob;
 use selelf::symindex;
 
 use crate::cli::{ContentFormat, Options};
@@ -117,10 +117,7 @@ fn dump_file_header(ctx: &ElfCtx<'_>, w: &mut dyn Write) -> io::Result<()> {
         flags = header.e_flags,
     )?;
     writeln!(w)?;
-    writeln!(
-        w,
-        "   phoff  phsz  phnum     shoff  shsz  shnum  shstr"
-    )?;
+    writeln!(w, "   phoff  phsz  phnum     shoff  shsz  shnum  shstr")?;
     writeln!(
         w,
         "{phoff:08x}  {phsz:>4}  {phnum:>5}  {shoff:08x}  {shsz:>4}  {shnum:>5}  {shstr:>5}",
@@ -195,7 +192,12 @@ fn parse_proc_attr_data(data: &[u8]) -> Option<ProcAttributes> {
 ///
 /// When `in_subsection` is true, we are inside a tag 2/3 sub-subsection
 /// and track section index (tag 9) and mem_kind (tag 0x12) pairs.
-fn parse_proc_attr_tags(data: &[u8], pos: &mut usize, result: &mut ProcAttributes, in_subsection: bool) {
+fn parse_proc_attr_tags(
+    data: &[u8],
+    pos: &mut usize,
+    result: &mut ProcAttributes,
+    in_subsection: bool,
+) {
     let mut cur_section_idx: Option<u64> = None;
 
     while *pos < data.len() {
@@ -656,26 +658,50 @@ fn dump_section_content(
         ContentFormat::Disasm => {
             let is_le = ctx.header.ei_data == elf::Endian::Little;
             let symbols = collect_symbols(ctx);
-            dump_disasm(data, sec.sh_addr, is_le, &DisasmOpts {
-                show_labels: false, mnemonic_only: false, symbols: &symbols,
-                is_visa: detect_byte_width(sec) == 2,
-            }, w)?;
+            dump_disasm(
+                data,
+                sec.sh_addr,
+                is_le,
+                &DisasmOpts {
+                    show_labels: false,
+                    mnemonic_only: false,
+                    symbols: &symbols,
+                    is_visa: detect_byte_width(sec) == 2,
+                },
+                w,
+            )?;
         }
         ContentFormat::DisasmLabels => {
             let is_le = ctx.header.ei_data == elf::Endian::Little;
             let symbols = collect_symbols(ctx);
-            dump_disasm(data, sec.sh_addr, is_le, &DisasmOpts {
-                show_labels: true, mnemonic_only: false, symbols: &symbols,
-                is_visa: detect_byte_width(sec) == 2,
-            }, w)?;
+            dump_disasm(
+                data,
+                sec.sh_addr,
+                is_le,
+                &DisasmOpts {
+                    show_labels: true,
+                    mnemonic_only: false,
+                    symbols: &symbols,
+                    is_visa: detect_byte_width(sec) == 2,
+                },
+                w,
+            )?;
         }
         ContentFormat::DisasmMnemonic => {
             let is_le = ctx.header.ei_data == elf::Endian::Little;
             let symbols = collect_symbols(ctx);
-            dump_disasm(data, sec.sh_addr, is_le, &DisasmOpts {
-                show_labels: false, mnemonic_only: true, symbols: &symbols,
-                is_visa: detect_byte_width(sec) == 2,
-            }, w)?;
+            dump_disasm(
+                data,
+                sec.sh_addr,
+                is_le,
+                &DisasmOpts {
+                    show_labels: false,
+                    mnemonic_only: true,
+                    symbols: &symbols,
+                    is_visa: detect_byte_width(sec) == 2,
+                },
+                w,
+            )?;
         }
     }
     Ok(())
@@ -718,10 +744,18 @@ fn dump_section_default(
         SHT_PROGBITS if sec.sh_flags & SHF_EXECINSTR != 0 => {
             let is_le = ctx.header.ei_data == elf::Endian::Little;
             let symbols = collect_symbols(ctx);
-            dump_disasm(data, sec.sh_addr, is_le, &DisasmOpts {
-                show_labels: false, mnemonic_only: false, symbols: &symbols,
-                is_visa: detect_byte_width(sec) == 2,
-            }, w)
+            dump_disasm(
+                data,
+                sec.sh_addr,
+                is_le,
+                &DisasmOpts {
+                    show_labels: false,
+                    mnemonic_only: false,
+                    symbols: &symbols,
+                    is_visa: detect_byte_width(sec) == 2,
+                },
+                w,
+            )
         }
         _ if name == ".adi.attributes" => dump_proc_attributes(ctx, data, w),
         _ => hex::dump_hex_ascii(data, sec.sh_addr, w),
@@ -832,17 +866,11 @@ fn dump_symconstraint_table(
 
         // Render empty sym2 as <null> appended to sym1.
         if sym2.is_empty() {
-            writeln!(
-                w,
-                "{sym1}<null> {ctype:>12} {info:>8}",
-            )?;
+            writeln!(w, "{sym1}<null> {ctype:>12} {info:>8}",)?;
         } else {
             let pad = 10usize.saturating_sub(sym1.len());
             let spaces = " ".repeat(pad);
-            writeln!(
-                w,
-                "{sym1}{spaces}{sym2} {ctype:>12} {info:>8}",
-            )?;
+            writeln!(w, "{sym1}{spaces}{sym2} {ctype:>12} {info:>8}",)?;
         }
     }
     Ok(())
@@ -1205,14 +1233,16 @@ fn build_symbol_map(symbols: &[(u32, String, u32, u8)]) -> HashMap<u32, String> 
             continue;
         }
         let new_prio = symbol_priority(name, *size, *binding);
-        let dominated = map.get(addr).is_some_and(|(_existing, existing_prio)| {
-            *existing_prio >= new_prio
-        });
+        let dominated = map
+            .get(addr)
+            .is_some_and(|(_existing, existing_prio)| *existing_prio >= new_prio);
         if !dominated {
             map.insert(*addr, (name.clone(), new_prio));
         }
     }
-    map.into_iter().map(|(addr, (name, _))| (addr, name)).collect()
+    map.into_iter()
+        .map(|(addr, (name, _))| (addr, name))
+        .collect()
 }
 
 /// Format a symbol name for disassembly output.
@@ -1228,11 +1258,7 @@ fn format_symbol(name: &str) -> String {
 /// Handles:
 /// - Absolute addresses: `0x{hex}` → symbol name
 /// - PC-relative in `(pc,0x{hex})`: compute target = line_addr + offset, look up
-fn resolve_symbols_in_text(
-    text: &str,
-    line_addr: u32,
-    sym_map: &HashMap<u32, String>,
-) -> String {
+fn resolve_symbols_in_text(text: &str, line_addr: u32, sym_map: &HashMap<u32, String>) -> String {
     // Handle PC-relative: `(pc,0x{hex})` or `(pc,-0x{hex})`
     // For PC-relative, the offset in the text is the raw value; target = line_addr + offset
     // But we need to check: the offset is a signed value relative to PC.
@@ -1243,11 +1269,7 @@ fn resolve_symbols_in_text(
 }
 
 /// Replace PC-relative offsets with symbol names.
-fn resolve_pc_relative(
-    text: &str,
-    line_addr: u32,
-    sym_map: &HashMap<u32, String>,
-) -> String {
+fn resolve_pc_relative(text: &str, line_addr: u32, sym_map: &HashMap<u32, String>) -> String {
     let mut result = text.to_string();
     // Pattern: (pc,0x{hex}) or (pc,-0x{hex})
     let mut search_from = 0;
@@ -1348,12 +1370,7 @@ fn resolve_absolute(text: &str, sym_map: &HashMap<u32, String>) -> String {
         };
         if let Some(sym_name) = sym_map.get(&addr) {
             let replacement = format_symbol(sym_name);
-            result = format!(
-                "{}{}{}",
-                &result[..start],
-                replacement,
-                &result[hex_end..]
-            );
+            result = format!("{}{}{}", &result[..start], replacement, &result[hex_end..]);
             search_from = start + replacement.len();
         } else {
             search_from = start + 2;
@@ -1382,11 +1399,8 @@ fn dump_disasm(
     let symbols = opts.symbols;
     let sym_map = build_symbol_map(symbols);
     if opts.is_visa {
-        let lines = selinstr::visa::disassemble_visa(
-            data,
-            base_addr,
-            selinstr::disasm::decode_instruction,
-        );
+        let lines =
+            selinstr::visa::disassemble_visa(data, base_addr, selinstr::disasm::decode_instruction);
         for line in &lines {
             if show_labels {
                 for (addr, name, _size, _bind) in symbols {
@@ -1456,9 +1470,7 @@ pub fn dump_arsym(archive_data: &[u8], w: &mut dyn Write) -> io::Result<()> {
         writeln!(w, "No archive symbol table found.")?;
         return Ok(());
     }
-    let raw_name = std::str::from_utf8(&hdr[0..16])
-        .unwrap_or("")
-        .trim_end();
+    let raw_name = std::str::from_utf8(&hdr[0..16]).unwrap_or("").trim_end();
     if raw_name != "/" {
         writeln!(w, "No archive symbol table found.")?;
         return Ok(());
@@ -1482,16 +1494,12 @@ pub fn dump_arsym(archive_data: &[u8], w: &mut dyn Write) -> io::Result<()> {
             writeln!(w, "Archive Symbol Table ")?;
             writeln!(w, " name   off hash ")?;
             for (name, offset) in &entries {
-                let member =
-                    member_name_at_offset(archive_data, *offset, &extnames);
+                let member = member_name_at_offset(archive_data, *offset, &extnames);
                 // standard format: name + gap = at least 34 chars, with a
                 // minimum gap of 2 spaces before the offset.
                 let pad = (34usize.saturating_sub(name.len())).max(2);
                 let spaces = " ".repeat(pad);
-                writeln!(
-                    w,
-                    "{name}{spaces}{offset}  {member}",
-                )?;
+                writeln!(w, "{name}{spaces}{offset}  {member}",)?;
             }
         }
         Err(e) => {
@@ -1625,8 +1633,7 @@ mod tests {
 
     #[test]
     fn test_section_headers_dump() {
-        let data =
-            selelf::testutil::make_elf_object(0x85, elf::ELFDATA2LSB, &[("_main", true)]);
+        let data = selelf::testutil::make_elf_object(0x85, elf::ELFDATA2LSB, &[("_main", true)]);
         let header = elf::parse_header(&data).unwrap();
         let sections = parse_all_sections(&data, &header);
         let shstrtab = get_shstrtab(&data, &header, &sections);
@@ -1666,8 +1673,8 @@ mod tests {
 
         // Find symtab section
         let symtab_sec = sections.iter().find(|s| s.sh_type == SHT_SYMTAB).unwrap();
-        let sym_data = &data[symtab_sec.sh_offset as usize
-            ..(symtab_sec.sh_offset + symtab_sec.sh_size) as usize];
+        let sym_data = &data
+            [symtab_sec.sh_offset as usize..(symtab_sec.sh_offset + symtab_sec.sh_size) as usize];
         let mut out = Vec::new();
         dump_symbol_table(&ctx, symtab_sec, sym_data, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
@@ -1960,8 +1967,8 @@ mod tests {
             .iter()
             .find(|s| s.sh_type == SHT_SHARC_ALIGN)
             .unwrap();
-        let sec_data = &data[align_sec.sh_offset as usize
-            ..(align_sec.sh_offset + align_sec.sh_size) as usize];
+        let sec_data =
+            &data[align_sec.sh_offset as usize..(align_sec.sh_offset + align_sec.sh_size) as usize];
         let mut out = Vec::new();
         dump_align_table(&ctx, align_sec, sec_data, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
@@ -1970,7 +1977,9 @@ mod tests {
             "output was: {s}"
         );
         assert!(s.contains("0x00000000"), "output was: {s}");
-        for field in ["offset", "count", "ptype", "pAPI", "iaType", "iaSrc", "pass"] {
+        for field in [
+            "offset", "count", "ptype", "pAPI", "iaType", "iaSrc", "pass",
+        ] {
             assert!(s.contains(field), "missing header field {field}: {s}");
         }
     }
@@ -2001,8 +2010,8 @@ mod tests {
             .iter()
             .find(|s| s.sh_type == SHT_SHARC_ALIGN)
             .unwrap();
-        let sec_data = &data[align_sec.sh_offset as usize
-            ..(align_sec.sh_offset + align_sec.sh_size) as usize];
+        let sec_data =
+            &data[align_sec.sh_offset as usize..(align_sec.sh_offset + align_sec.sh_size) as usize];
         let mut out = Vec::new();
         dump_align_table(&ctx, align_sec, sec_data, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
@@ -2068,8 +2077,8 @@ mod tests {
             .iter()
             .find(|s| s.sh_type == SHT_SHARC_SYMCONSTR)
             .unwrap();
-        let sec_data = &data[sc_sec.sh_offset as usize
-            ..(sc_sec.sh_offset + sc_sec.sh_size) as usize];
+        let sec_data =
+            &data[sc_sec.sh_offset as usize..(sc_sec.sh_offset + sc_sec.sh_size) as usize];
         let mut out = Vec::new();
         dump_symconstraint_table(&ctx, sc_sec, sec_data, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
@@ -2109,8 +2118,8 @@ mod tests {
             .iter()
             .find(|s| s.sh_type == SHT_SHARC_SYMCONSTR)
             .unwrap();
-        let sec_data = &data[sc_sec.sh_offset as usize
-            ..(sc_sec.sh_offset + sc_sec.sh_size) as usize];
+        let sec_data =
+            &data[sc_sec.sh_offset as usize..(sc_sec.sh_offset + sc_sec.sh_size) as usize];
         let mut out = Vec::new();
         dump_symconstraint_table(&ctx, sc_sec, sec_data, &mut out).unwrap();
         let s = String::from_utf8(out).unwrap();
