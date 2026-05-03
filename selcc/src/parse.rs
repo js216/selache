@@ -66,6 +66,24 @@ struct Parser<'a> {
     /// drains this into a [`Stmt::EnumDecl`] so that lowering can
     /// honour per-block enumerator shadowing (C99 6.2.1).
     pending_block_enum_consts: Vec<(String, i64)>,
+    /// Block-scope `extern` declarations collected during statement
+    /// parsing. C99 6.2.2p4 says these have the same linkage as a
+    /// prior file-scope declaration if any, otherwise external
+    /// linkage. Either way, the symbol must be visible to the call
+    /// lowering's known-functions / globals tables, so we surface it
+    /// through `parse_translation_unit` into the unit's `globals`
+    /// list when the parse finishes. Without this, code like
+    ///   extern void _Exit(int);
+    ///   _Exit(99);
+    /// inside a function body trips the implicit-declaration check.
+    pending_block_extern_decls: Vec<GlobalDecl>,
+    /// Names of block-scope-extern function declarations that were
+    /// declared variadic (`...`). Merged into the unit's variadic
+    /// set so call-site lowering uses the variadic ABI.
+    pending_block_extern_variadic: std::collections::HashSet<String>,
+    /// Number of named parameters before the `...` for each entry of
+    /// `pending_block_extern_variadic`. Used by va_start lowering.
+    pending_block_extern_variadic_named: std::collections::HashMap<String, usize>,
     /// Current function name for __func__ (C99 6.4.2.2).
     current_function: String,
     pending_weak_attr: bool,
@@ -82,6 +100,9 @@ impl<'a> Parser<'a> {
             enum_constants: Vec::new(),
             block_depth: 0,
             pending_block_enum_consts: Vec::new(),
+            pending_block_extern_decls: Vec::new(),
+            pending_block_extern_variadic: std::collections::HashSet::new(),
+            pending_block_extern_variadic_named: std::collections::HashMap::new(),
             current_function: String::new(),
             pending_weak_attr: false,
         })
@@ -1009,6 +1030,25 @@ impl<'a> Parser<'a> {
                 complex_arg_callees.insert(f.name.clone());
             }
         }
+        // Surface block-scope extern declarations into the unit's
+        // globals so call sites resolve and the implicit-declaration
+        // check accepts them. Skip duplicates: an outer file-scope
+        // forward decl already covers the symbol.
+        let existing_names: std::collections::HashSet<String> =
+            globals.iter().map(|g| g.name.clone()).collect();
+        let function_names: std::collections::HashSet<String> =
+            functions.iter().map(|f| f.name.clone()).collect();
+        for decl in self.pending_block_extern_decls.drain(..) {
+            if !existing_names.contains(&decl.name) && !function_names.contains(&decl.name) {
+                globals.push(decl);
+            }
+        }
+        for name in self.pending_block_extern_variadic.drain() {
+            variadic_decls.insert(name);
+        }
+        for (name, n) in self.pending_block_extern_variadic_named.drain() {
+            variadic_named_counts.entry(name).or_insert(n);
+        }
         Ok(TranslationUnit {
             functions,
             globals,
@@ -1510,15 +1550,86 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Block(Vec::new()))
             }
             Token::Extern => {
-                // Local extern declaration: just skip it (the symbol is
-                // already visible at file scope).
+                // Block-scope `extern` declaration. C99 6.2.2p4: such an
+                // identifier has the same linkage as an outer-scope
+                // declaration if one is visible, otherwise external
+                // linkage. Either way, the identifier must be visible to
+                // call-site lowering: a function body that contains
+                //   extern void _Exit(int);
+                //   _Exit(99);
+                // and no file-scope declaration of `_Exit` would
+                // otherwise hit the implicit-declaration check, because
+                // the parser used to drop the declaration here entirely.
+                // Forward it to `parse_translation_unit`, which appends
+                // these into the unit's `globals` and variadic tables
+                // before producing the `TranslationUnit`.
                 self.advance()?;
-                let _ty = self.parse_type()?;
-                let _ty = self.parse_pointer_type(_ty);
-                let _name = self.expect_ident()?;
-                // Skip function parameter list: extern int fn(int, int);
+                if let Token::StringLit(_) = &self.current {
+                    self.advance()?;
+                }
+                let ret_ty = self.parse_type()?;
+                let ret_ty = self.parse_pointer_type(ret_ty);
+                let name = self.expect_ident()?;
                 if self.current == Token::LParen {
-                    let _params = self.parse_fnptr_params()?;
+                    self.advance()?;
+                    let mut params: Vec<Type> = Vec::new();
+                    let mut is_variadic = false;
+                    if self.current != Token::RParen {
+                        loop {
+                            if self.current == Token::Ellipsis {
+                                self.advance()?;
+                                is_variadic = true;
+                                break;
+                            }
+                            let pty = self.parse_type()?;
+                            let pty = self.parse_pointer_type(pty);
+                            while matches!(self.current, Token::Const | Token::Volatile)
+                                || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__restrict" | "restrict" | "__restrict__"))
+                            {
+                                self.advance()?;
+                            }
+                            if let Token::Ident(n) = &self.current {
+                                if !self.typedef_names.contains(n) {
+                                    self.advance()?;
+                                }
+                            }
+                            if self.current == Token::LBracket {
+                                self.advance()?;
+                                if self.current != Token::RBracket {
+                                    self.parse_expr()?;
+                                }
+                                self.expect(&Token::RBracket)?;
+                            }
+                            params.push(pty);
+                            if self.current == Token::Comma {
+                                self.advance()?;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    if is_variadic {
+                        self.pending_block_extern_variadic.insert(name.clone());
+                        self.pending_block_extern_variadic_named
+                            .insert(name.clone(), params.len());
+                    }
+                    self.pending_block_extern_decls.push(GlobalDecl {
+                        name,
+                        ty: ret_ty,
+                        init: None,
+                        is_static: false,
+                        is_extern: true,
+                    });
+                } else {
+                    let (decl_ty, _) = self.parse_array_dimensions(ret_ty)?;
+                    self.pending_block_extern_decls.push(GlobalDecl {
+                        name,
+                        ty: decl_ty,
+                        init: None,
+                        is_static: false,
+                        is_extern: true,
+                    });
                 }
                 self.expect(&Token::Semicolon)?;
                 Ok(Stmt::Block(Vec::new()))
