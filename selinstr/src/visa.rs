@@ -405,6 +405,13 @@ fn decode_type2c(parcel: u16) -> String {
 /// Decode a short compute from Type 2c.
 /// Layout: bits[12:8]=opcode, bits[7:4]=rn, bits[3:0]=ry.
 /// For most ops: rn is both destination and first source (rn = rn OP ry).
+///
+/// Opcode mapping mirrors `try_type2c` in `visa_encode.rs`; both came
+/// from cross-checking against easm21k and ADI elfdump output. The
+/// previous table had several rows in the wrong slot (op 4 was
+/// labelled FAdd, op 8 labelled int Neg, op 11 labelled FPass, op 15
+/// labelled int Not) which made encode/decode round-trip cleanly but
+/// disagreed with what the SHARC+ core actually executes.
 fn decode_short_compute(parcel: u16) -> String {
     let op = (parcel >> 8) & 0x1F;
     let rn = (parcel >> 4) & 0xF;
@@ -414,18 +421,17 @@ fn decode_short_compute(parcel: u16) -> String {
         1 => format!("r{rn}=r{rn}-r{ry}"),
         2 => format!("r{rn}=pass r{ry}"),
         3 => format!("comp (r{rn},r{ry})"),
-        4 => format!("f{rn}=f{rn}+f{ry}"),
+        4 => format!("r{rn}=not r{ry}"),
         5 => format!("r{rn}=r{ry}+1"),
         6 => format!("r{rn}=r{ry}-1"),
         7 => format!("r{rn}=r{rn}+r{ry}+ci"),
-        8 => format!("r{rn}=-r{ry}"),
-        9 => format!("r{rn}=abs r{ry}"),
-        10 => format!("f{rn}=f{rn}-f{ry}"),
-        11 => format!("f{rn}=pass f{ry}"),
+        8 => format!("f{rn}=f{rn}+f{ry}"),
+        9 => format!("f{rn}=f{rn}-f{ry}"),
+        11 => format!("comp (f{rn},f{ry})"),
         12 => format!("r{rn}=r{rn} and r{ry}"),
         13 => format!("r{rn}=r{rn} or r{ry}"),
         14 => format!("r{rn}=r{rn} xor r{ry}"),
-        15 => format!("r{rn}=not r{ry}"),
+        15 => format!("f{rn}=f{rn}*f{ry}"),
         _ => format!("shortcompute op={op} r{rn} r{ry}"),
     }
 }

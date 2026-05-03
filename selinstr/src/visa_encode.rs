@@ -13,6 +13,36 @@
 
 use crate::encode::{AluOp, ComputeOp, FaluOp, Instruction, MulOp, ShiftOp};
 
+// Type 2c short-compute is a 16-bit `Rn = Rn OP Ry` family. The 5-bit
+// opcode field at bits[12:8] selects which compute operation runs on
+// real silicon. The mapping below comes from observing easm21k and ADI
+// `elfdump` round-trip behaviour, not from a self-consistency check
+// inside this crate. Several earlier entries (`AluOp::Add` at op 4 →
+// FAdd, `FaluOp::Pass` at op 11 → FPass, FMul missing) round-tripped
+// inside selas but the same bytes execute different operations on
+// hardware, silently turning `F6 = F6 + F14` into `R6 = NOT R14`.
+// The truth-table:
+//   op 0  Rn = Rn + Ry  (Alu Add)
+//   op 1  Rn = Rn - Ry  (Alu Sub)
+//   op 2  Rn = pass Ry  (Alu Pass)
+//   op 3  comp(Rx, Ry)  (Alu Comp)
+//   op 4  Rn = NOT Ry   (Alu Not)
+//   op 5  Rn = Ry + 1   (Alu Inc)
+//   op 6  Rn = Ry - 1   (Alu Dec)
+//   op 7  Rn = Rn + Ry + ci  (Alu AddCi)
+//   op 8  Fn = Fn + Fy  (Falu Add)
+//   op 9  Fn = Fn - Fy  (Falu Sub)
+//   op 11 comp(Fx, Fy)  (Falu Comp)
+//   op 12 Rn = Rn AND Ry (Alu And)
+//   op 13 Rn = Rn OR Ry  (Alu Or)
+//   op 14 Rn = Rn XOR Ry (Alu Xor)
+//   op 15 Fn = Fn * Fy   (Mul FMul)
+// Other ops (10, plus the 8/9 int-Neg/int-Abs aliases the older table
+// contained) round-trip cleanly inside this crate but do not match
+// hardware semantics, so they are intentionally absent from
+// `try_type2c`. Falu Pass also has no Type 2c form: easm21k routes
+// `Fn = pass Fy` through the 32-bit Type 2b path (`018a 12rr`).
+
 /// Result of VISA compression.
 #[derive(Debug, Clone)]
 pub enum VisaEncoded {
@@ -110,6 +140,13 @@ fn try_16bit(instr: &Instruction) -> Option<u16> {
 ///
 /// bits[15:13]=110, bits[12:8]=opcode, bits[7:4]=rn, bits[3:0]=ry.
 /// Only available when rn==rx (operation is `rn = rn OP ry`).
+///
+/// See the module-level truth table comment for the full hardware
+/// opcode mapping. The previous version of this function had several
+/// entries off-by-row (FAdd at op 4 instead of 8, FPass at op 11
+/// instead of un-compressed, FMul missing entirely, Not at op 15
+/// instead of 4), which encoded but ran the wrong operation on real
+/// silicon.
 fn try_type2c(compute: &ComputeOp) -> Option<u16> {
     let (op, rn, ry) = match *compute {
         // Integer ALU ops where rn==rx
@@ -117,9 +154,7 @@ fn try_type2c(compute: &ComputeOp) -> Option<u16> {
         ComputeOp::Alu(AluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (1, rn, ry),
         ComputeOp::Alu(AluOp::Pass { rn, rx }) if rn < 16 && rx < 16 => (2, rn, rx),
         ComputeOp::Alu(AluOp::Comp { rx, ry }) if rx < 16 && ry < 16 => (3, rx, ry),
-        ComputeOp::Falu(FaluOp::Add { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (4, rn, ry)
-        }
+        ComputeOp::Alu(AluOp::Not { rn, rx }) if rn < 16 && rx < 16 => (4, rn, rx),
         ComputeOp::Alu(AluOp::Inc { rn, rx }) if rn < 16 && rx < 16 => (5, rn, rx),
         ComputeOp::Alu(AluOp::Dec { rn, rx }) if rn < 16 && rx < 16 => (6, rn, rx),
         ComputeOp::Alu(AluOp::AddCi { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
@@ -134,14 +169,19 @@ fn try_type2c(compute: &ComputeOp) -> Option<u16> {
         // bits[3:0] field differently, and a straight `Rn = ABS Rx`
         // compressed this way returns -1 from ABS(-7) on real
         // silicon. Let the 48-bit Type 2 encoder handle them.
-        ComputeOp::Falu(FaluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
-            (10, rn, ry)
+        ComputeOp::Falu(FaluOp::Add { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
+            (8, rn, ry)
         }
-        ComputeOp::Falu(FaluOp::Pass { rn, rx }) if rn < 16 && rx < 16 => (11, rn, rx),
+        ComputeOp::Falu(FaluOp::Sub { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
+            (9, rn, ry)
+        }
+        ComputeOp::Falu(FaluOp::Comp { rx, ry }) if rx < 16 && ry < 16 => (11, rx, ry),
         ComputeOp::Alu(AluOp::And { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (12, rn, ry),
         ComputeOp::Alu(AluOp::Or { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (13, rn, ry),
         ComputeOp::Alu(AluOp::Xor { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => (14, rn, ry),
-        ComputeOp::Alu(AluOp::Not { rn, rx }) if rn < 16 && rx < 16 => (15, rn, rx),
+        ComputeOp::Mul(MulOp::FMul { rn, rx, ry }) if rn == rx && rn < 16 && ry < 16 => {
+            (15, rn, ry)
+        }
         _ => return None,
     };
     Some(0b110u16 << 13 | (op as u16) << 8 | rn << 4 | ry)
