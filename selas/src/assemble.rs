@@ -71,7 +71,7 @@ impl SectionData {
 /// that a cross-section `R1 = symbol.;` reference from a code section
 /// can resolve against; the word-addressed `DM` qualifier rejects such
 /// relocations at link time.
-fn parse_section_name(raw: &str) -> (String, bool) {
+fn parse_section_name(raw: &str) -> (String, bool, bool) {
     let s = raw.trim().trim_end_matches(';').trim();
     // The parser preserves the leading `/`; strip it so the rest can
     // be split as a qualifier list.
@@ -84,16 +84,28 @@ fn parse_section_name(raw: &str) -> (String, bool) {
         None => ("", s),
     };
     if name.is_empty() {
-        return (s.to_string(), false);
+        return (s.to_string(), false, false);
     }
     let mut is_pm = false;
+    // `NW` (Normal Word, 48-bit) on a code section forbids VISA
+    // compression: the SHARC+ boot ROM steps the IVT in 48-bit slots,
+    // and a compressed 16/32-bit instruction inside iv_code lands the
+    // reset vector in the middle of the next slot. The .SECTION
+    // directive lets the assembler know via a `/NW` qualifier; honour
+    // it by reporting `force_nw` to the caller so the per-section
+    // visa flag stays off even when the file is being assembled in
+    // VISA mode globally.
+    let mut force_nw = false;
     for tok in qualifier_str.split('/') {
         let upper = tok.trim().to_uppercase();
         if matches!(upper.as_str(), "PM" | "SW" | "CODE") {
             is_pm = true;
         }
+        if upper == "NW" {
+            force_nw = true;
+        }
     }
-    (name.to_string(), is_pm)
+    (name.to_string(), is_pm, force_nw)
 }
 
 /// Initializer value for a `.VAR` directive.
@@ -434,7 +446,11 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
             let idx =
                 current_or_default(&mut sections, &mut current_section_idx, ".text", true, visa);
             let sec = &mut sections[idx].1;
-            let word_off = if visa && sec.is_pm {
+            // Use per-section visa, not global: a `.SECTION/CODE/NW`
+            // section keeps `is_visa = false` even when assembling in
+            // VISA mode globally, and label offsets must be measured
+            // in the same units the encoder will emit.
+            let word_off = if sec.is_visa {
                 sec.visa_offset()
             } else {
                 sec.word_offset()
@@ -454,12 +470,12 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
             // encoding it, so pass 2 can compute PC-relative offsets
             // correctly even when earlier instructions in the section had
             // varying widths (VISA: 2/4/6 bytes).
-            let word_offset = if visa && sec.is_pm {
+            let word_offset = if sec.is_visa {
                 sec.visa_offset()
             } else {
                 sec.word_offset()
             };
-            if visa && sec.is_pm {
+            if sec.is_visa {
                 let isa_bytes =
                     selinstr::encode::encode(instr).expect("instruction encoding failed");
                 // Force the 48-bit ISA form under either of two
@@ -688,8 +704,9 @@ fn process_directives(line: &ParsedLine, state: &mut DirectiveState<'_>) {
 
     match directive {
         Directive::Section(raw_name) => {
-            let (name, is_pm) = parse_section_name(raw_name);
-            let idx = ensure_section(state.sections, &name, is_pm, state.visa);
+            let (name, is_pm, force_nw) = parse_section_name(raw_name);
+            let visa_for_section = state.visa && !force_nw;
+            let idx = ensure_section(state.sections, &name, is_pm, visa_for_section);
             *state.current_section_idx = Some(idx);
         }
         Directive::Global(name) => {
@@ -899,8 +916,26 @@ fn emit_elf_bytes(
         }
     }
 
-    // Register extern (undefined) symbols.
+    // Register extern (undefined) symbols. Skip any extern that is
+    // also declared `.GLOBAL`/`.WEAK` or defined as a label in the
+    // same file: hand-written runtime assembly (e.g.
+    // libsel/support/startup.s) often pairs a forward `.EXTERN start;`
+    // with a later `.GLOBAL start;` + `start:` definition, so emitting
+    // an UNDEF entry alongside the defined GLOBAL would produce two
+    // `start` symtab rows. cc21k and elfar's archive indexer both
+    // treat the duplicate as a multi-defined symbol, prevent the
+    // archive member from being pulled, and silently strand the
+    // entry point.
+    let defined_in_file: std::collections::HashSet<&str> = sections
+        .iter()
+        .flat_map(|(_, sd)| sd.symbols.iter().map(|(n, _)| n.as_str()))
+        .chain(globals.iter().map(|s| s.as_str()))
+        .chain(weaks.iter().map(|s| s.as_str()))
+        .collect();
     for ext in externs {
+        if defined_in_file.contains(ext.as_str()) {
+            continue;
+        }
         writer.add_undefined(ext);
     }
 
@@ -1273,21 +1308,21 @@ mod tests {
 
     #[test]
     fn test_parse_section_name_pm() {
-        let (name, is_pm) = parse_section_name("PM seg_pmco;");
+        let (name, is_pm, _) = parse_section_name("PM seg_pmco;");
         assert_eq!(name, "seg_pmco");
         assert!(is_pm);
     }
 
     #[test]
     fn test_parse_section_name_dm() {
-        let (name, is_pm) = parse_section_name("DM seg_dmda;");
+        let (name, is_pm, _) = parse_section_name("DM seg_dmda;");
         assert_eq!(name, "seg_dmda");
         assert!(!is_pm);
     }
 
     #[test]
     fn test_parse_section_name_bare() {
-        let (name, is_pm) = parse_section_name("seg_pmco;");
+        let (name, is_pm, _) = parse_section_name("seg_pmco;");
         assert_eq!(name, "seg_pmco");
         assert!(!is_pm);
     }

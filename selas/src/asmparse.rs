@@ -117,6 +117,26 @@ impl<'a> AsmParser<'a> {
                 pending_line.clear();
                 joined
             };
+            // Split multi-statement lines at top-level `;`. Hand-written
+            // SHARC asm packs interrupt-vector slots as
+            //   JUMP .spurious_trap; NOP; NOP; NOP;
+            // on a single source line; without splitting, parse_line
+            // returns the first statement only and the remaining three
+            // get silently dropped, which is exactly how an IVT with
+            // half its instructions missing ships in the .doj. Skip the
+            // split when there is only one top-level statement on the
+            // line (so trailing `;` on lone instructions and directives
+            // still works the way parse_line expects).
+            let stmt_parts = split_top_level_stmts(&effective_line);
+            if stmt_parts.len() > 1 {
+                for part in stmt_parts {
+                    let p = self.parse_line(&part)?;
+                    if p.label.is_some() || p.instruction.is_some() || p.directive.is_some() {
+                        results.push(p);
+                    }
+                }
+                continue;
+            }
             let parsed = match self.parse_line(&effective_line) {
                 Ok(p) => p,
                 Err(e) if was_joined => {
@@ -190,7 +210,12 @@ impl<'a> AsmParser<'a> {
     }
 
     fn parse_line(&self, raw: &str) -> Result<ParsedLine> {
+        // SHARC+ asm uses `;` as the statement terminator. After
+        // `split_top_level_stmts` peels off multi-statement lines, each
+        // single-statement input still ends with the trailing `;`
+        // (e.g. `_main: NOP;`), so trim it before instruction parsing.
         let line = strip_comment(raw).trim();
+        let line = line.trim_end_matches(';').trim();
         // Skip preprocessor #line directives
         if line.starts_with("#line ") || line.starts_with("#LINE ") {
             return Ok(ParsedLine {
@@ -4366,6 +4391,55 @@ fn extract_width_modifier(s: &str) -> (&str, Option<&str>) {
     (s, None)
 }
 
+/// Split a (preprocessed, comment-stripped) source line at top-level
+/// `;` characters and return the non-empty parts (each without the
+/// trailing `;`). `;` inside parentheses, brackets, braces, or string
+/// literals is preserved. Used by the line loop to recover all
+/// statements from a packed source line such as
+///   JUMP foo; NOP; NOP; NOP;
+fn split_top_level_stmts(line: &str) -> Vec<String> {
+    let stripped = strip_comment(line);
+    let bytes = stripped.as_bytes();
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_str: Option<u8> = None;
+    let mut start = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_str {
+            if b == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                in_str = None;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => in_str = Some(b),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = (depth - 1).max(0),
+            b';' if depth == 0 => {
+                let p = stripped[start..i].trim();
+                if !p.is_empty() {
+                    parts.push(p.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let tail = stripped[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_string());
+    }
+    parts
+}
+
 fn is_ignored_directive(upper: &str) -> bool {
     upper.starts_with(".ENDSEG")
         || upper.starts_with(".PRECISION")
@@ -4392,12 +4466,14 @@ fn is_ignored_directive(upper: &str) -> bool {
 }
 
 fn strip_comment(line: &str) -> &str {
-    // Assembly comments start with // or ;
+    // SHARC+ asm uses `//` and `/* */` for comments. The `;` character
+    // is a STATEMENT TERMINATOR, not a comment marker -- packed source
+    // lines like `JUMP foo; NOP; NOP; NOP;` rely on each `;` ending an
+    // instruction. Stripping at the first `;` would silently swallow
+    // every statement after the first on such a line, leaving the IVT
+    // with three NOPs missing per slot.
     let mut result = line;
     if let Some(pos) = result.find("//") {
-        result = &result[..pos];
-    }
-    if let Some(pos) = result.find(';') {
         result = &result[..pos];
     }
     result
@@ -5453,7 +5529,11 @@ mod tests {
 
     #[test]
     fn test_parse_comment() {
-        let mut parser = AsmParser::new("// comment\nNOP ; inline comment\n");
+        // SHARC+ asm comment syntaxes are `//` and `/* */`; the
+        // `;` character is a statement terminator, not a comment
+        // marker, so an inline comment after an instruction uses
+        // `//` rather than `;`.
+        let mut parser = AsmParser::new("// comment\nNOP; // inline comment\n");
         let lines = parser.parse_all().unwrap();
         assert_eq!(lines.len(), 1);
         assert!(matches!(lines[0].instruction, Some(Instruction::Nop)));
