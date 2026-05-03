@@ -207,6 +207,26 @@ fn try_32bit(instr: &Instruction) -> Option<u32> {
             offset,
             cond,
         } if !access.pm => try_type4b(access.write, access.i_reg, dreg, offset, cond),
+        // 32-bit VISA Group-4 encoding for Type 15 (ureg <-> DM with
+        // 7-bit signed offset, DAG1 only). selcc's stack-frame setup
+        // emits `DM(-N,I6)=Rx;` and the matching reload as
+        // `UregMemAccess`, and they fit this encoding exactly. The
+        // 48-bit ISA fall-through emits the same access in 6 bytes,
+        // but the SHARC+ SW PM alias maps each PM word to 2 bytes,
+        // so a 6-byte instruction in `seg_swco` straddles three SW
+        // slots and the core decodes the middle slot as a separate
+        // (garbage) instruction. Compressing here keeps every
+        // selcc-emitted instruction within a single SW slot.
+        Instruction::UregMemAccess {
+            pm: false,
+            i_reg,
+            write,
+            lw,
+            ureg,
+            offset,
+        } if i_reg < 8 && (-64..=63).contains(&offset) && ureg <= 0x7F => {
+            try_type15b(write, lw, i_reg, ureg, offset)
+        }
         Instruction::URegMove { dest, src } => try_type5b_move(dest, src),
         Instruction::UregTransfer {
             src_ureg,
@@ -380,6 +400,47 @@ fn try_type4b(write: bool, i_reg: u8, dreg: u16, offset: i8, cond: u8) -> Option
         | ((cond as u16 & 0x1F) << 1)
         | off_hi;
     let p2 = (off_lo << 11) | ((dreg & 0xF) << 7) | 0b11u16; // normal word
+    Some((p1 as u32) << 16 | p2 as u32)
+}
+
+/// 32-bit VISA encoding for Type 15 ureg <-> DM with 7-bit
+/// signed offset. The SHARC+ Group-4 ureg-mem-access form sits at
+/// p1[15:13] = 100 and accepts any 7-bit ureg destination/source,
+/// so it covers selcc's stack-frame stores (`DM(-N,I6)=Rx`) and
+/// their matching reloads in a single 32-bit slot. The Type 16b
+/// (`dm(Ii,Mm)=imm16`) sub-form within Group 4 is gated on p1[2]
+/// = 1; we leave that bit clear so the decoder routes back to the
+/// standard ureg-mem path. p1 bits 3:0 are fixed to 0x8 to match
+/// easm21k's encoding -- the ADSP-21569 ROM rejects forms with
+/// other lower-nibble values for this access type.
+fn try_type15b(write: bool, lw: bool, i_reg: u8, ureg: u16, offset: i32) -> Option<u32> {
+    if i_reg > 7 {
+        return None;
+    }
+    if !(-64..=63).contains(&offset) {
+        return None;
+    }
+    if ureg > 0x7F {
+        return None;
+    }
+    let d = if write { 1u16 } else { 0 };
+    let lw_bit = if lw { 1u16 } else { 0 };
+    let raw7 = (offset as u8 as u16) & 0x7F;
+    // p1[12] is the W32 marker the SHARC+ pipeline uses to tell a
+    // Group-4 32-bit instruction apart from a 16-bit Type 3c data
+    // move that shares the top4 = 1001 prefix. Without it set, real
+    // silicon decodes the same byte stream as a 16-bit Type 3c
+    // (DAG-register-addressed move) followed by a stray 16-bit
+    // parcel, which writes the wrong dreg and corrupts the spill
+    // slot. easm21k always sets this bit for the standard ureg
+    // <-> DM access form.
+    let p1 = (0b100u16 << 13)
+        | (1u16 << 12)
+        | ((i_reg as u16 & 7) << 9)
+        | (d << 8)
+        | (lw_bit << 7)
+        | 0x08;
+    let p2 = ((ureg & 0x7F) << 7) | raw7;
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
