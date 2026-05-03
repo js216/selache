@@ -319,7 +319,12 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             let sym = with_abi_suffix(&cf.name);
             if cf.is_weak {
                 let _ = writeln!(out, ".WEAK {sym};");
-            } else {
+            } else if !cf.is_static {
+                // C99 6.2.2p3: `static` at file scope gives internal
+                // linkage. Such symbols are TU-private and must not be
+                // exposed via `.GLOBAL`, otherwise two object files
+                // each defining e.g. a `static float pi_over_2`
+                // collide at link time.
                 let _ = writeln!(out, ".GLOBAL {sym};");
             }
             let _ = writeln!(out, "{sym}:");
@@ -397,6 +402,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                     name: global.name.clone(),
                     values,
                     interior: Vec::new(),
+                    is_static: global.is_static,
                 }),
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", global.name);
@@ -408,6 +414,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                         name: global.name.clone(),
                         values: vec![InitWord::Num(0); words as usize],
                         interior: Vec::new(),
+                        is_static: global.is_static,
                     });
                 }
             }
@@ -428,10 +435,12 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 Some(&sl.ty),
                 &mut ictx,
             ) {
+                // Block-scope `static` locals are always TU-private.
                 Ok(values) => data_entries.push(DataEntry {
                     name: sl.symbol.clone(),
                     values,
                     interior: Vec::new(),
+                    is_static: true,
                 }),
                 Err(e) => {
                     eprintln!("selcc: {}: {e}", sl.symbol);
@@ -442,6 +451,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                         name: sl.symbol.clone(),
                         values: vec![InitWord::Num(0); words as usize],
                         interior: Vec::new(),
+                        is_static: true,
                     });
                 }
             }
@@ -491,7 +501,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
         for e in &data_entries {
             let sym = with_abi_suffix(&e.name);
-            let _ = writeln!(out, ".GLOBAL {sym};");
+            if !e.is_static {
+                let _ = writeln!(out, ".GLOBAL {sym};");
+            }
             emit_var_bytes(&mut out, &sym, &e.values, &e.interior);
         }
         out.push_str(".ENDSEG;\n\n");
@@ -500,7 +512,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     // BSS: uninitialized globals and static locals.
     // Skip names already emitted in the data section (tentative + init).
     let data_names: HashSet<String> = data_entries.iter().map(|e| e.name.clone()).collect();
-    let mut bss_entries: Vec<(String, u32)> = Vec::new();
+    let mut bss_entries: Vec<(String, u32, bool)> = Vec::new();
     let mut bss_seen: HashSet<String> = HashSet::new();
     for global in &unit.globals {
         if global.is_extern {
@@ -513,6 +525,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             bss_entries.push((
                 global.name.clone(),
                 crate::types::size_bytes_ctx(&global.ty, &unit_tctx),
+                global.is_static,
             ));
         }
     }
@@ -521,14 +534,17 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             bss_entries.push((
                 sl.symbol.clone(),
                 crate::types::size_bytes_ctx(&sl.ty, &unit_tctx),
+                true,
             ));
         }
     }
     if !bss_entries.is_empty() {
         out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
-        for (name, sz) in &bss_entries {
+        for (name, sz, is_static) in &bss_entries {
             let sym = with_abi_suffix(name);
-            let _ = writeln!(out, ".GLOBAL {sym};");
+            if !is_static {
+                let _ = writeln!(out, ".GLOBAL {sym};");
+            }
             let words = sz.div_ceil(4).max(1);
             let zero = vec![InitWord::Num(0); words as usize];
             emit_var_bytes(&mut out, &sym, &zero, &[]);
@@ -551,9 +567,14 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     //
     if !all_strings.is_empty() || !all_wide_strings.is_empty() {
         out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
+        // C99 6.4.5: string literals have static storage duration, but no
+        // external linkage — they are anonymous and private to the
+        // translation unit. Emitting `.GLOBAL .strN.` would expose them
+        // and produce "multiply defined symbol" errors at link time when
+        // two object files each contain a `.str0.`. Internal references
+        // within the same .s file resolve fine without `.GLOBAL`.
         for (i, s) in all_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".str{i}"));
-            let _ = writeln!(out, ".GLOBAL {name};");
             let mut bytes: Vec<u8> = s.as_bytes().to_vec();
             bytes.push(0);
             let words: Vec<InitWord> = pack_bytes_le(&bytes)
@@ -564,7 +585,6 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         }
         for (i, ws) in all_wide_strings.iter().enumerate() {
             let name = with_abi_suffix(&format!(".wstr{i}"));
-            let _ = writeln!(out, ".GLOBAL {name};");
             let mut words: Vec<u32> = ws.clone();
             words.push(0);
             let words: Vec<InitWord> = words.into_iter().map(InitWord::Num).collect();
@@ -684,6 +704,10 @@ struct DataEntry {
     /// support `sym + offset` relocations, so the offset is folded
     /// into the symbol itself instead.
     interior: Vec<(usize, String)>,
+    /// True for `static`-storage-class file-scope objects (C99
+    /// 6.2.2p3 internal linkage). Such symbols are emitted without
+    /// `.GLOBAL` so they stay private to the translation unit.
+    is_static: bool,
 }
 
 /// Walk a global initializer expression, recording every function-name
@@ -1053,6 +1077,10 @@ fn eval_init_word(
                     name: name.clone(),
                     values,
                     interior: Vec::new(),
+                    // Synthesized compound-literal storage is always
+                    // TU-private (it backs an anonymous object the
+                    // current TU's initialiser took the address of).
+                    is_static: true,
                 });
                 Ok(InitWord::Sym(name))
             }
@@ -1068,6 +1096,10 @@ fn eval_init_word(
                     name: name.clone(),
                     values,
                     interior: Vec::new(),
+                    // Synthesized compound-literal storage is always
+                    // TU-private (it backs an anonymous object the
+                    // current TU's initialiser took the address of).
+                    is_static: true,
                 });
                 Ok(InitWord::Sym(name))
             }

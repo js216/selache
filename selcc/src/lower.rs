@@ -6042,7 +6042,8 @@ fn expr_function_ptr_ret_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
 }
 
 /// Insert an implicit float-to-int or int-to-float conversion if the source
-/// vreg type does not match the destination type.
+/// vreg type does not match the destination type, and truncate to the
+/// destination width for narrow integer destinations (char, short).
 fn coerce_vreg(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
     // C99 6.3.1.2: any scalar conversion to _Bool yields 0 or 1.
     // Without this, `_Bool b = 42;` would store the raw 42 byte and a
@@ -6053,16 +6054,59 @@ fn coerce_vreg(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
     let src_is_float = ctx.is_float_vreg(val);
     let dst_is_float = dst_ty.is_float();
     if src_is_float && !dst_is_float {
-        let dst = ctx.alloc_vreg();
-        ctx.emit(IrOp::FloatToInt(dst, val));
-        dst
+        let int_val = ctx.alloc_vreg();
+        ctx.emit(IrOp::FloatToInt(int_val, val));
+        narrow_int_to_dst(ctx, int_val, dst_ty)
     } else if !src_is_float && dst_is_float {
         let dst = ctx.alloc_vreg_float();
         ctx.emit(IrOp::IntToFloat(dst, val));
         dst
+    } else if !src_is_float && !dst_is_float {
+        // Integer -> integer assignment to a narrow type (char, short)
+        // requires truncation to the target width. Without this,
+        // `unsigned char c; c += 1;` starting at 255 would store 256
+        // into the underlying 32-bit slot and read back 256 instead of
+        // wrapping to 0.
+        narrow_int_to_dst(ctx, val, dst_ty)
     } else {
         val
     }
+}
+
+/// Truncate a 32-bit integer vreg to `dst_ty`'s width. For narrower-than-int
+/// types (1- or 2-byte), masks to the type's bit width; for unsigned the
+/// masked value is the result, for signed it is sign-extended back to 32
+/// bits via shift-left/arithmetic-shift-right. For `int`-or-wider
+/// destinations the input is returned unchanged. The signedness check
+/// goes through `resolve_type_chain` so a `uint8_t`-style typedef resolves
+/// to its `unsigned char` underlying type instead of being treated as
+/// signed (which would sign-extend 0xFF into 0xFFFFFFFF and break
+/// `<stdint.h>` clients).
+fn narrow_int_to_dst(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
+    let dst_bytes = crate::types::size_bytes_ctx(dst_ty, ctx);
+    if dst_bytes == 0 || dst_bytes >= 4 {
+        return val;
+    }
+    let resolved = resolve_type_chain(dst_ty, ctx);
+    let bits = dst_bytes * 8;
+    let mask = (1u32 << bits).wrapping_sub(1) as i64;
+    let masked = ctx.alloc_vreg();
+    let mask_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_v, mask));
+    ctx.emit(IrOp::BitAnd(masked, val, mask_v));
+    if resolved.is_unsigned() {
+        return masked;
+    }
+    let shift = (32 - bits) as i64;
+    let shifted_up = ctx.alloc_vreg();
+    let shl_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl_v, shift));
+    ctx.emit(IrOp::Shl(shifted_up, masked, shl_v));
+    let shr_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shr_v, -shift));
+    let dst = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(dst, shifted_up, shr_v));
+    dst
 }
 
 /// C99 6.3.1.2 conversion to `_Bool`: any nonzero scalar becomes 1, zero
