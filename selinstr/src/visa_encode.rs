@@ -459,6 +459,11 @@ fn try_type15b(write: bool, lw: bool, i_reg: u8, ureg: u16, offset: i32) -> Opti
 ///   p1[0]     = src_idx[1]
 ///   p2[15]    = src_idx[0]
 ///   p2[13:7]  = dst_ureg (7-bit code)
+///   p2[5:0]   = 0x3f (W32 width marker; group-3 ambiguous opcodes are
+///               classified W32 vs W48 by `p2 & 0x3F >= 0x38`. Without
+///               the marker the assembled bytes decode on hardware as
+///               a 48-bit Type 5a parallel compute + ureg move, which
+///               clobbers a dreg adjacent to the move).
 fn try_type5b_move(dest: u16, src: u16) -> Option<u32> {
     if dest > 127 || src > 127 {
         return None;
@@ -475,7 +480,7 @@ fn try_type5b_move(dest: u16, src: u16) -> Option<u32> {
         | ((src_idx >> 2) & 1) << 6
         | (cond << 1)
         | ((src_idx >> 1) & 1);
-    let p2 = (src_idx & 1) << 15 | ((dest & 0x7F) << 7);
+    let p2 = (src_idx & 1) << 15 | ((dest & 0x7F) << 7) | 0x3f;
     Some((p1 as u32) << 16 | p2 as u32)
 }
 
