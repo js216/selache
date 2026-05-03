@@ -704,23 +704,28 @@ PROCESSOR core0 {
     );
     assert_eq!(rc, 0, "rc={rc}\nstderr: {err}");
     let content = std::fs::read_to_string(work.join("out.map")).expect("out.map missing");
-    // The reserve occupies bytes [0x2403f0, 0x2443f0) -- length 0x4000
-    // from the BW segment's base address. Expected derived values:
-    //   stack_heap         = 0x002403f0
+    // The reserve is placed at the HIGH end of the BW segment to
+    // match cc21k's behaviour and the SHARC+ stack-grows-down
+    // convention (startup.s sets `I7 = ldf_stack_space` and pushes
+    // through wraparound, so `ldf_stack_space` must point at the
+    // top of the buffer or the first push corrupts memory below
+    // the segment). The segment ends inclusive at 0x26FFFF, so the
+    // 0x4000-byte reserve occupies [0x26C000, 0x270000).
+    //   stack_heap         = 0x0026c000
     //   stack_heap_length  = 0x00004000
-    //   ldf_stack_space    = 0x002403f0
-    //   ldf_stack_end      = 0x002443ec
-    //   ldf_heap_space     = 0x002443f0
-    //   ldf_heap_end       = 0x002443f0
+    //   ldf_stack_space    = 0x0026c000
+    //   ldf_stack_end      = 0x0026fffc
+    //   ldf_heap_space     = 0x00270000
+    //   ldf_heap_end       = 0x00270000
     //   ldf_heap_length    = 0x00000000
     for (name, expected) in [
         ("___ldf_pmcachesize", 0x00000000u32),
         ("___ldf_icachesize", 0xffffffffu32),
-        ("stack_heap", 0x002403f0),
+        ("stack_heap", 0x0026c000),
         ("stack_heap_length", 0x00004000),
-        ("ldf_stack_space", 0x002403f0),
-        ("ldf_stack_end", 0x002443ec),
-        ("ldf_heap_space", 0x002443f0),
+        ("ldf_stack_space", 0x0026c000),
+        ("ldf_stack_end", 0x0026fffc),
+        ("ldf_heap_space", 0x00270000),
         ("ldf_heap_length", 0x00000000),
     ] {
         let needle = format!("{name:<32} 0x{expected:08x}");

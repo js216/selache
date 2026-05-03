@@ -216,22 +216,22 @@ pub fn layout(
             let Some(cur) = cursors.get_mut(&out_sec.target_memory) else {
                 continue;
             };
-            // The current cursor position marks the first byte
-            // beyond all claimed reserves and placements. The
-            // segment extends through `end` (inclusive, in unit
-            // addresses). Convert both to bytes and grow the
-            // reserve to cover the unclaimed tail. A reserve that
-            // already starts past the cursor (because it was carved
-            // before later placements) keeps its original start and
-            // only its length changes.
-            let end_byte_exclusive = cur.end.saturating_add(1).saturating_mul(cur.byte_stride);
-            let start_byte = entry.0;
-            if end_byte_exclusive > start_byte {
-                entry.1 = end_byte_exclusive - start_byte;
+            // High-end placement: the reserve starts at some address
+            // near the top of its target segment and the unclaimed
+            // free tail sits *below* it, between `cur.current` and
+            // the reserve's current start. Grow the reserve downward
+            // by moving its base to `cur.current` and expanding the
+            // length to cover everything from there to the original
+            // top of the reserve.
+            let stride = cur.byte_stride.max(1);
+            let cur_byte = cur.current.saturating_mul(stride);
+            let original_end_byte = entry.0 + entry.1;
+            if cur_byte < original_end_byte {
+                entry.0 = cur_byte;
+                entry.1 = original_end_byte - cur_byte;
             }
-            // Advance the cursor past the expanded reserve so later
-            // output sections targeting the same segment do not
-            // reclaim the space.
+            // Mark the segment fully consumed: any later sections
+            // targeting it would now overlap the expanded reserve.
             cur.current = cur.end.saturating_add(1);
         }
     }
@@ -316,16 +316,26 @@ fn allocate_reserve(
     // sub-unit alignment value still produces a well-defined aligned
     // position. A zero result is bumped to one.
     let align_units = align_bytes.div_ceil(stride).max(1);
-    let aligned_unit = (cursor.current + align_units - 1) & !(align_units - 1);
-    let start_byte = aligned_unit.saturating_mul(stride);
     let length_units = r.length.div_ceil(stride);
-    // Zero-length reserves do not advance the cursor; growing them
-    // happens in the post-pass. Non-zero length reserves consume
-    // their bytes immediately so placements cannot overlap.
+    // SHARC+ stacks live in a `RESERVE(...)` block, and startup.s
+    // expects `ldf_stack_space` to be the HIGH end of that region:
+    // `I7 = ldf_stack_space; B7 = I7; L7 = ldf_stack_length;` sets
+    // up a circular-buffer stack that wraps from B7 to B7+L7-1, so
+    // the first push writes at the top word of the buffer. cc21k
+    // anchors RESERVE at the high end of its target memory; a
+    // low-end placement leaves the wrap pointing into bytes outside
+    // the reserved range and the first push corrupts whatever lives
+    // immediately before the stack.
+    //
+    // Place the reserve at the highest address that still fits:
+    // align the END point down to the aligned boundary, then
+    // subtract the length. Zero-length reserves keep the cursor
+    // untouched so the post-pass can size them.
+    let aligned_unit;
     if length_units > 0 {
         let end_exclusive = cursor.end.saturating_add(1);
-        if aligned_unit > end_exclusive || length_units > end_exclusive - aligned_unit {
-            let remaining = end_exclusive.saturating_sub(aligned_unit);
+        if length_units > end_exclusive - cursor.current {
+            let remaining = end_exclusive.saturating_sub(cursor.current);
             return Err(Error::LayoutOverflow {
                 section: r.name.clone(),
                 segment: cursor.name.clone(),
@@ -333,10 +343,26 @@ fn allocate_reserve(
                 remaining,
             });
         }
-        cursor.current = aligned_unit + length_units;
+        let raw_start = end_exclusive - length_units;
+        aligned_unit = raw_start & !(align_units - 1);
+        // No room for both the alignment-induced gap and the reserve
+        // itself: fall back to low-end placement so the link does
+        // not silently truncate.
+        if aligned_unit < cursor.current {
+            let remaining = end_exclusive.saturating_sub(cursor.current);
+            return Err(Error::LayoutOverflow {
+                section: r.name.clone(),
+                segment: cursor.name.clone(),
+                requested: length_units,
+                remaining,
+            });
+        }
+        cursor.end = aligned_unit.saturating_sub(1);
     } else {
+        aligned_unit = (cursor.current + align_units - 1) & !(align_units - 1);
         cursor.current = aligned_unit;
     }
+    let start_byte = aligned_unit.saturating_mul(stride);
     // Record or merge the reserve entry. The first directive
     // establishes the start address; a second directive with the
     // same name (RESERVE_EXPAND after RESERVE) preserves the
