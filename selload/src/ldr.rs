@@ -567,13 +567,30 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
             .map(|st| elf::read_string_at(st, shdr.sh_name))
             .unwrap_or("");
 
+        // Choose the word-width encoding from the section's L1-alias
+        // range. The cc21k convention (sh_addralign == 1 for the IVT,
+        // == 2 for SW PM, name-suffix `_bw` for byte data) is honoured
+        // when present, but seld currently emits a uniform sh_addralign
+        // of 4 and uses cc21k-style section names without `_bw`, so
+        // fall back to the SHARC+ memory-map ranges to classify a
+        // section that the linker did not annotate.
+        let in_pm_nw = (0x0008_0000..0x000C_0000).contains(&shdr.sh_addr);
+        let in_pm_sw = (0x0010_0000..0x0019_0000).contains(&shdr.sh_addr);
+        let in_bw_l1 = (0x0024_0000..0x0032_0000).contains(&shdr.sh_addr);
         let width = if is_code {
-            if shdr.sh_addralign <= 1 {
+            if shdr.sh_addralign <= 1
+                || name == "ivt"
+                || name == "iv_code"
+                || name.starts_with("iv_")
+                || in_pm_nw
+            {
                 WordWidth::IvCode
-            } else {
+            } else if in_pm_sw || shdr.sh_addralign >= 2 {
                 WordWidth::SwCode
+            } else {
+                WordWidth::IvCode
             }
-        } else if section_is_byte_width(name) {
+        } else if section_is_byte_width(name) || in_bw_l1 {
             WordWidth::ByteWidth
         } else {
             WordWidth::NormalWord
@@ -583,8 +600,46 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
         // not FILL-compressed.  align>=2 code and all data sections are.
         let compressible = !matches!(width, WordWidth::IvCode);
 
+        // Translate the linker's per-section sh_addr into the byte
+        // address the boot ROM's DMA engine uses. The SHARC+ ADSP-21569
+        // exposes core 0's L1 SRAM through three different views:
+        //
+        //   PM NW alias (0x00080000..0x000BFFFF) -- 48-bit instruction
+        //     slots, each costing 4 bytes in the underlying byte
+        //     store. The IVT lives here.
+        //   PM SW alias (0x00100000..0x0018FFFF) -- 32-bit short-word
+        //     instruction slots, 2 bytes per slot. SW PM code lives
+        //     here.
+        //   BW L1 view  (0x00240000..0x0031FFFF) -- byte-addressed
+        //     L1 SRAM, used by data and SW PM section payloads.
+        //
+        // The boot ROM streams the image in via DMA, which sees L1
+        // through the system fabric alias at 0x28000000 onward. So
+        // each PM word address gets the appropriate NW/SW stride
+        // applied to reach a byte offset, and that byte address gets
+        // shifted by 0x28000000. BW addresses just pick up the
+        // fabric shift. L2 (0x20000000+) is already in the fabric
+        // view; very small synthetic test addresses pass through
+        // unchanged.
+        const PM_NW_START: u32 = 0x0008_0000;
+        const PM_NW_END: u32 = 0x000C_0000;
+        const PM_SW_START: u32 = 0x0010_0000;
+        const PM_SW_END: u32 = 0x0019_0000;
+        const BW_L1_START: u32 = 0x0024_0000;
+        const BW_L1_END: u32 = 0x0032_0000;
+        const SYS_FABRIC_OFFSET: u32 = 0x2800_0000;
+        let translated = if (PM_NW_START..PM_NW_END).contains(&shdr.sh_addr) {
+            shdr.sh_addr.saturating_mul(4) + SYS_FABRIC_OFFSET
+        } else if (PM_SW_START..PM_SW_END).contains(&shdr.sh_addr) {
+            shdr.sh_addr.saturating_mul(2) + SYS_FABRIC_OFFSET
+        } else if (BW_L1_START..BW_L1_END).contains(&shdr.sh_addr) {
+            shdr.sh_addr + SYS_FABRIC_OFFSET
+        } else {
+            shdr.sh_addr
+        };
+
         sections.push(LoadableSection {
-            addr: shdr.sh_addr,
+            addr: translated,
             raw,
             width,
             compressible,
@@ -1147,6 +1202,12 @@ mod tests {
     #[test]
     fn test_generate_single_segment() {
         let data = vec![0xAA; 64];
+        // sh_addr 0x00090000 is in the PM-bus alias range; the boot
+        // ROM walks NW (48-bit) instruction slots stored 4 bytes per
+        // word in L1 BTRAM and accesses them via the system-fabric
+        // alias starting at 0x28000000. The translation matches
+        // elfloader's wire format so the same .ldr can be consumed
+        // by the on-chip boot kernel without further patching.
         let elf = make_test_elf(0x0009_0000, &data);
         let opts = default_opts();
         let blocks = generate_boot_stream(&elf, &opts).unwrap();
@@ -1159,8 +1220,8 @@ mod tests {
         assert_ne!(blocks[0].flags & BFLAG_IGNORE, 0);
         assert_eq!(blocks[0].data.len(), 0);
 
-        // Data block
-        assert_eq!(blocks[1].target_addr, 0x0009_0000);
+        // Data block: 0x00090000 * 4 + 0x28000000 = 0x28240000.
+        assert_eq!(blocks[1].target_addr, 0x2824_0000);
         assert_eq!(blocks[1].data.len(), 64);
 
         // FINAL block
