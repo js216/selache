@@ -97,6 +97,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
     }
 
     let mut objects = Vec::new();
+    let mut cli_archives: Vec<libs::LoadedArchive> = Vec::new();
     for path in &opts.input_files {
         if opts.trace || opts.trace_full {
             if opts.trace_full {
@@ -105,6 +106,15 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
             } else {
                 eprintln!("  {path}");
             }
+        }
+        // `.dlb` on the command line is an archive: route it through
+        // the same on-demand-pull machinery that LDF-declared archives
+        // use so seld interoperates with build systems that pass
+        // libxtest.dlb / libfoo.dlb directly to the linker (the same
+        // way cc21k does).
+        if path.ends_with(".dlb") {
+            cli_archives.push(libs::load_archive_at(std::path::PathBuf::from(path))?);
+            continue;
         }
         let data = std::fs::read(path)?;
         let obj = resolve::load_object(path, data)?;
@@ -130,6 +140,7 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
         objects.push(obj);
     }
     let mut archives = libs::load_archives(&archive_basenames, &opts.lib_paths)?;
+    archives.extend(cli_archives);
 
     if opts.verbose {
         eprintln!(
@@ -169,6 +180,17 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
     if opts.verbose {
         eprintln!("Resolving symbols...");
     }
+    // The LDF's `ENTRY(<name>)` is a link-time root: the .dxe must
+    // contain a definition of that symbol whether or not any
+    // relocation references it. When the entry is satisfied by an
+    // archive member (e.g. `start` defined in startup.doj inside
+    // libxtest.dlb), the resolve loop has to pull that member even
+    // though no `.rela.*` entry mentions `start`. Treat the entry
+    // name as a referenced root for the duration of resolution.
+    let entry_root: Option<String> = opts
+        .entry
+        .clone()
+        .or_else(|| ldf.processors.first().and_then(|p| p.entry.clone()));
     let symtab = loop {
         let tab = resolve::resolve(&objects)?;
         // An `UNDEF global` declaration that no relocation anywhere
@@ -185,16 +207,35 @@ pub fn link(opts: &cli::Options) -> error::Result<LinkOutput> {
             if referenced.contains(name) {
                 return true;
             }
+            if let Some(ref e) = entry_root {
+                if e == name || resolve::name_aliases(e).iter().any(|a| a == name) {
+                    return true;
+                }
+            }
             resolve::name_aliases(name)
                 .iter()
                 .any(|a| referenced.contains(a))
         };
-        let live_undef: Vec<String> = tab
+        let mut live_undef: Vec<String> = tab
             .undefined
             .iter()
             .filter(|s| !is_script_name(s) && is_referenced(s))
             .cloned()
             .collect();
+        // The entry symbol may not appear in `tab.undefined` (no
+        // object references it via reloc), but if no loaded object
+        // currently defines it we still need to pull it from the
+        // archive. Include it explicitly the first time it is
+        // missing.
+        if let Some(ref e) = entry_root {
+            let defined = tab.symbols.contains_key(e)
+                || resolve::name_aliases(e)
+                    .iter()
+                    .any(|a| tab.symbols.contains_key(a));
+            if !defined && !live_undef.iter().any(|s| s == e) {
+                live_undef.push(e.clone());
+            }
+        }
         if live_undef.is_empty() {
             break tab;
         }

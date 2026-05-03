@@ -312,12 +312,15 @@ pub fn parse_args(args: &[String]) -> Result<Options> {
         return Err(Error::Usage(format!("unknown processor: {processor}")));
     }
 
-    // Default bcode: SPI and OSPI use bcode=1, all other modes use bcode=0.
+    // Default bcode = 1 for every boot mode the ADSP-21569 ROM accepts.
+    // The boot ROM reads bcode from each block's BCMD byte0; 0 means
+    // "ignore this block" and leaves the boot stream parser sitting
+    // on a marker that never advances, which the host UART loader
+    // observes as a silent boot (the DSP starts but the IVT was not
+    // populated). elfloader uses 1 for SPI/OSPI/UARTHOST/LPHOST/SPIHOST
+    // alike, so default to 1 here too.
     if bcode.is_none() {
-        bcode = Some(match boot_mode {
-            BootMode::Spi | BootMode::Ospi => 1,
-            _ => 0,
-        });
+        bcode = Some(1);
     }
 
     Ok(Options {
@@ -383,7 +386,23 @@ mod tests {
             "input.dxe",
         ]))
         .unwrap();
-        assert_eq!(opts.bcode, Some(0));
+        // Every supported boot mode now defaults to bcode=1; bcode=0
+        // told the boot ROM to ignore the block and silently abandon
+        // the load.
+        assert_eq!(opts.bcode, Some(1));
+    }
+
+    #[test]
+    fn test_uarthost_default_bcode() {
+        let opts = parse_args(&args(&[
+            "-proc",
+            "ADSP-21569",
+            "-b",
+            "UARTHOST",
+            "input.dxe",
+        ]))
+        .unwrap();
+        assert_eq!(opts.bcode, Some(1));
     }
 
     #[test]

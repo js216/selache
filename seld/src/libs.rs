@@ -126,16 +126,24 @@ pub fn load_archives(
         seen.push(name.clone());
         let path = find_in_lib_paths(name, lib_paths)
             .ok_or_else(|| Error::Usage(format!("library `{name}` not found on any -L path")))?;
-        let data = std::fs::read(&path)?;
-        let archive = selelf::archive::read(&data).map_err(Error::Shared)?;
-        let pulled = vec![false; archive.members.len()];
-        out.push(LoadedArchive {
-            path,
-            archive,
-            pulled,
-        });
+        out.push(load_archive_at(path)?);
     }
     Ok(out)
+}
+
+/// Load a single archive from an explicit path. Used both internally
+/// from `load_archives` (after `-L` resolution) and from the input-file
+/// loop in `lib.rs` so that `.dlb` archives passed on the command line
+/// behave like archives declared in the LDF's `$LIBRARIES` list.
+pub fn load_archive_at(path: PathBuf) -> Result<LoadedArchive> {
+    let data = std::fs::read(&path)?;
+    let archive = selelf::archive::read(&data).map_err(Error::Shared)?;
+    let pulled = vec![false; archive.members.len()];
+    Ok(LoadedArchive {
+        path,
+        archive,
+        pulled,
+    })
 }
 
 /// Locate and load every CRT object file into `InputObject` records.

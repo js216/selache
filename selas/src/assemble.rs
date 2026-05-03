@@ -49,34 +49,51 @@ impl SectionData {
 
 /// Parse a `.SECTION` name string produced by the parser.
 ///
-/// The parser yields strings like `"PM seg_pmco;"` (after stripping the
-/// leading `/`).  We extract the qualifier (PM, SW, DM, DOUBLE32) and the
-/// bare section name (without trailing semicolons or whitespace).
+/// SHARC+ section directives can stack any number of slash-separated
+/// qualifiers between the keyword and the bare section name, e.g.
+///
+///     .SECTION/PM seg_pmco;
+///     .SECTION/SW seg_swco;
+///     .SECTION/DOUBLE32 seg_dmda;
+///     .SECTION/CODE/DOUBLEANY seg_pmco;
+///     .SECTION/CODE/NW/DOUBLEANY iv_code;
+///
+/// The parser hands us the substring after the keyword (still leading
+/// `/` and trailing `;`). Strip the qualifier chain and return the bare
+/// name plus whether any qualifier in the chain implies program memory
+/// (PM / SW / CODE). The LDF matches sections by bare name, so emitting
+/// `"CODE/NW/DOUBLEANY iv_code"` as the section name causes
+/// `INPUT_SECTIONS( $OBJECTS(iv_code) )` to never match anything; the
+/// output binary then ships without an IVT, a startup vector, or any
+/// of the runtime objects.
+///
 /// `DOUBLE32` is a byte-addressed DM variant with 32-bit-aligned words
 /// that a cross-section `R1 = symbol.;` reference from a code section
 /// can resolve against; the word-addressed `DM` qualifier rejects such
 /// relocations at link time.
 fn parse_section_name(raw: &str) -> (String, bool) {
     let s = raw.trim().trim_end_matches(';').trim();
-    let upper = s.to_uppercase();
-
-    // Order matters: longer keywords first so "DOUBLE32" is not misread as "DM".
-    for (kw, is_pm) in [
-        ("DOUBLE32", false),
-        ("PM", true),
-        ("SW", true),
-        ("DM", false),
-    ] {
-        if upper.starts_with(kw) {
-            let name = s[kw.len()..].trim();
-            if !name.is_empty() {
-                return (name.to_string(), is_pm);
-            }
+    // The parser preserves the leading `/`; strip it so the rest can
+    // be split as a qualifier list.
+    let s = s.strip_prefix('/').unwrap_or(s);
+    // Split off the bare name: the section name is the final
+    // whitespace-separated token. Everything before it is a chain of
+    // slash-separated qualifiers.
+    let (qualifier_str, name) = match s.rsplit_once(char::is_whitespace) {
+        Some((q, n)) => (q, n.trim()),
+        None => ("", s),
+    };
+    if name.is_empty() {
+        return (s.to_string(), false);
+    }
+    let mut is_pm = false;
+    for tok in qualifier_str.split('/') {
+        let upper = tok.trim().to_uppercase();
+        if matches!(upper.as_str(), "PM" | "SW" | "CODE") {
+            is_pm = true;
         }
     }
-
-    // No qualifier: default to non-PM.
-    (s.to_string(), false)
+    (name.to_string(), is_pm)
 }
 
 /// Initializer value for a `.VAR` directive.

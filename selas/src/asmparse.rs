@@ -4388,6 +4388,7 @@ fn is_ignored_directive(upper: &str) -> bool {
         || upper.starts_with(".MESSAGE")
         || upper.starts_with(".STRUCT")
         || upper.starts_with(".COMPRESS")
+        || upper.starts_with(".NOCOMPRESS")
 }
 
 fn strip_comment(line: &str) -> &str {
