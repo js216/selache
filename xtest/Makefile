@@ -8,9 +8,9 @@ SHELL := /bin/bash
 
 R := $(abspath ..)
 
-CC21K     ?= cc21k
-EASM21K   ?= easm21k
-ELFLOADER ?= elfloader
+CC21K     ?= /opt/cces-qemu/cc21k
+EASM21K   ?= /opt/cces-qemu/easm21k
+ELFLOADER ?= /opt/cces-qemu/elfloader
 ELFAR     ?= /opt/analog/cces/3.0.3/elfar
 
 SELCC    := $(R)/target/release/selcc
