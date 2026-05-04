@@ -85,11 +85,12 @@ $(BUILD)/$(1)/%.run: cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/$(1)
 	$$(Q)got=$$$$($$(BUILD)/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
 	    if [ -z "$$$$got" ]; then \
-	        echo "$(1) $$*: no 'got NN' output (binary crashed or produced nothing)"; exit 1; \
+	        echo "$(1) $$* FAIL: no 'got NN' output (crashed or empty)"; exit 1; \
 	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
-	        echo "$(1) $$*: expect=$$$$expect got=0x$$$$got"; exit 1; \
-	    fi
+	        echo "$(1) $$* FAIL: expect=$$$$expect got=0x$$$$got"; exit 1; \
+	    fi; \
+	    echo "$(1) $$* PASS"
 	$$(Q)touch $$@
 endef
 
@@ -146,7 +147,8 @@ $(BUILD)/cces/%.ldr: cases/%.c $(CCES_ARCHIVE) | $(BUILD)/cces
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/cces/$*.0x*.ldr; \
-	    cp $@ $(BUILD)/cces/$*.$$hex.ldr
+	    cp $@ $(BUILD)/cces/$*.$$hex.ldr; \
+	    echo "cces $* BUILT expect=$$hex"
 
 # Per-case sel .ldr. Same stem/encoded-sibling layout as cces.
 $(BUILD)/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) | $(BUILD)/sel
@@ -159,7 +161,8 @@ $(BUILD)/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) | $(BUILD)/sel
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/sel/$*.0x*.ldr; \
-	    cp $@ $(BUILD)/sel/$*.$$hex.ldr
+	    cp $@ $(BUILD)/sel/$*.$$hex.ldr; \
+	    echo "sel $* BUILT expect=$$hex"
 
 # === drafts: same sweep applied to draft_cases/ ===
 # Mirrors the cases/ rules but reads from draft_cases/ and writes to
@@ -188,11 +191,12 @@ $$(BUILD)/drafts/$(1)/%.run: draft_cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/d
 	$$(Q)got=$$$$($$(BUILD)/drafts/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
 	    if [ -z "$$$$got" ]; then \
-	        echo "$(1) (draft) $$*: no 'got NN' output (binary crashed or produced nothing)"; exit 1; \
+	        echo "$(1) (draft) $$* FAIL: no 'got NN' output (crashed or empty)"; exit 1; \
 	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
-	        echo "$(1) (draft) $$*: expect=$$$$expect got=0x$$$$got"; exit 1; \
-	    fi
+	        echo "$(1) (draft) $$* FAIL: expect=$$$$expect got=0x$$$$got"; exit 1; \
+	    fi; \
+	    echo "$(1) (draft) $$* PASS"
 	$$(Q)touch $$@
 endef
 
@@ -209,7 +213,8 @@ $(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cc
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/drafts/cces/$*.0x*.ldr; \
-	    cp $@ $(BUILD)/drafts/cces/$*.$$hex.ldr
+	    cp $@ $(BUILD)/drafts/cces/$*.$$hex.ldr; \
+	    echo "cces (draft) $* BUILT expect=$$hex"
 
 $(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) | $(BUILD)/drafts/sel
 	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/drafts/sel/$*.s $<
@@ -221,4 +226,5 @@ $(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) | $(BUILD)/drafts/sel
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/drafts/sel/$*.0x*.ldr; \
-	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr
+	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr; \
+	    echo "sel (draft) $* BUILT expect=$$hex"
