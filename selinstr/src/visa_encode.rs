@@ -614,6 +614,20 @@ fn falu_to_23bit(falu: &FaluOp) -> Option<u32> {
 }
 
 fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
+    // MR-register transfers (`Rn = MRxF/B`, `MRxF/B = Rn`) live in
+    // their own sub-encoding inside the 23-bit compute field rather
+    // than in the MULOP opcode table. Detect them up front so the
+    // 32-bit Type 2b short form picks up the correct bit pattern that
+    // matches the 48-bit ISA encoder (and easm21k/elfdump on
+    // hardware).
+    if let Some((t, ai, rk)) = mr_transfer_fields(mul) {
+        if rk > 15 {
+            return None;
+        }
+        return Some(
+            1u32 << 22 | (t as u32) << 16 | ((ai as u32) & 0xF) << 12 | ((rk as u32) & 0xF) << 8,
+        );
+    }
     // Opcodes match the 48-bit `encode_mul`; the 32-bit VISA
     // short-compute form shares the full 8-bit opcode field with
     // the 48-bit form.
@@ -634,13 +648,37 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
         MulOp::ClrMrf => (0x14, 0, 0, 0),
         MulOp::ClrMrb => (0x16, 0, 0, 0),
         MulOp::FMul { rn, rx, ry } => (0x30, rn, rx, ry),
-        _ => return None, // TRNC, MR read/write etc.
+        _ => return None, // TRNC etc.
     };
     if rn > 15 || rx > 15 || ry > 15 {
         return None;
     }
     // cu=1 (MUL), multi=0
     Some(1u32 << 20 | (opcode as u32) << 12 | (rn as u32) << 8 | (rx as u32) << 4 | ry as u32)
+}
+
+/// Return `(t, ai, rk)` for MR-transfer ops (`Rn = MRxF/B` /
+/// `MRxF/B = Rn`), or `None` otherwise. `t = 0` means read MR -> Rn,
+/// `t = 1` means write Rn -> MR; `ai` is the MR-register selector
+/// (0=MR0F, 1=MR1F, 2=MR2F, 4=MR0B, 5=MR1B, 6=MR2B); `rk` is the
+/// data register.
+fn mr_transfer_fields(mul: &MulOp) -> Option<(u8, u8, u16)> {
+    let triple = match *mul {
+        MulOp::ReadMr0f { rn } => (0u8, 0u8, rn),
+        MulOp::ReadMr1f { rn } => (0, 1, rn),
+        MulOp::ReadMr2f { rn } => (0, 2, rn),
+        MulOp::ReadMr0b { rn } => (0, 4, rn),
+        MulOp::ReadMr1b { rn } => (0, 5, rn),
+        MulOp::ReadMr2b { rn } => (0, 6, rn),
+        MulOp::WriteMr0f { rn } => (1, 0, rn),
+        MulOp::WriteMr1f { rn } => (1, 1, rn),
+        MulOp::WriteMr2f { rn } => (1, 2, rn),
+        MulOp::WriteMr0b { rn } => (1, 4, rn),
+        MulOp::WriteMr1b { rn } => (1, 5, rn),
+        MulOp::WriteMr2b { rn } => (1, 6, rn),
+        _ => return None,
+    };
+    Some(triple)
 }
 
 fn shift_to_23bit(shift: &ShiftOp) -> Option<u32> {

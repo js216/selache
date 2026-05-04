@@ -919,6 +919,30 @@ fn encode_falu(op: &FaluOp) -> Result<u32, EncodeError> {
 }
 
 fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
+    // MR register reads and writes use a dedicated "MR transfer"
+    // sub-encoding inside the 23-bit compute field, distinct from the
+    // standard MULOP table. Per the SHARC instruction set reference
+    // ("Computations Reference", `Rn = MRxF/B` / `MRxF/B = Rn`), the
+    // compute field is laid out as:
+    //
+    //   bits[22:17] = 0b100000 (fixed transfer marker, sets bit 22)
+    //   bit[16]     = T (0 = read MR -> Rn, 1 = write Rn -> MR)
+    //   bits[15:12] = Ai (MR register selector)
+    //   bits[11:8]  = Rk (data register)
+    //   bits[7:0]   = 0
+    //
+    //   Ai: 0=MR0F, 1=MR1F, 2=MR2F, 4=MR0B, 5=MR1B, 6=MR2B
+    //
+    // The previous encoder put these ops in the MUL slot (cu=1) with
+    // the Ai value as the 8-bit MULOP opcode, which on real silicon
+    // decodes as a multiplier op (e.g. `Rn = MR1F` ran as a `MUL`
+    // table entry that did not transfer the accumulator and returned
+    // a wrong dreg value, breaking 64-bit multiply chains in the
+    // libsel `atoll` lowering and any other callee that reads MRxF
+    // after `MRF = Rx*Ry (SSI)`).
+    if let Some(field) = encode_mr_transfer(op)? {
+        return Ok(field);
+    }
     // MULOP opcode at bits[19:12] when CU = 01. The 8-bit field
     // uses structured templates where y = signed-Y, x = signed-X,
     // f = fractional, r = round-to-nearest:
@@ -977,28 +1001,58 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
         // unsigned-integer multiply-accumulate through mrf on
         // real silicon and returned 0.
         MulOp::FMul { rn, rx, ry } => (0x30, rn, rx, ry),
-        // MR register read/write moves use an MR-transfer
-        // sub-encoding that is not part of the compute-field
-        // opcode table above; keep the previous values until a
-        // follow-up audit verifies them.
-        MulOp::ReadMr0f { rn } => (0x00, rn, 0, 0),
-        MulOp::ReadMr1f { rn } => (0x01, rn, 0, 0),
-        MulOp::ReadMr2f { rn } => (0x02, rn, 0, 0),
-        MulOp::ReadMr0b { rn } => (0x04, rn, 0, 0),
-        MulOp::ReadMr1b { rn } => (0x05, rn, 0, 0),
-        MulOp::ReadMr2b { rn } => (0x06, rn, 0, 0),
-        MulOp::WriteMr0f { rn } => (0x10, rn, 0, 0),
-        MulOp::WriteMr1f { rn } => (0x11, rn, 0, 0),
-        MulOp::WriteMr2f { rn } => (0x12, rn, 0, 0),
-        MulOp::WriteMr0b { rn } => (0x20, rn, 0, 0),
-        MulOp::WriteMr1b { rn } => (0x21, rn, 0, 0),
-        MulOp::WriteMr2b { rn } => (0x22, rn, 0, 0),
+        // ReadMr* / WriteMr* are handled above by `encode_mr_transfer`.
+        MulOp::ReadMr0f { .. }
+        | MulOp::ReadMr1f { .. }
+        | MulOp::ReadMr2f { .. }
+        | MulOp::ReadMr0b { .. }
+        | MulOp::ReadMr1b { .. }
+        | MulOp::ReadMr2b { .. }
+        | MulOp::WriteMr0f { .. }
+        | MulOp::WriteMr1f { .. }
+        | MulOp::WriteMr2f { .. }
+        | MulOp::WriteMr0b { .. }
+        | MulOp::WriteMr1b { .. }
+        | MulOp::WriteMr2b { .. } => {
+            unreachable!("MR transfers are encoded by encode_mr_transfer")
+        }
     };
     check_reg4("MUL rn", rn)?;
     check_reg4("MUL rx", rx)?;
     check_reg4("MUL ry", ry)?;
     // CU = 1 for MUL
     Ok(compute_field(1, opcode, rn, rx, ry))
+}
+
+/// Encode the MR-transfer sub-form of a `Mul` op into the 23-bit
+/// compute field. Returns `Ok(Some(field))` for the read/write MR
+/// variants and `Ok(None)` for everything else, leaving the regular
+/// MULOP path to handle non-transfer multiplier ops.
+///
+/// Layout (per the SHARC ISR, "Computations Reference"):
+/// `bits[22:17]=0b100000  bit[16]=T  bits[15:12]=Ai  bits[11:8]=Rk`,
+/// where `T=0` means `Rn = MRxF/B` and `T=1` means `MRxF/B = Rn`, and
+/// `Ai` selects the MR register (0=MR0F, 1=MR1F, 2=MR2F, 4=MR0B,
+/// 5=MR1B, 6=MR2B).
+fn encode_mr_transfer(op: &MulOp) -> Result<Option<u32>, EncodeError> {
+    let (t, ai, rk): (u32, u32, u16) = match *op {
+        MulOp::ReadMr0f { rn } => (0, 0, rn),
+        MulOp::ReadMr1f { rn } => (0, 1, rn),
+        MulOp::ReadMr2f { rn } => (0, 2, rn),
+        MulOp::ReadMr0b { rn } => (0, 4, rn),
+        MulOp::ReadMr1b { rn } => (0, 5, rn),
+        MulOp::ReadMr2b { rn } => (0, 6, rn),
+        MulOp::WriteMr0f { rn } => (1, 0, rn),
+        MulOp::WriteMr1f { rn } => (1, 1, rn),
+        MulOp::WriteMr2f { rn } => (1, 2, rn),
+        MulOp::WriteMr0b { rn } => (1, 4, rn),
+        MulOp::WriteMr1b { rn } => (1, 5, rn),
+        MulOp::WriteMr2b { rn } => (1, 6, rn),
+        _ => return Ok(None),
+    };
+    check_reg4("MR transfer rk", rk)?;
+    let field = (1u32 << 22) | (t << 16) | ((ai & 0xF) << 12) | (((rk as u32) & 0xF) << 8);
+    Ok(Some(field))
 }
 
 fn encode_shift(op: &ShiftOp) -> Result<u32, EncodeError> {

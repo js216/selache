@@ -535,6 +535,30 @@ fn decode_32_compute(field: u32) -> String {
     if field == 0 {
         return "nop".into();
     }
+    // MR-register transfer (`Rn = MRxF/B` or `MRxF/B = Rn`):
+    // `bits[22:17]=0b100000  bit[16]=T  bits[15:12]=Ai
+    //  bits[11:8]=Rk  bits[7:0]=0`. Recognise it before the regular
+    // ALU/MUL/SHIFT split so the round-trip matches the 48-bit
+    // disassembler.
+    if (field >> 17) & 0x3F == 0b100000 && field & 0xFF == 0 {
+        let t = (field >> 16) & 1;
+        let ai = (field >> 12) & 0xF;
+        let rk = (field >> 8) & 0xF;
+        let mr = match ai {
+            0 => "mr0f",
+            1 => "mr1f",
+            2 => "mr2f",
+            4 => "mr0b",
+            5 => "mr1b",
+            6 => "mr2b",
+            _ => return format!("mr-transfer(0x{field:06x})"),
+        };
+        return if t == 0 {
+            format!("r{rk}={mr}")
+        } else {
+            format!("{mr}=r{rk}")
+        };
+    }
     let cu = (field >> 20) & 3;
     let opcode = ((field >> 12) & 0xFF) as u8;
     let rn = (field >> 8) & 0xF;
@@ -560,20 +584,12 @@ fn decode_32_alu(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
     };
 
     match opcode {
-        // MR register reads (rx=ry=0 distinguishes from arithmetic)
-        0x00 if rx == 0 && ry == 0 => format!("r{rn}=mr0f"),
-        0x01 if rx == 0 && ry == 0 => format!("r{rn}=mr1f"),
-        0x02 if rx == 0 && ry == 0 => format!("r{rn}=mr2f"),
-        0x04 if rx == 0 && ry == 0 => format!("r{rn}=mr0b"),
-        0x05 if rx == 0 && ry == 0 => format!("r{rn}=mr1b"),
-        0x06 if rx == 0 && ry == 0 => format!("r{rn}=mr2b"),
-        // MR register writes (rx=ry=0)
-        0x10 => format!("mr0f=r{rn}"),
-        0x11 => format!("mr1f=r{rn}"),
-        0x12 => format!("mr2f=r{rn}"),
-        0x14 => format!("mr0b=r{rn}"),
-        0x15 => format!("mr1b=r{rn}"),
-        0x16 => format!("mr2b=r{rn}"),
+        // MR register transfers (reads at 0x00..0x06, writes at
+        // 0x10..0x16) are encoded with `bit[22]=1` and a dedicated
+        // sub-layout, decoded ahead of this function in
+        // `decode_32_compute`. Reaching this arm means `bit[22]=0`,
+        // i.e. a real ALU compute. Fall through to the integer/FP
+        // tables below.
         // Standard ALU (integer)
         0x01 => format!("r{rn}=r{rx}+r{ry}"),
         0x02 => format!("r{rn}=r{rx}-r{ry}"),

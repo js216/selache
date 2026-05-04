@@ -265,6 +265,16 @@ fn decode_compute(field: u32) -> String {
     }
     let multi = (field >> 22) & 1;
     if multi == 1 {
+        // MR-register transfer (per the SHARC ISR Computations
+        // Reference) sets bit[22] but encodes a single-function MR
+        // move, not a parallel multi-compute. Its layout is
+        // `bits[22:17]=0b100000  bit[16]=T  bits[15:12]=Ai
+        //  bits[11:8]=Rk  bits[7:0]=0`, with `T=0` for `Rn = MRxF/B`
+        // and `T=1` for `MRxF/B = Rn`. Recognise it before falling
+        // through to the multifunction decoder.
+        if (field >> 17) & 0x3F == 0b100000 && field & 0xFF == 0 {
+            return decode_mr_transfer(field);
+        }
         return decode_multifunction(field);
     }
     let cu = (field >> 20) & 3;
@@ -278,6 +288,27 @@ fn decode_compute(field: u32) -> String {
         1 => decode_mul(opcode, rn, rx, ry),
         2 => decode_shift(opcode, rn, rx, ry),
         _ => format!("COMPUTE(0x{field:06X})"),
+    }
+}
+
+fn decode_mr_transfer(field: u32) -> String {
+    let t = (field >> 16) & 1;
+    let ai = (field >> 12) & 0xF;
+    let rk = (field >> 8) & 0xF;
+    let mr = match ai {
+        0 => "MR0F",
+        1 => "MR1F",
+        2 => "MR2F",
+        4 => "MR0B",
+        5 => "MR1B",
+        6 => "MR2B",
+        _ => return format!("MR-TRANSFER(0x{field:06X})"),
+    };
+    let dr = dreg(rk, false);
+    if t == 0 {
+        format!("{dr} = {mr}")
+    } else {
+        format!("{mr} = {dr}")
     }
 }
 
@@ -349,30 +380,25 @@ fn decode_alu(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
 fn decode_mul(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
     // Mirror of `encode_mul`; see the comment there for the
     // structured opcode templates.
+    //
+    // MR-register transfers (`Rn = MRxF/B`, `MRxF/B = Rn`) live in
+    // their own sub-encoding with `bit[22]=1`, decoded ahead of
+    // `decode_mul` in `decode_compute`. They are NOT reachable here:
+    // reaching this arm with cu=1 means a real multiplier op, not an
+    // MR move. The earlier 0x00..0x06 / 0x10..0x12 / 0x20..0x22
+    // MR-transfer arms in this match were left over from the buggy
+    // encoder that put MR moves into the MUL slot, which on real
+    // silicon ran a multiplier op instead of transferring MRxF/B.
     let r = |i: u32| dreg(i, false);
     let f = |i: u32| dreg(i, true);
     match opcode {
-        // MR register reads: Rn = MRxF/MRxB
-        0x00 => format!("{} = MR0F", r(rn)),
-        0x01 => format!("{} = MR1F", r(rn)),
-        0x02 => format!("{} = MR2F", r(rn)),
-        0x04 => format!("{} = MR0B", r(rn)),
-        0x05 => format!("{} = MR1B", r(rn)),
-        0x06 => format!("{} = MR2B", r(rn)),
         0x08 => format!("{} = SAT MRF", r(rn)),
         0x0A => format!("{} = SAT MRB", r(rn)),
-        // MR register writes: MRxF/MRxB = Rn
-        0x10 => format!("MR0F = {}", r(rn)),
-        0x11 => format!("MR1F = {}", r(rn)),
-        0x12 => format!("MR2F = {}", r(rn)),
         0x14 => "MRF = 0".into(),
         0x16 => "MRB = 0".into(),
         0x18 => "MRF = TRNC MRF".into(),
         0x1A => "MRB = TRNC MRB".into(),
         0x1C => format!("{} = TRNC MRF", r(rn)),
-        0x20 => format!("MR0B = {}", r(rn)),
-        0x21 => format!("MR1B = {}", r(rn)),
-        0x22 => format!("MR2B = {}", r(rn)),
         0x1E => format!("{} = TRNC MRB", r(rn)),
         0x30 => format!("{} = {} * {}", f(rn), f(rx), f(ry)),
         0x4C => format!("MRF = {} * {} (UUF)", r(rx), r(ry)),
