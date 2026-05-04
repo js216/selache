@@ -1799,6 +1799,18 @@ fn ty_is_long_long(ty: &Type, ctx: &LowerCtx) -> bool {
     resolve_type_chain(ty, ctx).is_long_long()
 }
 
+/// Typedef-aware version of `Type::is_unsigned`.  `<stdint.h>` typedef
+/// names like `uint8_t` and `uint32_t` arrive at the lowering layer as
+/// `Type::Typedef("uint8_t")` and the bare `is_unsigned` method does
+/// not look through typedefs, so a `(uint8_t)x` cast or `(uint64_t)x`
+/// widening would be classified as signed and emit the wrong sign-/
+/// zero-extension.  Resolving the typedef chain first matches the
+/// signedness convention already used by `narrow_int_to_dst` (the
+/// store-side counterpart of cast-truncation).
+fn ty_is_unsigned(ty: &Type, ctx: &LowerCtx) -> bool {
+    resolve_type_chain(ty, ctx).is_unsigned()
+}
+
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
 /// These types are byte-packed in memory (four per 32-bit word) and
 /// require a dynamic shift+mask when read or written through a pointer
@@ -1815,6 +1827,50 @@ fn is_byte_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
 /// element.  Mirrors `is_byte_scalar`'s role for `char`-element data.
 fn is_short_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
     crate::types::size_bytes_ctx(ty.unqualified(), ctx) == 2
+}
+
+/// Normalize a 32-bit register value just loaded from a narrow scalar
+/// global (or static-local) so subsequent uses see the canonical
+/// sign-/zero-extended representation of the declared type.  Scalar
+/// globals occupy one full 32-bit DM word per object; the high bits are
+/// undefined-but-stable: the initialiser is emitted zero-padded
+/// (`.VAR g_x. = 0x000000E1`) while later writes go through
+/// `narrow_int_to_dst`, which sign-extends signed narrow types to fill
+/// the word.  Without this normalisation the very first load of a
+/// negative `int8_t = 0xE1` reports +225 instead of -31, so any
+/// `char -> int -> long long` widening (e.g.
+/// `transparent_crc((unsigned long long)g_23)`) sees the wrong sign and
+/// fails the CSmith CRC.  Mirrors `narrow_int_to_dst` (used on the
+/// store side) so the post-load and post-store representations match.
+fn narrow_normalize_load(ctx: &mut LowerCtx, val: VReg, ty: &Type) -> VReg {
+    let resolved = resolve_type_chain(ty, ctx);
+    // Floats, pointers, aggregates, longlong, anything int-sized: nothing to do.
+    if resolved.is_float() {
+        return val;
+    }
+    let bytes = crate::types::size_bytes_ctx(&resolved, ctx);
+    if bytes == 0 || bytes >= 4 {
+        return val;
+    }
+    let bits = bytes * 8;
+    let mask = (1u32 << bits).wrapping_sub(1) as i64;
+    let masked = ctx.alloc_vreg();
+    let mask_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_v, mask));
+    ctx.emit(IrOp::BitAnd(masked, val, mask_v));
+    if resolved.is_unsigned() || resolved == Type::Bool {
+        return masked;
+    }
+    let shift = (32 - bits) as i64;
+    let shl_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl_v, shift));
+    let up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(up, masked, shl_v));
+    let shr_v = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shr_v, -shift));
+    let dst = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(dst, up, shr_v));
+    dst
 }
 
 /// Emit a byte-granularity load from `addr` (a byte address that may
@@ -2812,6 +2868,17 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             ctx.alloc_vreg()
                         };
                         ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
+                        // Static locals occupy one full DM word per
+                        // narrow scalar; normalise the value so signed
+                        // narrow types are sign-extended and unsigned
+                        // narrow types have the high bits cleared
+                        // before any subsequent use sees them.
+                        let local_ty = ctx.local_types.get(name).cloned();
+                        let dst = if let Some(ty) = local_ty {
+                            narrow_normalize_load(ctx, dst, &ty)
+                        } else {
+                            dst
+                        };
                         Ok(dst)
                     }
                 }
@@ -2861,6 +2928,26 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.alloc_vreg()
                 };
                 ctx.emit(IrOp::ReadGlobal(dst, name.clone()));
+                // Scalar globals occupy one full DM word.  Initial
+                // values are emitted zero-padded into the high bits
+                // (`.VAR g_x. = 0x000000E1`) but later writes go
+                // through `narrow_int_to_dst` which sign-extends signed
+                // narrow types.  Normalise on every load so the
+                // post-init and post-write representations agree, and
+                // so a signed narrow type promoted to int (or widened
+                // to long long for an `unsigned long long` parameter)
+                // sees the C-canonical sign-extended value rather than
+                // the raw zero-padded bit pattern.
+                let glob_ty = ctx.globals.get(name).cloned();
+                let dst = if let Some(ty) = glob_ty {
+                    if !is_global_ptr && !is_global_float {
+                        narrow_normalize_load(ctx, dst, &ty)
+                    } else {
+                        dst
+                    }
+                } else {
+                    dst
+                };
                 Ok(dst)
             } else if let Some(&val) = ctx.enum_constants.get(name) {
                 let dst = ctx.alloc_vreg();
@@ -3524,7 +3611,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     let tmp = ctx.alloc_vreg();
                     ctx.emit(IrOp::FloatToInt(tmp, val));
                     let dst = ctx.alloc_vreg_pair();
-                    if ty.is_unsigned() {
+                    if ty_is_unsigned(ty, ctx) {
                         ctx.emit(IrOp::IntToLongLong(dst, tmp));
                     } else {
                         ctx.emit(IrOp::SExtToLongLong(dst, tmp));
@@ -3532,7 +3619,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     return Ok(dst);
                 }
                 let dst = ctx.alloc_vreg_pair();
-                if ty.is_unsigned() {
+                if ty_is_unsigned(ty, ctx) {
                     ctx.emit(IrOp::IntToLongLong(dst, val));
                 } else {
                     ctx.emit(IrOp::SExtToLongLong(dst, val));
@@ -3572,7 +3659,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     let mask_v = ctx.alloc_vreg();
                     ctx.emit(IrOp::LoadImm(mask_v, mask));
                     ctx.emit(IrOp::BitAnd(masked, val, mask_v));
-                    if ty.is_unsigned() {
+                    if ty_is_unsigned(ty, ctx) {
                         return Ok(masked);
                     }
                     // Sign-extend: shift left then arithmetic shift right.
@@ -4591,7 +4678,18 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                     LocalStorage::Static(sym) => {
                         let dst = ctx.alloc_vreg();
                         ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
-                        dst
+                        // Normalise narrow signed/unsigned scalars: a
+                        // static `int8_t c = 0xE1;` lives in a full DM
+                        // word and the high bits depend on whether
+                        // initialisation or a previous write was the
+                        // last touch. Without normalisation, ++c on a
+                        // not-yet-written slot reads 225 instead of -31
+                        // and produces 226 instead of -30.
+                        if let Some(ty) = ctx.local_types.get(name).cloned() {
+                            narrow_normalize_load(ctx, dst, &ty)
+                        } else {
+                            dst
+                        }
                     }
                 };
                 let one = ctx.alloc_vreg();
@@ -4602,6 +4700,16 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                 } else {
                     ctx.emit(IrOp::Sub(new_val, old_val, one));
                 }
+                // Truncate the post-inc value back to the declared
+                // narrow type.  The store-side uniformly sign-extends
+                // signed narrow types so the in-memory representation
+                // stays in canonical form for the next reader.
+                let local_ty = ctx.local_types.get(name).cloned();
+                let new_val = if let Some(ref ty) = local_ty {
+                    coerce_vreg(ctx, new_val, ty)
+                } else {
+                    new_val
+                };
                 match &storage {
                     LocalStorage::Stack(offset) => {
                         ctx.emit(IrOp::Store(new_val, 0, *offset as i32));
@@ -4623,6 +4731,12 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                 // Global variable increment/decrement
                 let old_val = ctx.alloc_vreg();
                 ctx.emit(IrOp::ReadGlobal(old_val, name.clone()));
+                let glob_ty = ctx.globals.get(name).cloned();
+                let old_val = if let Some(ref ty) = glob_ty {
+                    narrow_normalize_load(ctx, old_val, ty)
+                } else {
+                    old_val
+                };
                 let one = ctx.alloc_vreg();
                 ctx.emit(IrOp::LoadImm(one, stride));
                 let new_val = ctx.alloc_vreg();
@@ -4631,6 +4745,11 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                 } else {
                     ctx.emit(IrOp::Sub(new_val, old_val, one));
                 }
+                let new_val = if let Some(ref ty) = glob_ty {
+                    coerce_vreg(ctx, new_val, ty)
+                } else {
+                    new_val
+                };
                 ctx.emit(IrOp::StoreGlobal(new_val, name.clone()));
                 if is_pre {
                     Ok(new_val)
@@ -4861,7 +4980,15 @@ fn lower_compound_assign(
                             ctx.alloc_vreg()
                         };
                         ctx.emit(IrOp::ReadGlobal(dst, sym.clone()));
-                        dst
+                        if !target_is_float {
+                            if let Some(ty) = ctx.local_types.get(name).cloned() {
+                                narrow_normalize_load(ctx, dst, &ty)
+                            } else {
+                                dst
+                            }
+                        } else {
+                            dst
+                        }
                     }
                 };
                 let rhs = lower_expr(ctx, value)?;
@@ -4890,6 +5017,15 @@ fn lower_compound_assign(
                     ctx.alloc_vreg()
                 };
                 ctx.emit(IrOp::ReadGlobal(lhs, name.clone()));
+                let lhs = if !target_is_float {
+                    if let Some(ty) = ctx.globals.get(name).cloned() {
+                        narrow_normalize_load(ctx, lhs, &ty)
+                    } else {
+                        lhs
+                    }
+                } else {
+                    lhs
+                };
                 let rhs = lower_expr(ctx, value)?;
                 let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
                 let mut result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;

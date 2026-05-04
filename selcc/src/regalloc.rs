@@ -845,7 +845,60 @@ impl Allocator {
         };
 
         // Emit any spill/reload instructions before the main instruction.
-        out.extend(spill_pre);
+        //
+        // isel emits a three-instruction sandwich (`Modify(I6, K);
+        // <access at offset 0>; Modify(I6, -K)`) for any frame slot
+        // outside the Type-4 6-bit signed range, and the same shape
+        // wraps `FrameAddr` reads of large frame offsets (`Modify;
+        // UregTransfer; Modify`).  Inside the sandwich, I6 is
+        // temporarily offset by K, so anything that touches I6 in
+        // between -- in particular `emit_spill_access` injected by
+        // `get_phys` for the inner instruction's operands -- lands at
+        // an offset shifted by K.  spill_pre reaches the local frame
+        // at the wrong slot and the value the inner access intended
+        // to load (the actual frame offset K) is read instead from
+        // (K + spill_slot), trashing both the spilled value and the
+        // local read.
+        //
+        // Detect that `out` already contains the opening Modify of
+        // such a sandwich and reposition the spill_pre BEFORE it so
+        // the spill access runs against an unmodified I6.  The opening
+        // Modify is recognised by `i_reg == FRAME_PTR` with a non-zero
+        // value and the current rewritten instruction being one of the
+        // sandwich-inner shapes (frame-relative `ComputeLoadStore` or
+        // `UregTransfer` reading I6) at `offset == 0`.
+        let needs_pre_modify_swap = !spill_pre.is_empty()
+            && matches!(
+                out.last().map(|m| &m.instr),
+                Some(Instruction::Modify { i_reg, value, .. })
+                    if *i_reg == target::FRAME_PTR && *value != 0
+            )
+            && match &new_instr {
+                Instruction::ComputeLoadStore {
+                    access:
+                        MemAccess {
+                            i_reg, ..
+                        },
+                    offset,
+                    ..
+                } => *i_reg == target::FRAME_PTR && *offset == 0,
+                Instruction::UregTransfer { src_ureg, .. } => {
+                    // Only the I6-as-source FrameAddr shape benefits
+                    // from this swap; other UregTransfer calls do not
+                    // touch I6 at all.
+                    let frame_ureg = target::ureg_i(target::FRAME_PTR);
+                    *src_ureg == frame_ureg
+                }
+                _ => false,
+            };
+
+        if needs_pre_modify_swap {
+            let prev_modify = out.pop().expect("len-checked above");
+            out.extend(spill_pre);
+            out.push(prev_modify);
+        } else {
+            out.extend(spill_pre);
+        }
         out.push(MachInstr {
             instr: new_instr,
             reloc: mi.reloc.clone(),
