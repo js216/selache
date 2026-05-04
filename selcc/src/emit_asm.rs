@@ -102,6 +102,23 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         .map(|f| (f.name.clone(), f.return_type.clone()))
         .collect();
 
+    // Map each callee's parameter type list so per-call lowering can
+    // honour C99 6.5.2.2p7 ("converted as if by assignment to the
+    // types of the corresponding parameters"). Without this, a 32-bit
+    // `uint32_t` argument passed to a `unsigned long long` parameter
+    // would be emitted as a single ABI slot, leaving the high word
+    // of the 64-bit pair stale in the callee's incoming registers.
+    let function_param_types: HashMap<String, Vec<crate::types::Type>> = unit
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|(_, t)| t.clone()).collect(),
+            )
+        })
+        .collect();
+
     // Compile each function, threading static locals produced by earlier
     // functions back in as visible globals for later ones.
     let mut all_static_locals: Vec<lower::StaticLocal> = Vec::new();
@@ -132,6 +149,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         variadic_named_counts: &unit.variadic_named_counts,
         complex_arg_callees: &unit.complex_arg_callees,
         function_return_types: &function_return_types,
+        function_param_types: &function_param_types,
     };
     for func in &unit.functions {
         let mut func_global_types = global_types.clone();
@@ -1462,6 +1480,7 @@ struct UnitCtx<'a> {
     variadic_named_counts: &'a HashMap<String, usize>,
     complex_arg_callees: &'a HashSet<String>,
     function_return_types: &'a HashMap<String, crate::types::Type>,
+    function_param_types: &'a HashMap<String, Vec<crate::types::Type>>,
 }
 
 /// Run the per-function pipeline and return the final machine-instruction
@@ -1472,14 +1491,18 @@ fn emit_function_instrs(
     global_types: &HashMap<String, crate::types::Type>,
     unit: &UnitCtx<'_>,
 ) -> Result<FnEmitResult> {
+    let lower_unit = lower::LowerUnitCtx {
+        known_functions: unit.known_functions,
+        function_return_types: unit.function_return_types,
+        function_param_types: unit.function_param_types,
+    };
     let lower_result = lower::lower_function_with_known(
         func,
         global_types,
         unit.struct_defs,
         unit.enum_constants,
         unit.typedefs,
-        unit.known_functions,
-        unit.function_return_types,
+        &lower_unit,
     )?;
     let strings = lower_result.strings;
     let wide_strings = lower_result.wide_strings;

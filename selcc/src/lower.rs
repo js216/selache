@@ -106,6 +106,17 @@ struct LowerCtx {
     /// the caller can route the result through the R0:R1 / hidden-pointer
     /// ABI. Populated by `emit_module` before lowering each function.
     function_return_types: HashMap<String, Type>,
+    /// Parameter types of every function defined or declared in this
+    /// translation unit, keyed by function name. Used at call sites to
+    /// implement C99 6.5.2.2p7's "implicitly converted, as if by
+    /// assignment, to the types of the corresponding parameters" rule:
+    /// in particular, a 32-bit-or-narrower argument passed to a
+    /// `long long` parameter must be widened to a 64-bit pair before
+    /// it reaches the ABI register slots, otherwise the callee reads
+    /// the high word from a stale register and the value silently
+    /// loses sign / zero extension. Populated by `emit_module`
+    /// alongside `function_return_types`.
+    function_param_types: HashMap<String, Vec<Type>>,
     /// Frame slot (word index) holding the hidden struct-return pointer
     /// that the caller passed in R1 at entry. `Some` exactly when the
     /// current function returns a struct larger than
@@ -178,6 +189,7 @@ impl LowerCtx {
             switch_labels: Vec::new(),
             switch_label_idx: 0,
             function_return_types: HashMap::new(),
+            function_param_types: HashMap::new(),
             struct_ret_slot: None,
             va_named_slot_count: None,
         }
@@ -647,15 +659,33 @@ pub fn lower_function(
     enum_constants: &[(String, i64)],
     typedefs: &[(String, Type)],
 ) -> Result<LowerResult> {
+    let known = HashSet::new();
+    let returns = HashMap::new();
+    let params = HashMap::new();
+    let unit = LowerUnitCtx {
+        known_functions: &known,
+        function_return_types: &returns,
+        function_param_types: &params,
+    };
     lower_function_with_known(
         func,
         global_types,
         struct_defs,
         enum_constants,
         typedefs,
-        &HashSet::new(),
-        &HashMap::new(),
+        &unit,
     )
+}
+
+/// Translation-unit-level facts threaded into per-function lowering.
+/// Bundling the maps into a single struct keeps the public lowering
+/// entry-points under clippy's `too_many_arguments` threshold while
+/// still letting the call-lowering paths read every datum it needs to
+/// implement the C99 prototype-driven argument-conversion rules.
+pub struct LowerUnitCtx<'a> {
+    pub known_functions: &'a HashSet<String>,
+    pub function_return_types: &'a HashMap<String, Type>,
+    pub function_param_types: &'a HashMap<String, Vec<Type>>,
 }
 
 /// Lower a single function with a set of known function names for
@@ -667,8 +697,7 @@ pub fn lower_function_with_known(
     struct_defs: &[(String, Vec<(String, Type)>)],
     enum_constants: &[(String, i64)],
     typedefs: &[(String, Type)],
-    known_functions: &HashSet<String>,
-    function_return_types: &HashMap<String, Type>,
+    unit: &LowerUnitCtx<'_>,
 ) -> Result<LowerResult> {
     let mut ctx = LowerCtx::new();
     ctx.globals = global_types.clone();
@@ -676,8 +705,9 @@ pub fn lower_function_with_known(
     ctx.typedefs = typedefs.to_vec();
     ctx.func_name = func.name.clone();
     ctx.return_type = func.return_type.clone();
-    ctx.known_functions = known_functions.clone();
-    ctx.function_return_types = function_return_types.clone();
+    ctx.known_functions = unit.known_functions.clone();
+    ctx.function_return_types = unit.function_return_types.clone();
+    ctx.function_param_types = unit.function_param_types.clone();
     for (name, val) in enum_constants {
         ctx.enum_constants.insert(name.clone(), *val);
     }
@@ -2856,7 +2886,22 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     msg: format!("implicit declaration of function '{name}'"),
                 });
             }
-            let arg_vregs = lower_call_args(ctx, args)?;
+            // Resolve the callee's prototype so `lower_call_args_with_params`
+            // can implement C99 6.5.2.2p7 ("converted as if by assignment to
+            // the types of the corresponding parameters"). Direct call to a
+            // named function uses `function_param_types`; a call through a
+            // function-pointer variable falls back to its FunctionPtr type.
+            let param_tys_owned: Option<Vec<Type>> = lookup_callee_param_types(ctx, name)
+                .map(|p| p.to_vec())
+                .or_else(|| {
+                    expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
+                        .map(|p| p.to_vec())
+                });
+            let arg_vregs = lower_call_args_with_params(
+                ctx,
+                args,
+                param_tys_owned.as_deref(),
+            )?;
             // The destination vreg's float/int classification must match
             // the callee's return type. Without this, a function returning
             // `double` lands in a non-float vreg, and any downstream
@@ -2915,7 +2960,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::CallIndirect { func_expr, args } => {
             let func_addr = lower_expr(ctx, func_expr)?;
-            let arg_vregs = lower_call_args(ctx, args)?;
+            // Resolve the FunctionPtr's parameter types so 32-bit
+            // arguments bound to `long long` parameters still get
+            // widened to a 64-bit pair on the indirect path.
+            let param_tys_owned: Option<Vec<Type>> =
+                expr_function_ptr_param_types(func_expr, ctx).map(|p| p.to_vec());
+            let arg_vregs = lower_call_args_with_params(
+                ctx,
+                args,
+                param_tys_owned.as_deref(),
+            )?;
             // Mirror the float-vs-int classification fix from the direct
             // `Expr::Call` arm: an indirect callee whose return type is
             // `float`/`double` must yield a float vreg so downstream
@@ -3507,7 +3561,17 @@ fn lower_complex_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<ComplexPair> {
         // to a frame buffer in the deepest-slot-first layout, then
         // load real/imag back into vregs as a `ComplexPair`.
         Expr::Call { name, args } => {
-            let arg_vregs = lower_call_args(ctx, args)?;
+            let param_tys_owned: Option<Vec<Type>> = lookup_callee_param_types(ctx, name)
+                .map(|p| p.to_vec())
+                .or_else(|| {
+                    expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
+                        .map(|p| p.to_vec())
+                });
+            let arg_vregs = lower_call_args_with_params(
+                ctx,
+                args,
+                param_tys_owned.as_deref(),
+            )?;
             let slot = ctx.frame_size;
             ctx.frame_size += 2;
             let storage_slot = slot + 1; // deepest of the two
@@ -5896,7 +5960,17 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             }
             let ret_ty = ret_ty.unwrap();
             let num_words = type_size_words(&ret_ty, ctx).max(1);
-            let arg_vregs = lower_call_args(ctx, args)?;
+            let param_tys_owned: Option<Vec<Type>> = lookup_callee_param_types(ctx, name)
+                .map(|p| p.to_vec())
+                .or_else(|| {
+                    expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
+                        .map(|p| p.to_vec())
+                });
+            let arg_vregs = lower_call_args_with_params(
+                ctx,
+                args,
+                param_tys_owned.as_deref(),
+            )?;
             // Reserve the `num_words`-slot buffer and point the
             // destination address at the *deepest* slot: field 0 of an
             // aggregate lives at the highest address (deepest frame
@@ -5945,7 +6019,13 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let ret_ty = ret_ty.unwrap();
             let num_words = type_size_words(&ret_ty, ctx).max(1);
             let fn_addr = lower_expr(ctx, func_expr)?;
-            let arg_vregs = lower_call_args(ctx, args)?;
+            let param_tys_owned: Option<Vec<Type>> =
+                expr_function_ptr_param_types(func_expr, ctx).map(|p| p.to_vec());
+            let arg_vregs = lower_call_args_with_params(
+                ctx,
+                args,
+                param_tys_owned.as_deref(),
+            )?;
             // See direct-call branch for the rationale behind
             // pointing `dst_addr` at the deepest slot.
             let slot = ctx.frame_size;
@@ -5978,12 +6058,76 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
 /// Lower a call's argument list into vregs using the same ABI flattening
 /// as parameter binding: multi-word scalars, complex values, and
 /// struct-by-value arguments become one vreg per 32-bit slot.
-fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
+/// Resolve the parameter type list of a directly-named callee.
+/// Returns `Some(&Vec<Type>)` for in-TU functions whose `Function`
+/// definition we already collected; returns `None` for forward
+/// declarations that survive only as `GlobalDecl { ty: <return>, ...
+/// }` (no params), function pointers (handled by the indirect
+/// branch), and builtin/implicit callees.
+fn lookup_callee_param_types<'a>(ctx: &'a LowerCtx, name: &str) -> Option<&'a [Type]> {
+    ctx.function_param_types.get(name).map(|v| v.as_slice())
+}
+
+/// Resolve the parameter type list of an indirect-callee expression
+/// by looking through its `Type::FunctionPtr`. Used for
+/// `Expr::CallIndirect` and for direct calls through a function
+/// pointer variable.
+fn function_ptr_param_types(ty: &Type) -> Option<&[Type]> {
+    match ty {
+        Type::FunctionPtr { params, .. } => Some(params.as_slice()),
+        Type::Volatile(inner) | Type::Const(inner) => function_ptr_param_types(inner),
+        _ => None,
+    }
+}
+
+fn expr_function_ptr_param_types<'a>(expr: &Expr, ctx: &'a LowerCtx) -> Option<&'a [Type]> {
+    match expr {
+        Expr::Ident(name) => ctx
+            .local_types
+            .get(name)
+            .or_else(|| ctx.globals.get(name))
+            .and_then(function_ptr_param_types),
+        _ => None,
+    }
+}
+
+/// Lower a call's arguments, applying C99 6.5.2.2p7 implicit
+/// "as-if-by-assignment" conversions when the callee's prototype is
+/// available via `param_types`.
+///
+/// The pure-arg-type path (when `param_types` is `None` or the slot is
+/// missing) preserves the legacy behaviour: each argument is lowered
+/// according to its own type. That path is correct for variadic
+/// extra-args (default argument promotions handled by `lower_expr`)
+/// and unprototyped K&R callees.
+///
+/// The prototyped path widens narrow integer arguments to 64 bits when
+/// the parameter is `long long`, matching the assignment semantics. A
+/// `uint32_t` argument bound to a `unsigned long long` parameter must
+/// be zero-extended to a (low, high) pair *before* it lands in the ABI
+/// slots — otherwise the callee reads a stale high word out of an
+/// unrelated incoming register and silently loses both sign and zero
+/// extension. The signedness used for the widening comes from the
+/// argument expression (so `(int)x` zero-extends as `int`, while
+/// `(uint32_t)x` zero-extends as `uint32_t`); after the widen the bit
+/// pattern is reinterpreted at the parameter's type, which matches
+/// C99 6.3.1.3 conversion rules.
+fn lower_call_args_with_params(
+    ctx: &mut LowerCtx,
+    args: &[Expr],
+    param_types: Option<&[Type]>,
+) -> Result<Vec<VReg>> {
     let mut arg_vregs = Vec::new();
-    for arg in args {
+    for (i, arg) in args.iter().enumerate() {
         let arg_ty = expr_type(arg, ctx);
         let arg_is_struct = arg_ty.as_ref().is_some_and(|t| is_struct_type(t, ctx));
         let arg_is_complex = arg_ty.as_ref().is_some_and(|t| t.is_complex());
+        // Resolve the param type for this slot, when a prototype is
+        // available. Slots past the named-param count (variadic
+        // extras, or unprototyped callees) leave `param_ty` as None
+        // and fall through to the legacy arg-type-only path.
+        let param_ty = param_types.and_then(|pts| pts.get(i));
+        let param_is_long_long = param_ty.is_some_and(|t| ty_is_long_long(t, ctx));
         if arg_is_struct {
             let nw = arg_ty.as_ref().map_or(1, |t| type_size_words(t, ctx));
             let addr = lower_struct_expr_addr(ctx, arg)?;
@@ -6001,7 +6145,15 @@ fn lower_call_args(ctx: &mut LowerCtx, args: &[Expr]) -> Result<Vec<VReg>> {
             let pair = lower_complex_expr(ctx, arg)?;
             arg_vregs.push(pair.real);
             arg_vregs.push(pair.imag);
-        } else if arg_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx)) {
+        } else if arg_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx))
+            || param_is_long_long
+        {
+            // Either the argument itself is `long long` or the
+            // prototype's parameter is. In both cases the callee's
+            // ABI slot is a 64-bit pair: widen any 32-bit-or-narrower
+            // value to 64 bits before pushing the (low, high) vreg
+            // pair so the callee's incoming-arg register pinning
+            // sees a complete value rather than a half-set pair.
             let pair = lower_expr(ctx, arg)?;
             let pair = if ctx.is_64bit_vreg(pair) {
                 pair
@@ -7626,14 +7778,20 @@ mod tests {
         let unit = parse::parse(src).unwrap();
         let mut known = HashSet::new();
         known.insert("f".to_string());
+        let returns = HashMap::new();
+        let params = HashMap::new();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+        };
         let result = lower_function_with_known(
             &unit.functions[0],
             &HashMap::new(),
             &unit.struct_defs,
             &unit.enum_constants,
             &unit.typedefs,
-            &known,
-            &HashMap::new(),
+            &unit_ctx,
         );
         assert!(
             result.is_err(),
@@ -7654,14 +7812,20 @@ mod tests {
         let mut known = HashSet::new();
         known.insert("f".to_string());
         known.insert("bar".to_string());
+        let returns = HashMap::new();
+        let params = HashMap::new();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+        };
         let result = lower_function_with_known(
             &unit.functions[0],
             &HashMap::new(),
             &unit.struct_defs,
             &unit.enum_constants,
             &unit.typedefs,
-            &known,
-            &HashMap::new(),
+            &unit_ctx,
         );
         assert!(result.is_ok(), "expected declared function to be accepted");
     }
