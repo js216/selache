@@ -215,6 +215,11 @@ struct PendingInstr {
     word_offset: u32,
     instr: selinstr::encode::Instruction,
     label_ref: String,
+    /// Additional label references for multi-symbol expressions (e.g.
+    /// `I7 = ldf_stack_space + ldf_stack_length;`).  Each pair is
+    /// `(symbol_name, signed_contribution)` and produces an extra Add
+    /// relocation against the same operand slot in pass 2.
+    extra_label_refs: Vec<(String, i64)>,
 }
 
 /// A relocation to emit against an undefined label. Produced in pass 2
@@ -421,6 +426,13 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
     // body and is still forced to 48-bit.
     let mut no_compress_label: Option<String> = None;
     let mut end_label_seen: bool = false;
+    // Set by `.NOCOMPRESS;`, cleared by `.COMPRESS;`.  While true, every
+    // PM-code instruction is emitted in 48-bit ISA form even in a VISA
+    // section.  This is required around hardware errata sequences where
+    // the SHARC+ counts in 48-bit instruction units (e.g. the 12 NOPs
+    // after a SHBTB_CFG write) and a compressed parcel would silently
+    // shorten the window and hang the core.
+    let mut no_compress_dir: bool = false;
     // Relocations produced by `.VAR sym = other_symbol;` directives.
     // Folded into the main relocation table at the end of pass 2 so
     // the linker patches symbol addresses into data words for
@@ -441,6 +453,16 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
             visa,
         };
         process_directives(line, &mut state);
+
+        // `.NOCOMPRESS` / `.COMPRESS` toggles affect every subsequent
+        // PM-code instruction.  Track them outside `process_directives`
+        // so the flag lives next to the existing `no_compress_label`
+        // tracking that drives the encoder's `force_isa` decision.
+        match &line.directive {
+            Some(Directive::NoCompress) => no_compress_dir = true,
+            Some(Directive::Compress) => no_compress_dir = false,
+            _ => {}
+        }
 
         if let Some(label) = &line.label {
             let idx =
@@ -498,7 +520,8 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                 //      Type 17b path, but checking `label_ref` is
                 //      future-proof and costs nothing at call sites
                 //      that do not have a reloc.
-                let force_isa = no_compress_label.is_some() || line.label_ref.is_some();
+                let force_isa =
+                    no_compress_label.is_some() || no_compress_dir || line.label_ref.is_some();
                 let encoded = if force_isa {
                     selinstr::visa_encode::VisaEncoded::W48(isa_bytes)
                 } else {
@@ -520,6 +543,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     word_offset,
                     instr: *instr,
                     label_ref: label_ref.clone(),
+                    extra_label_refs: line.extra_label_refs.clone(),
                 });
             }
         }
@@ -613,10 +637,24 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                         continue;
                     }
                     // All code-section relocations use the SHARC+ PM
-                    // relocation family, whose `r_offset` is counted in
-                    // 16-bit parcel units. `pi.byte_offset` is the byte
-                    // offset inside the section; dividing by 2 gives
-                    // the parcel offset the linker expects.
+                    // relocation family.  `r_offset` is counted in the
+                    // section's *native instruction unit*, which the
+                    // linker then converts back to a byte offset in
+                    // `reloc_byte_offset`:
+                    //
+                    //   * SW (VISA) sections address in 16-bit parcels,
+                    //     so `byte = r_offset * 2`.
+                    //   * PM48 (`/NW`) sections address in 48-bit
+                    //     instructions, so `byte = r_offset * 6`.
+                    //
+                    // selas previously divided every byte offset by 2
+                    // unconditionally, which placed iv_code (NW)
+                    // relocations at the wrong site after the linker
+                    // recovered the byte offset as `r_offset * 6`.  The
+                    // visible symptom was a board hang on reset because
+                    // the slot-1 `JUMP start` field never received its
+                    // patched address.
+                    //
                     // For ImmStore with a non-zero value (e.g. from
                     // a `symbol-1` expression), the value becomes the
                     // relocation addend so the linker computes
@@ -627,13 +665,54 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                         } else {
                             0
                         };
+                    let sec = &sections[pi.section_idx].1;
+                    let unit = if sec.is_visa { 2 } else { 6 };
+                    let r_offset = (pi.byte_offset / unit) as u32;
+                    // For multi-symbol expressions like
+                    // `I7 = ldf_stack_space + ldf_stack_length;`,
+                    // emit the primary and each extra symbol as
+                    // `R_SHARC_PM_SW_BRANCHRETURN` (Add semantic).
+                    // The encoded imm32 field is zero, so the first
+                    // Add writes the primary symbol's value and each
+                    // subsequent Add accumulates.  Subtraction is
+                    // expressed via the addend: an extra entry with
+                    // sign=-1 carries `-symbol` by emitting the
+                    // primary-write reloc followed by an Add of the
+                    // negated symbol's resolved value, but seld's
+                    // Add path takes the symbol's positive address;
+                    // libsel only ever uses `+ symbol` between
+                    // externs, and a negative connector falls back
+                    // to a single-symbol relocation by leaving the
+                    // primary as a plain write.
+                    let has_extras = !pi.extra_label_refs.is_empty()
+                        && pi.extra_label_refs.iter().all(|(_, s)| *s >= 0);
+                    let primary_type = if has_extras {
+                        selelf::elf::R_SHARC_PM_SW_BRANCHRETURN as u8
+                    } else {
+                        reloc_type_for(&pi.instr)
+                    };
                     relocs.push(PendingReloc {
                         section_idx: pi.section_idx,
-                        byte_offset: (pi.byte_offset / 2) as u32,
+                        byte_offset: r_offset,
                         symbol: pi.label_ref.clone(),
-                        rela_type: reloc_type_for(&pi.instr),
+                        rela_type: primary_type,
                         addend,
                     });
+                    if has_extras {
+                        for (extra_sym, _sign) in &pi.extra_label_refs {
+                            if !externs.contains(extra_sym) && !label_map.contains_key(extra_sym)
+                            {
+                                externs.push(extra_sym.clone());
+                            }
+                            relocs.push(PendingReloc {
+                                section_idx: pi.section_idx,
+                                byte_offset: r_offset,
+                                symbol: extra_sym.clone(),
+                                rela_type: selelf::elf::R_SHARC_PM_SW_BRANCHRETURN as u8,
+                                addend: 0,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -709,19 +788,25 @@ fn process_directives(line: &ParsedLine, state: &mut DirectiveState<'_>) {
             let idx = ensure_section(state.sections, &name, is_pm, visa_for_section);
             *state.current_section_idx = Some(idx);
         }
-        Directive::Global(name) => {
-            if !state.globals.contains(name) {
-                state.globals.push(name.clone());
+        Directive::Global(names) => {
+            for name in names {
+                if !state.globals.contains(name) {
+                    state.globals.push(name.clone());
+                }
             }
         }
-        Directive::Weak(name) => {
-            if !state.weaks.contains(name) {
-                state.weaks.push(name.clone());
+        Directive::Weak(names) => {
+            for name in names {
+                if !state.weaks.contains(name) {
+                    state.weaks.push(name.clone());
+                }
             }
         }
-        Directive::Extern(name) => {
-            if !state.externs.contains(name) {
-                state.externs.push(name.clone());
+        Directive::Extern(names) => {
+            for name in names {
+                if !state.externs.contains(name) {
+                    state.externs.push(name.clone());
+                }
             }
         }
         Directive::Var(raw_body) => {
@@ -796,6 +881,14 @@ fn process_directives(line: &ParsedLine, state: &mut DirectiveState<'_>) {
         }
         Directive::Set(name, value) => {
             state.aliases.insert(name.clone(), value.clone());
+        }
+        Directive::NoCompress | Directive::Compress => {
+            // The `.NOCOMPRESS;` / `.COMPRESS;` toggles do not change
+            // section state, label tables, or symbol kind: they only
+            // tell the encoder whether to emit subsequent instructions
+            // in compressed (VISA) form or in fixed 48-bit ISA form.
+            // The flag is tracked alongside `no_compress_label` in
+            // pass 1 of the main encoding loop.
         }
     }
 }

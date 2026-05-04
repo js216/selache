@@ -817,6 +817,7 @@ impl Allocator {
             Instruction::UregTransfer {
                 src_ureg,
                 dst_ureg,
+                cond,
                 compute,
             } => {
                 let new_compute = compute.map(|c| self.rewrite_compute(&c, &mut spill_pre));
@@ -836,6 +837,7 @@ impl Allocator {
                 Instruction::UregTransfer {
                     src_ureg: new_src,
                     dst_ureg: new_dst,
+                    cond,
                     compute: new_compute,
                 }
             }

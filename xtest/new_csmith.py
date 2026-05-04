@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0
+# new_csmith.py --- Wrap a fresh csmith program as a cctest case
+# Copyright (c) 2026 Jakob Kastelic
+"""Drop a single new randomised cctest case into xtest/draft_cases/.
+
+Csmith generates a self-contained C program whose main() folds every
+global into a CRC32 context and calls platform_main_end() to print the
+final checksum. cctest cases instead expect `int test_main(void)` to
+return a single integer, which the harness compares against an
+`@expect` directive embedded in the source. The two formats line up
+neatly: this script runs csmith with a conservative option set,
+strips the standard csmith.h dependencies, rewrites main() into
+test_main() so it returns the lower 32 bits of the checksum
+directly, executes the program once on host gcc to recover the
+expected value, embeds that value back into the case file via
+`@expect`, and writes the result to xtest/draft_cases/.
+
+run.py picks up cases from xtest/cases/ only, so the draft directory
+acts as a staging area: review the generated case, then `mv` it into
+xtest/cases/ for it to land in the next sweep.
+"""
+
+import argparse
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tempfile
+
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
+DRAFT_DIR = SCRIPT_DIR / "draft_cases"
+
+# Conservative csmith options. The point of the cctest sweep is to
+# exercise every selcc/selas/seld/selload codegen path against
+# realistic but small C; csmith without these limits emits
+# multi-thousand-line programs whose translation time dominates the
+# board turnaround. --safe-math-wrappers 0 drops the safe_math.h
+# dependency, which keeps the wrapped case header-clean against the
+# minimal cctest runtime. --no-volatiles drops the volatile-load /
+# volatile-store paths the embedded driver model has not been
+# verified against.
+CSMITH_FLAGS = [
+    "--concise",
+    "--safe-math-wrappers", "0",
+    "--no-bitfields",
+    "--no-pointers",
+    "--no-structs",
+    "--no-unions",
+    "--no-volatiles",
+    "--no-volatile-pointers",
+    "--max-funcs", "3",
+    "--max-block-size", "3",
+    "--max-block-depth", "3",
+    "--max-expr-complexity", "4",
+    "--max-array-dim", "2",
+    "--max-array-len-per-dim", "4",
+]
+
+# A self-contained replacement for csmith.h: just the CRC32 hash, the
+# `transparent_crc` accumulator over uint64_t values, and no-op
+# platform stubs. csmith's generated main() calls these by name; we
+# inline them so the case file does not need any external include
+# path. Keeping the runtime small also keeps it inside what selcc /
+# easm21k / cc21k all definitely accept.
+CSMITH_RUNTIME = r"""static unsigned int crc32_tab[256];
+static unsigned int crc32_context = 0xFFFFFFFFUL;
+
+static void crc32_gentab(void)
+{
+   int i, j;
+   unsigned int crc;
+   for (i = 0; i < 256; i++) {
+      crc = (unsigned int)i;
+      for (j = 0; j < 8; j++)
+         crc = (crc & 1U) ? ((crc >> 1) ^ 0xEDB88320UL) : (crc >> 1);
+      crc32_tab[i] = crc;
+   }
+}
+
+static void crc32_byte(unsigned char b)
+{
+   crc32_context = ((crc32_context >> 8) & 0x00FFFFFFUL) ^
+                   crc32_tab[(crc32_context ^ (unsigned int)b) & 0xFFU];
+}
+
+static void transparent_crc(unsigned long long val, const char *vname, int flag)
+{
+   int i;
+   (void)vname;
+   (void)flag;
+   for (i = 0; i < 8; i++)
+      crc32_byte((unsigned char)((val >> (i * 8)) & 0xFFULL));
+}
+
+static void platform_main_begin(void) {}
+"""
+
+# The cctest harness CFLAGS pull these in for every case.
+CCTEST_INCLUDES = """\
+#include <float.h>
+#include <iso646.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+"""
+
+# Header (without @expect; that gets injected after the host run).
+SPDX_HEADER_TEMPLATE = """\
+// SPDX-License-Identifier: MIT
+// cctest_csmith_{stem}.c --- cctest case csmith_{stem} (csmith seed {seed})
+// Copyright (c) 2026 Jakob Kastelic
+"""
+
+
+def run(cmd, **kwargs):
+    """Wrapper around subprocess.run that surfaces stderr on failure."""
+    p = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    if p.returncode != 0:
+        sys.stderr.write(f"{' '.join(str(c) for c in cmd)}\n{p.stderr}")
+        sys.exit(p.returncode)
+    return p.stdout
+
+
+def transform_csmith(src):
+    """Return cctest-shape C source from a csmith-generated program.
+
+    The csmith program looks like:
+       #include "csmith.h"
+       <globals + safe_math wrappers + functions...>
+       int main (int argc, char* argv[]) {
+          int print_hash_value = 0;
+          if (argc == 2 && strcmp(argv[1], "1") == 0) print_hash_value = 1;
+          platform_main_begin();
+          crc32_gentab();
+          func_1();
+          transparent_crc(...);
+          ...
+          platform_main_end(crc32_context ^ 0xFFFFFFFFUL, print_hash_value);
+          return 0;
+       }
+
+    The transformation:
+      - drop `#include "csmith.h"` (we inline a smaller runtime).
+      - rename main() to test_main() and zero the parameter list.
+      - delete the argv parsing line (we never feed it `1`).
+      - delete every `if (print_hash_value) printf(...);` line; with
+        flag = 0 they are dead at runtime, but selcc has no `printf`
+        on the device path the host-side gcc/clang stages share, and
+        leaving them in pulls in a stdio impl on the SHARC+ side.
+      - rewrite the platform_main_end + return pair into a single
+        `return (int)(crc32_context ^ 0xFFFFFFFFUL);` so the harness
+        sees the checksum as the case's @expect value.
+    """
+    # Strip the csmith.h include; the inlined runtime replaces it.
+    src = re.sub(r'^\s*#\s*include\s+"csmith\.h"\s*$', "",
+                 src, count=1, flags=re.MULTILINE)
+    # Rewrite main() signature.
+    src = re.sub(r"\bint\s+main\s*\(\s*int\s+argc\s*,\s*char\s*\*\s*argv\s*\[\s*\]\s*\)",
+                 "int test_main(void)", src, count=1)
+    # Drop the argv parsing line. csmith always emits this exact form
+    # right after the local declarations.
+    src = re.sub(
+        r"^\s*if\s*\(\s*argc\s*==\s*2\s*&&\s*strcmp\(\s*argv\[1\]\s*,\s*\"1\"\s*\)\s*==\s*0\s*\)\s*print_hash_value\s*=\s*1\s*;\s*$",
+        "",
+        src,
+        flags=re.MULTILINE,
+    )
+    # Drop conditional printf lines (always dead with flag = 0).
+    src = re.sub(
+        r"^\s*if\s*\(\s*print_hash_value\s*\)\s*printf\s*\([^;]*\)\s*;\s*$",
+        "",
+        src,
+        flags=re.MULTILINE,
+    )
+    # Replace the platform_main_end + return 0 tail with a checksum
+    # return. csmith emits the two on adjacent lines; allow a flexible
+    # whitespace gap between them.
+    src = re.sub(
+        r"platform_main_end\s*\(\s*crc32_context\s*\^\s*0xFFFFFFFFUL\s*,\s*print_hash_value\s*\)\s*;\s*\n\s*return\s+0\s*;",
+        "return (int)(crc32_context ^ 0xFFFFFFFFUL);",
+        src,
+        count=1,
+    )
+    return src
+
+
+def assemble_case(src, seed, stem):
+    """Stitch the SPDX header, includes, runtime, and transformed
+    csmith body into a single cctest case body. The @expect directive
+    is left out of the result; it gets prepended by the caller after
+    the host run has produced the expected value."""
+    header = SPDX_HEADER_TEMPLATE.format(stem=stem, seed=seed)
+    return f"{header}\n{CCTEST_INCLUDES}\n{CSMITH_RUNTIME}\n{src.lstrip()}"
+
+
+def host_eval(case_text):
+    """Compile + run the case under host gcc and return the printed
+    checksum as an integer. The harness's wrap.c form is reproduced
+    inline here to keep new_csmith.py free of run.py imports."""
+    wrap = (
+        "#include <stdio.h>\n"
+        "extern int test_main(void);\n"
+        "int main(void) { printf(\"got %x\\n\", test_main()); return 0; }\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="csmith_eval_") as tmp:
+        tmpd = pathlib.Path(tmp)
+        case_path = tmpd / "first.c"
+        wrap_path = tmpd / "wrap.c"
+        bin_path = tmpd / "host_bin"
+        case_path.write_text(case_text)
+        wrap_path.write_text(wrap)
+        run([
+            "gcc", "-m32", "-funsigned-char", "-std=c99", "-w", "-O0",
+            "-o", str(bin_path), str(case_path), str(wrap_path), "-lm",
+        ])
+        out = run([str(bin_path)])
+    m = re.search(r"got\s+([0-9a-fA-F]+)", out)
+    if not m:
+        sys.exit(f"could not parse `got NN` from host output:\n{out}")
+    return int(m.group(1), 16)
+
+
+def insert_expect(case_text, expect):
+    """Place the `@expect 0xNN` directive between the SPDX header and
+    the include block. Match the formatting the existing cases use."""
+    block = f"\n/* @expect 0x{expect:x} */\n"
+    # Insert right after the third line of the SPDX header
+    # (Copyright line).
+    lines = case_text.splitlines(keepends=True)
+    insert_at = 0
+    for i, line in enumerate(lines):
+        if line.startswith("// Copyright"):
+            insert_at = i + 1
+            break
+    lines.insert(insert_at, block)
+    return "".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--seed", type=int, default=None,
+                    help="csmith seed (default: random per invocation)")
+    ap.add_argument("--name", default=None,
+                    help="custom suffix for the case stem; defaults to "
+                         "the seed in hex")
+    ap.add_argument("--keep-csmith", action="store_true",
+                    help="keep the raw csmith output alongside the "
+                         "transformed case (for debugging)")
+    args = ap.parse_args()
+
+    DRAFT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # csmith picks its own seed when none is given, but we want it
+    # surfaced in the case filename so reruns are reproducible.
+    if args.seed is None:
+        # csmith reads /dev/urandom for its default seed; mirror that
+        # so the value lands in our filename too.
+        args.seed = int.from_bytes(os.urandom(4), "big")
+    stem = args.name if args.name else f"{args.seed:08x}"
+
+    with tempfile.TemporaryDirectory(prefix="csmith_gen_") as tmp:
+        raw_path = pathlib.Path(tmp) / "csmith.c"
+        run(["csmith", "-s", str(args.seed), "-o", str(raw_path), *CSMITH_FLAGS])
+        raw = raw_path.read_text()
+        if args.keep_csmith:
+            (DRAFT_DIR / f"cctest_csmith_{stem}.csmith.c").write_text(raw)
+
+    transformed = transform_csmith(raw)
+    case_text = assemble_case(transformed, args.seed, stem)
+    expect = host_eval(case_text)
+    case_text = insert_expect(case_text, expect)
+
+    out_path = DRAFT_DIR / f"cctest_csmith_{stem}.c"
+    out_path.write_text(case_text)
+    print(f"wrote {out_path}  (@expect 0x{expect:x})")
+
+
+if __name__ == "__main__":
+    main()

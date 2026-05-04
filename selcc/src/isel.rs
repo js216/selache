@@ -1800,6 +1800,7 @@ pub fn select_with_name(
                         instr: Instruction::UregTransfer {
                             src_ureg: target::ureg_i_pre(target::FRAME_PTR),
                             dst_ureg: *dst as u16,
+                            cond: 31,
                             compute: None,
                         },
                         reloc: None,
@@ -1821,6 +1822,7 @@ pub fn select_with_name(
                         instr: Instruction::UregTransfer {
                             src_ureg: target::ureg_i_pre(target::FRAME_PTR),
                             dst_ureg: *dst as u16,
+                            cond: 31,
                             compute: None,
                         },
                         reloc: None,
@@ -1870,6 +1872,7 @@ pub fn select_with_name(
                     instr: Instruction::UregTransfer {
                         src_ureg: target::ureg_i_pre(target::SCRATCH_I),
                         dst_ureg: *dst as u16,
+                        cond: 31,
                         compute: None,
                     },
                     reloc: None,
@@ -2361,6 +2364,7 @@ pub fn select_with_name(
                         instr: Instruction::UregTransfer {
                             src_ureg: *base as u16,
                             dst_ureg: target::ureg_i_pre(target::SCRATCH_I),
+                            cond: 31,
                             compute: None,
                         },
                         reloc: None,
@@ -2416,6 +2420,7 @@ pub fn select_with_name(
                         instr: Instruction::UregTransfer {
                             src_ureg: *base as u16,
                             dst_ureg: target::ureg_i_pre(target::SCRATCH_I),
+                            cond: 31,
                             compute: None,
                         },
                         reloc: None,

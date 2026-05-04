@@ -23,20 +23,52 @@ pub struct ParsedLine {
     pub label: Option<String>,
     pub instruction: Option<Instruction>,
     pub directive: Option<Directive>,
+    /// Primary label reference for this instruction, if any.  When the
+    /// instruction can be resolved as a same-section PC-relative branch,
+    /// this is the only label that matters; otherwise the assembler
+    /// emits a relocation against this symbol.
     pub label_ref: Option<String>,
+    /// Additional label references for multi-symbol expressions like
+    /// `I7 = ldf_stack_space + ldf_stack_length;` that need more than
+    /// one relocation against the same operand slot.  Each entry is
+    /// `(symbol_name, addend)` and produces an `R_SHARC_PM_SW_BRANCHRETURN`
+    /// (Add) relocation at the same byte offset as `label_ref`.  The
+    /// SHARC+ Tools dialect expresses two-symbol additions this way and
+    /// libsel's startup.s uses it to seed `I7` with the top of the
+    /// LDF-defined stack reserve.
+    pub extra_label_refs: Vec<(String, i64)>,
 }
 
 /// Assembler directive.
 #[derive(Debug)]
 pub enum Directive {
     Section(String),
-    Global(String),
-    Weak(String),
-    Extern(String),
+    /// `.GLOBAL foo, bar, baz;` — declare each name as a global
+    /// symbol.  The SHARC+ Tools dialect lets one directive list
+    /// several names separated by commas; selas splits at parse time
+    /// so each name becomes its own symbol-table entry.
+    Global(Vec<String>),
+    /// `.WEAK foo, bar;` — see `Global` for the comma-list rationale.
+    Weak(Vec<String>),
+    /// `.EXTERN foo, bar;` — see `Global` for the comma-list rationale.
+    /// (libsel's startup.s relies on the comma form for the
+    /// `ldf_stack_space, ldf_stack_length` pair defined by the LDF.)
+    Extern(Vec<String>),
     Var(String),
     Byte(Vec<u8>),
     Align(u32),
     Set(String, String),
+    /// `.NOCOMPRESS;` — suppress VISA compression for following
+    /// instructions until a matching `.COMPRESS;` directive.  The
+    /// SHARC+ Tools dialect uses this to keep critical sequences (e.g.
+    /// the 12 instructions that the SHBTB_CFG-write errata requires
+    /// after disabling the BTB) emitted in full 48-bit ISA form: the
+    /// errata count is in 48-bit instruction units, and a 16/32-bit
+    /// VISA NOP would silently shorten the window.
+    NoCompress,
+    /// `.COMPRESS;` — re-enable VISA compression after a
+    /// `.NOCOMPRESS;` block.
+    Compress,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +255,7 @@ impl<'a> AsmParser<'a> {
                 instruction: None,
                 directive: None,
                 label_ref: None,
+                extra_label_refs: Vec::new(),
             });
         }
         if line.is_empty() {
@@ -231,6 +264,7 @@ impl<'a> AsmParser<'a> {
                 instruction: None,
                 directive: None,
                 label_ref: None,
+                extra_label_refs: Vec::new(),
             });
         }
 
@@ -258,6 +292,7 @@ impl<'a> AsmParser<'a> {
                 instruction: None,
                 directive: None,
                 label_ref: None,
+                extra_label_refs: Vec::new(),
             });
         }
 
@@ -269,16 +304,19 @@ impl<'a> AsmParser<'a> {
                 instruction: None,
                 directive: Some(directive),
                 label_ref: None,
+                extra_label_refs: Vec::new(),
             });
         }
 
         // Parse instruction
-        let (instr, label_ref) = parse_instruction_at_line(rest, self.line)?;
+        let (instr, label_ref, extra_label_refs) =
+            parse_instruction_at_line(rest, self.line)?;
         Ok(ParsedLine {
             label,
             instruction: Some(instr),
             directive: None,
             label_ref,
+            extra_label_refs,
         })
     }
 
@@ -295,18 +333,18 @@ impl<'a> AsmParser<'a> {
         }
         if upper.starts_with(".GLOBAL") {
             let rest = &text[7..];
-            let name = rest.trim().trim_end_matches(';').trim().to_string();
-            return Ok(Directive::Global(name));
+            let names = parse_symbol_list(rest);
+            return Ok(Directive::Global(names));
         }
         if upper.starts_with(".WEAK") {
             let rest = &text[5..];
-            let name = rest.trim().trim_end_matches(';').trim().to_string();
-            return Ok(Directive::Weak(name));
+            let names = parse_symbol_list(rest);
+            return Ok(Directive::Weak(names));
         }
         if upper.starts_with(".EXTERN") {
             let rest = &text[7..];
-            let name = rest.trim().trim_end_matches(';').trim().to_string();
-            return Ok(Directive::Extern(name));
+            let names = parse_symbol_list(rest);
+            return Ok(Directive::Extern(names));
         }
         if upper.starts_with(".VAR") {
             let rest = &text[4..];
@@ -323,6 +361,12 @@ impl<'a> AsmParser<'a> {
         }
         if upper.starts_with(".BYTE") {
             return Ok(Directive::Byte(Vec::new()));
+        }
+        if upper.starts_with(".NOCOMPRESS") {
+            return Ok(Directive::NoCompress);
+        }
+        if upper.starts_with(".COMPRESS") {
+            return Ok(Directive::Compress);
         }
         if upper.starts_with(".SET") {
             let rest = &text[4..];
@@ -357,11 +401,15 @@ impl<'a> AsmParser<'a> {
 /// Parse a single instruction mnemonic string. Returns the instruction.
 #[cfg(test)]
 pub fn parse_instruction(text: &str) -> Result<Instruction> {
-    let (instr, _label_ref) = parse_instruction_at_line(text, 0)?;
+    let (instr, _label_ref, _extra) = parse_instruction_at_line(text, 0)?;
     Ok(instr)
 }
 
-fn parse_instruction_at_line(text: &str, line: u32) -> Result<(Instruction, Option<String>)> {
+#[allow(clippy::type_complexity)]
+fn parse_instruction_at_line(
+    text: &str,
+    line: u32,
+) -> Result<(Instruction, Option<String>, Vec<(String, i64)>)> {
     let text = text.trim().trim_end_matches(',');
     // Strip FETCH_RETURN (NOP) from compound instructions
     let text = if let Some(pos) = text.to_uppercase().find(", FETCH_RETURN") {
@@ -371,11 +419,110 @@ fn parse_instruction_at_line(text: &str, line: u32) -> Result<(Instruction, Opti
     };
     // Normalize spacing: insert spaces around +/- between register operands
     let normalized = normalize_compute_spacing(text);
-    let (instr, label_ref) = parse_instruction_inner(&normalized, line)?;
+    let (instr, label_ref, extra) = parse_instruction_inner_with_extra(&normalized, line)?;
     // The inner parser works on upper-cased text, so label names lose their
     // original case. Recover it from the un-modified source.
     let label_ref = label_ref.map(|lr| recover_label_case(&lr, &normalized));
-    Ok((instr, label_ref))
+    let extra: Vec<(String, i64)> = extra
+        .into_iter()
+        .map(|(name, addend)| (recover_label_case(&name, &normalized), addend))
+        .collect();
+    Ok((instr, label_ref, extra))
+}
+
+/// Wrapper around `parse_instruction_inner` that also returns any
+/// secondary label references produced by multi-symbol expressions like
+/// `I7 = ldf_stack_space + ldf_stack_length`.  The inner parser keeps
+/// its single-`label_ref` shape for the common path; this wrapper
+/// separately recognises the SHARC+ Tools `ureg = sym + sym + ...` and
+/// `ureg = sym - sym` forms and surfaces every additional symbol as an
+/// extra `(name, addend)` pair.  Each pair becomes one
+/// `R_SHARC_PM_SW_BRANCHRETURN` (Add) relocation at the same byte
+/// offset, matching what easm21k emits.
+#[allow(clippy::type_complexity)]
+fn parse_instruction_inner_with_extra(
+    normalized: &str,
+    line: u32,
+) -> Result<(Instruction, Option<String>, Vec<(String, i64)>)> {
+    let (instr, label_ref) = parse_instruction_inner(normalized, line)?;
+    // Only LoadImm with a label_ref is a candidate for multi-symbol
+    // expansion: the SHARC+ Tools dialect lets `ureg = symA + symB`
+    // resolve at link time via two relocations against the same imm32
+    // operand.  Other shapes (branches, ImmStore, etc.) carry at most
+    // one symbolic operand in this dialect.
+    let extra = if matches!(instr, Instruction::LoadImm { .. }) && label_ref.is_some() {
+        let upper = normalized.to_uppercase();
+        if let Some(eq) = upper.find('=') {
+            let rhs = upper[eq + 1..].trim().trim_end_matches(';').trim();
+            extract_extra_label_addends(rhs, label_ref.as_deref().unwrap())
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    Ok((instr, label_ref, extra))
+}
+
+/// Walk a LoadImm right-hand side and return every symbol other than the
+/// primary one (which is already attached as `label_ref`) along with its
+/// signed contribution.  Recognises `+ sym` and `- sym` connectors, with
+/// or without surrounding whitespace.  Numeric terms are skipped: a
+/// `label - 1` form is handled as an addend on the primary label.
+fn extract_extra_label_addends(rhs: &str, primary: &str) -> Vec<(String, i64)> {
+    let primary_upper = primary.to_uppercase();
+    let mut out: Vec<(String, i64)> = Vec::new();
+    let mut sign: i64 = 1;
+    let mut seen_primary = false;
+    let mut i = 0;
+    let bytes = rhs.as_bytes();
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b' ' || c == b'\t' {
+            i += 1;
+            continue;
+        }
+        if c == b'+' {
+            sign = 1;
+            i += 1;
+            continue;
+        }
+        if c == b'-' {
+            sign = -sign;
+            i += 1;
+            continue;
+        }
+        // Read identifier or number token.
+        let start = i;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' {
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if start == i {
+            // Unrecognised character — bail to keep behaviour conservative.
+            return Vec::new();
+        }
+        let tok = &rhs[start..i];
+        if !is_label_token(tok) {
+            // Numeric literal (or other non-label) — skip; it just
+            // contributes to the implicit addend on the primary
+            // symbol, which the encoder already baked into the
+            // instruction's imm32 field.
+            sign = 1;
+            continue;
+        }
+        if !seen_primary && tok.eq_ignore_ascii_case(&primary_upper) {
+            seen_primary = true;
+        } else {
+            out.push((tok.to_string(), sign));
+        }
+        sign = 1;
+    }
+    out
 }
 
 fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, Option<String>)> {
@@ -608,6 +755,7 @@ fn parse_instruction_inner(normalized: &str, line: u32) -> Result<(Instruction, 
                             Instruction::UregTransfer {
                                 src_ureg: src_code,
                                 dst_ureg: dst_code,
+                                cond: 31,
                                 compute: Some(compute),
                             },
                             None,
@@ -1158,6 +1306,7 @@ fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<Strin
                     Instruction::UregTransfer {
                         src_ureg: src,
                         dst_ureg: dst,
+                        cond: cond_code,
                         compute: None,
                     },
                     None,
@@ -1249,6 +1398,7 @@ fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<Strin
                         Instruction::UregTransfer {
                             src_ureg: src_code,
                             dst_ureg: dst_code,
+                            cond: cond_code,
                             compute: Some(compute),
                         },
                         None,
@@ -1267,6 +1417,7 @@ fn parse_conditional(text: &str, line: u32) -> Result<(Instruction, Option<Strin
                 Instruction::UregTransfer {
                     src_ureg: src_code,
                     dst_ureg: dst_code,
+                    cond: cond_code,
                     compute: None,
                 },
                 None,
@@ -2976,6 +3127,7 @@ fn parse_compute_or_load(text: &str, line: u32) -> Result<Instruction> {
                     return Ok(Instruction::UregTransfer {
                         src_ureg: src,
                         dst_ureg: dst,
+                        cond: 31,
                         compute: None,
                     });
                 }
@@ -4461,8 +4613,6 @@ fn is_ignored_directive(upper: &str) -> bool {
         || upper.starts_with(".INC/")
         || upper.starts_with(".MESSAGE")
         || upper.starts_with(".STRUCT")
-        || upper.starts_with(".COMPRESS")
-        || upper.starts_with(".NOCOMPRESS")
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -4489,6 +4639,21 @@ fn is_valid_label(s: &str) -> bool {
     }
     s.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Split a `.GLOBAL` / `.WEAK` / `.EXTERN` operand list into individual
+/// symbol names.  The SHARC+ Tools dialect allows one directive to
+/// list several names separated by commas, e.g.
+/// `.EXTERN ldf_stack_space, ldf_stack_length;`.  Empty entries (e.g.
+/// from a trailing comma) are dropped.
+fn parse_symbol_list(rest: &str) -> Vec<String> {
+    rest.trim()
+        .trim_end_matches(';')
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn split_first_comma(text: &str) -> (&str, Option<&str>) {
@@ -4772,6 +4937,12 @@ fn expr_unary(bytes: &[u8], pos: &mut usize) -> Option<i64> {
         *pos += 1;
         let val = expr_unary(bytes, pos)?;
         Some(val.wrapping_neg())
+    } else if *pos < bytes.len() && bytes[*pos] == b'+' {
+        // Explicit positive sign, e.g. "M6 = +1" in the SHARC+ Tools
+        // dialect.  Treated as a no-op unary so "+1" parses the same as
+        // "1".
+        *pos += 1;
+        expr_unary(bytes, pos)
     } else {
         expr_atom(bytes, pos)
     }
@@ -5764,6 +5935,7 @@ mod tests {
         roundtrip(&Instruction::UregTransfer {
             src_ureg: 0x00, // R0
             dst_ureg: 0x10, // I0
+            cond: 31,
             compute: None,
         });
     }
@@ -6122,5 +6294,59 @@ mod tests {
             Instruction::Compute { .. } => {}
             other => panic!("expected Compute for R0 = PASS R1, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_symbol_list_splits_extern() {
+        // `.EXTERN a, b;` must split into two symbols, not one
+        // comma-joined name.  libsel's startup.s declares the pair
+        // `ldf_stack_space, ldf_stack_length` this way; treating it as
+        // a single name leaves the linker with an undefined symbol
+        // on every reference and the boot ROM hangs at reset.
+        let mut parser = AsmParser::new(".EXTERN ldf_stack_space, ldf_stack_length;\n");
+        let lines = parser.parse_all().unwrap();
+        assert_eq!(lines.len(), 1);
+        match &lines[0].directive {
+            Some(Directive::Extern(names)) => {
+                assert_eq!(
+                    names,
+                    &vec![
+                        "ldf_stack_space".to_string(),
+                        "ldf_stack_length".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected Directive::Extern, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unary_plus_in_const_expr() {
+        // `M6 = +1;` must encode the same as `M6 = 1;` — the SHARC+
+        // Tools dialect lets explicit positive signs annotate the
+        // M-register defaults libsel/startup.s sets up before
+        // entering main().
+        let plus = parse_instruction("M6 = +1").unwrap();
+        let bare = parse_instruction("M6 = 1").unwrap();
+        assert_eq!(plus, bare);
+    }
+
+    #[test]
+    fn test_multi_symbol_loadimm_expression() {
+        // `I7 = ldf_stack_space + ldf_stack_length;` must surface BOTH
+        // symbols so the assembler can emit a relocation pair.  The
+        // primary lands in `label_ref`; any further symbols land in
+        // `extra_label_refs` with the sign of their connector.
+        let mut parser = AsmParser::new("I7 = ldf_stack_space + ldf_stack_length;\n");
+        let lines = parser.parse_all().unwrap();
+        let line = lines.into_iter().find(|l| l.instruction.is_some()).unwrap();
+        assert_eq!(
+            line.label_ref.as_deref(),
+            Some("ldf_stack_space")
+        );
+        assert_eq!(
+            line.extra_label_refs,
+            vec![("ldf_stack_length".to_string(), 1)]
+        );
     }
 }

@@ -271,6 +271,7 @@ fn try_32bit(instr: &Instruction) -> Option<u32> {
         Instruction::UregTransfer {
             src_ureg,
             dst_ureg,
+            cond: 31,
             compute: None,
         } => try_type5b_move(dst_ureg, src_ureg),
         Instruction::IndirectBranch {

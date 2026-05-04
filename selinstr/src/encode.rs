@@ -463,6 +463,12 @@ pub enum Instruction {
         src_ureg: u16,
         /// Destination universal register code
         dst_ureg: u16,
+        /// Condition code (31 = TRUE for unconditional).  The SHARC+
+        /// Tools dialect lets the body of a hardware DO loop guard a
+        /// commit-on-borrow with `IF AC R1 = R12;`; before this field
+        /// existed the parser silently dropped the condition and the
+        /// loop wrote unconditionally on every iteration.
+        cond: u8,
         /// Optional compute
         compute: Option<ComputeOp>,
     },
@@ -699,6 +705,7 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
         Instruction::UregTransfer {
             src_ureg,
             dst_ureg,
+            cond,
             compute,
         } => {
             let comp = encode_compute_opt(&compute)?;
@@ -720,7 +727,7 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             let word = (0b011u64 << 45)
                 | (1u64 << 44)
                 | (src_hi << 38)
-                | (31u64 << 33) // cond = TRUE
+                | ((cond as u64 & 0x1F) << 33)
                 | (src_lo << 31)
                 | (dst_hi << 27)
                 | (dst_lo << 23)
