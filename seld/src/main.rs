@@ -80,8 +80,6 @@ fn main() {
         return;
     }
 
-    print_banner();
-
     let result = seld::link(&opts).and_then(|out| {
         let output_path = opts
             .output_file
@@ -97,7 +95,9 @@ fn main() {
                 eprintln!("Map file written to {map_path}");
             }
         }
-        eprintln!("Link successful.");
+        if opts.verbose {
+            eprintln!("Link successful.");
+        }
         Ok(())
     });
 

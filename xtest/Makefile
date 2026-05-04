@@ -85,12 +85,12 @@ $(BUILD)/$(1)/%.run: cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/$(1)
 	$$(Q)got=$$$$($$(BUILD)/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
 	    if [ -z "$$$$got" ]; then \
-	        echo "$(1) $$* FAIL: no 'got NN' output (crashed or empty)"; exit 1; \
+	        printf '\033[31m$(1) %s FAIL\033[0m: no got NN output\n' "$$*"; exit 1; \
 	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
-	        echo "$(1) $$* FAIL: expect=$$$$expect got=0x$$$$got"; exit 1; \
+	        printf '\033[31m$(1) %s FAIL\033[0m expect=%s got=0x%s\n' "$$*" "$$$$expect" "$$$$got"; exit 1; \
 	    fi; \
-	    echo "$(1) $$* PASS"
+	    printf '\033[32m$(1) %s PASS\033[0m\n' "$$*"
 	$$(Q)touch $$@
 endef
 
@@ -99,70 +99,70 @@ $(eval $(call HOST_RULE,clang))
 
 # Harness objects (xtest_main.doj, xtest_uart.doj).
 $(BUILD)/cces/xtest_%.doj: %.c | $(BUILD)/cces
-	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $@ $<
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $@ $< > /dev/null
 
 $(BUILD)/sel/xtest_%.doj: %.c | $(BUILD)/sel
-	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(@:.doj=.s) $<
-	$(Q)$(SELAS) $(SELAS_FLAGS) -o $@ $(@:.doj=.s)
+	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(@:.doj=.s) $< > /dev/null
+	$(Q)$(SELAS) $(SELAS_FLAGS) -o $@ $(@:.doj=.s) > /dev/null
 
 # libsel objects: per-subdir static patterns.
 # cces .c via cc21k; cces .s via easm21k.
 define CCES_LIB_RULES
 $$(BUILD)/cces/lib_$(1)_%.doj: $$(LIBSEL_SRC)/$(1)/%.c | $$(BUILD)/cces
-	$$(Q)$$(CC21K) $$(CFLAGS_TARGET) -c -o $$@ $$<
+	$$(Q)$$(CC21K) $$(CFLAGS_TARGET) -c -o $$@ $$< > /dev/null
 $$(BUILD)/cces/lib_$(1)_%.doj: $$(LIBSEL_SRC)/$(1)/%.s | $$(BUILD)/cces
-	$$(Q)$$(EASM21K) -proc ADSP-21569 -si-revision any -char-size-8 -swc -o $$@ $$<
+	$$(Q)$$(EASM21K) -proc ADSP-21569 -si-revision any -char-size-8 -swc -o $$@ $$< > /dev/null
 endef
 
 # sel .c via selcc -S + selas; sel .s via selas. Keeps a `make sel` build
 # CCES-free end-to-end.
 define SEL_LIB_RULES
 $$(BUILD)/sel/lib_$(1)_%.doj: $$(LIBSEL_SRC)/$(1)/%.c | $$(BUILD)/sel
-	$$(Q)$$(SELCC) $$(SELCC_FLAGS) -S -o $$(@:.doj=.s) $$<
-	$$(Q)$$(SELAS) $$(SELAS_FLAGS) -o $$@ $$(@:.doj=.s)
+	$$(Q)$$(SELCC) $$(SELCC_FLAGS) -S -o $$(@:.doj=.s) $$< > /dev/null
+	$$(Q)$$(SELAS) $$(SELAS_FLAGS) -o $$@ $$(@:.doj=.s) > /dev/null
 $$(BUILD)/sel/lib_$(1)_%.doj: $$(LIBSEL_SRC)/$(1)/%.s | $$(BUILD)/sel
-	$$(Q)$$(SELAS) $$(SELAS_FLAGS) -o $$@ $$<
+	$$(Q)$$(SELAS) $$(SELAS_FLAGS) -o $$@ $$< > /dev/null
 endef
 
 $(foreach sub,$(LIBSEL_SUBS),$(eval $(call CCES_LIB_RULES,$(sub))))
 $(foreach sub,$(LIBSEL_SUBS),$(eval $(call SEL_LIB_RULES,$(sub))))
 
 $(CCES_ARCHIVE): $(LIBSEL_OBJS_CCES) $(HARNESS_OBJS_CCES) | $(BUILD)/cces
-	$(Q)$(ELFAR) -c $@ $^
+	$(Q)$(ELFAR) -c $@ $^ > /dev/null
 
 $(SEL_ARCHIVE): $(LIBSEL_OBJS_SEL) $(HARNESS_OBJS_SEL) | $(BUILD)/sel
-	$(Q)$(SELAR) -c $@ $^
+	$(Q)$(SELAR) -c $@ $^ > /dev/null
 
 # Per-case cces .ldr. Stem-named target is what Make tracks; the
 # expect-encoded sibling (cctest_X.0xNN.ldr) is what the mission Foreach
 # globs. Stale 0x*.ldr siblings are removed first so a changed @expect
 # leaves only the new copy.
 $(BUILD)/cces/%.ldr: cases/%.c $(CCES_ARCHIVE) | $(BUILD)/cces
-	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/cces/$*.doj $<
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/cces/$*.doj $< > /dev/null
 	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \
 	    -T $(LIBSEL_LDF) -o $(BUILD)/cces/$*.dxe \
-	    $(BUILD)/cces/$*.doj $(CCES_ARCHIVE)
+	    $(BUILD)/cces/$*.doj $(CCES_ARCHIVE) > /dev/null
 	$(Q)$(ELFLOADER) -proc ADSP-21569 -b UARTHOST -f ASCII -Width 8 \
-	    $(BUILD)/cces/$*.dxe -o $@
+	    $(BUILD)/cces/$*.dxe -o $@ > /dev/null
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/cces/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/cces/$*.$$hex.ldr; \
-	    echo "cces $* BUILT expect=$$hex"
+	    printf '\033[32mcces %s PASS\033[0m expect=%s\n' "$*" "$$hex"
 
 # Per-case sel .ldr. Same stem/encoded-sibling layout as cces.
 $(BUILD)/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) | $(BUILD)/sel
-	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/sel/$*.s $<
-	$(Q)$(SELAS) $(SELAS_FLAGS) -o $(BUILD)/sel/$*.doj $(BUILD)/sel/$*.s
+	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/sel/$*.s $< > /dev/null
+	$(Q)$(SELAS) $(SELAS_FLAGS) -o $(BUILD)/sel/$*.doj $(BUILD)/sel/$*.s > /dev/null
 	$(Q)$(SELD) -proc ADSP-21569 -T $(LIBSEL_LDF) -o $(BUILD)/sel/$*.dxe \
-	    $(BUILD)/sel/$*.doj $(SEL_ARCHIVE)
+	    $(BUILD)/sel/$*.doj $(SEL_ARCHIVE) > /dev/null
 	$(Q)$(SELLOAD) -proc ADSP-21569 -b UARTHOST -f ascii -Width 8 \
-	    -o $@ $(BUILD)/sel/$*.dxe
+	    -o $@ $(BUILD)/sel/$*.dxe > /dev/null
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/sel/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/sel/$*.$$hex.ldr; \
-	    echo "sel $* BUILT expect=$$hex"
+	    printf '\033[32msel %s PASS\033[0m expect=%s\n' "$*" "$$hex"
 
 # === drafts: same sweep applied to draft_cases/ ===
 # Mirrors the cases/ rules but reads from draft_cases/ and writes to
@@ -191,12 +191,12 @@ $$(BUILD)/drafts/$(1)/%.run: draft_cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/d
 	$$(Q)got=$$$$($$(BUILD)/drafts/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
 	    if [ -z "$$$$got" ]; then \
-	        echo "$(1) (draft) $$* FAIL: no 'got NN' output (crashed or empty)"; exit 1; \
+	        printf '\033[31m$(1) (draft) %s FAIL\033[0m: no got NN output\n' "$$*"; exit 1; \
 	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
-	        echo "$(1) (draft) $$* FAIL: expect=$$$$expect got=0x$$$$got"; exit 1; \
+	        printf '\033[31m$(1) (draft) %s FAIL\033[0m expect=%s got=0x%s\n' "$$*" "$$$$expect" "$$$$got"; exit 1; \
 	    fi; \
-	    echo "$(1) (draft) $$* PASS"
+	    printf '\033[32m$(1) (draft) %s PASS\033[0m\n' "$$*"
 	$$(Q)touch $$@
 endef
 
@@ -204,27 +204,27 @@ $(eval $(call DRAFT_HOST_RULE,gcc))
 $(eval $(call DRAFT_HOST_RULE,clang))
 
 $(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cces
-	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/cces/$*.doj $<
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/cces/$*.doj $< > /dev/null
 	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \
 	    -T $(LIBSEL_LDF) -o $(BUILD)/drafts/cces/$*.dxe \
-	    $(BUILD)/drafts/cces/$*.doj $(CCES_ARCHIVE)
+	    $(BUILD)/drafts/cces/$*.doj $(CCES_ARCHIVE) > /dev/null
 	$(Q)$(ELFLOADER) -proc ADSP-21569 -b UARTHOST -f ASCII -Width 8 \
-	    $(BUILD)/drafts/cces/$*.dxe -o $@
+	    $(BUILD)/drafts/cces/$*.dxe -o $@ > /dev/null
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/drafts/cces/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/drafts/cces/$*.$$hex.ldr; \
-	    echo "cces (draft) $* BUILT expect=$$hex"
+	    printf '\033[32mcces (draft) %s PASS\033[0m expect=%s\n' "$*" "$$hex"
 
 $(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) | $(BUILD)/drafts/sel
-	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/drafts/sel/$*.s $<
-	$(Q)$(SELAS) $(SELAS_FLAGS) -o $(BUILD)/drafts/sel/$*.doj $(BUILD)/drafts/sel/$*.s
+	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/drafts/sel/$*.s $< > /dev/null
+	$(Q)$(SELAS) $(SELAS_FLAGS) -o $(BUILD)/drafts/sel/$*.doj $(BUILD)/drafts/sel/$*.s > /dev/null
 	$(Q)$(SELD) -proc ADSP-21569 -T $(LIBSEL_LDF) -o $(BUILD)/drafts/sel/$*.dxe \
-	    $(BUILD)/drafts/sel/$*.doj $(SEL_ARCHIVE)
+	    $(BUILD)/drafts/sel/$*.doj $(SEL_ARCHIVE) > /dev/null
 	$(Q)$(SELLOAD) -proc ADSP-21569 -b UARTHOST -f ascii -Width 8 \
-	    -o $@ $(BUILD)/drafts/sel/$*.dxe
+	    -o $@ $(BUILD)/drafts/sel/$*.dxe > /dev/null
 	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/drafts/sel/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr; \
-	    echo "sel (draft) $* BUILT expect=$$hex"
+	    printf '\033[32msel (draft) %s PASS\033[0m expect=%s\n' "$*" "$$hex"

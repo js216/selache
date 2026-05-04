@@ -73,8 +73,6 @@ fn main() {
         return;
     }
 
-    print_banner();
-
     if let Err(e) = selload::run(&opts) {
         fatal(&e.to_string());
     }
