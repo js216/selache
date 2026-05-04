@@ -153,3 +153,62 @@ $(BUILD)/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) | $(BUILD)/sel
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/sel/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/sel/$*.$$hex.ldr
+
+# === drafts: same sweep applied to draft_cases/ ===
+# Mirrors the cases/ rules but reads from draft_cases/ and writes to
+# build/drafts/<toolchain>/. Reuses the cases/ support archives
+# (libxtest.dlb / libxtest_sel.dlb) since they're case-independent.
+DRAFT_SRCS  := $(wildcard draft_cases/cctest_*.c)
+DRAFT_NAMES := $(notdir $(DRAFT_SRCS:.c=))
+
+DRAFTS_GCC_STAMPS   := $(addprefix $(BUILD)/drafts/gcc/,  $(addsuffix .run,$(DRAFT_NAMES)))
+DRAFTS_CLANG_STAMPS := $(addprefix $(BUILD)/drafts/clang/,$(addsuffix .run,$(DRAFT_NAMES)))
+DRAFTS_CCES_LDRS    := $(addprefix $(BUILD)/drafts/cces/, $(addsuffix .ldr,$(DRAFT_NAMES)))
+DRAFTS_SEL_LDRS     := $(addprefix $(BUILD)/drafts/sel/,  $(addsuffix .ldr,$(DRAFT_NAMES)))
+
+.PHONY: drafts-gcc drafts-clang drafts-cces drafts-sel
+drafts-gcc:   $(DRAFTS_GCC_STAMPS)
+drafts-clang: $(DRAFTS_CLANG_STAMPS)
+drafts-cces:  $(DRAFTS_CCES_LDRS)
+drafts-sel:   $(DRAFTS_SEL_LDRS)
+
+$(BUILD)/drafts/gcc $(BUILD)/drafts/clang $(BUILD)/drafts/cces $(BUILD)/drafts/sel:
+	$(Q)mkdir -p $@
+
+define DRAFT_HOST_RULE
+$$(BUILD)/drafts/$(1)/%.run: draft_cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/drafts/$(1)
+	$$(Q)$(1) $$(CFLAGS_HOST) -o $$(BUILD)/drafts/$(1)/$$*.bin $$< $$(BUILD)/host_wrap.c -lm
+	$$(Q)got=$$$$($$(BUILD)/drafts/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
+	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
+	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
+	        echo "$(1) (draft) $$*: expect=$$$$expect got=0x$$$$got"; exit 1; \
+	    fi
+	$$(Q)touch $$@
+endef
+
+$(eval $(call DRAFT_HOST_RULE,gcc))
+$(eval $(call DRAFT_HOST_RULE,clang))
+
+$(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cces
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/cces/$*.doj $<
+	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \
+	    -T $(LIBSEL_LDF) -o $(BUILD)/drafts/cces/$*.dxe \
+	    $(BUILD)/drafts/cces/$*.doj $(CCES_ARCHIVE)
+	$(Q)$(ELFLOADER) -proc ADSP-21569 -b UARTHOST -f ASCII -Width 8 \
+	    $(BUILD)/drafts/cces/$*.dxe -o $@
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    hex=$$(printf '0x%x' $$(($$expect))); \
+	    rm -f $(BUILD)/drafts/cces/$*.0x*.ldr; \
+	    cp $@ $(BUILD)/drafts/cces/$*.$$hex.ldr
+
+$(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) | $(BUILD)/drafts/sel
+	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/drafts/sel/$*.s $<
+	$(Q)$(SELAS) $(SELAS_FLAGS) -o $(BUILD)/drafts/sel/$*.doj $(BUILD)/drafts/sel/$*.s
+	$(Q)$(SELD) -proc ADSP-21569 -T $(LIBSEL_LDF) -o $(BUILD)/drafts/sel/$*.dxe \
+	    $(BUILD)/drafts/sel/$*.doj $(SEL_ARCHIVE)
+	$(Q)$(SELLOAD) -proc ADSP-21569 -b UARTHOST -f ascii -Width 8 \
+	    -o $@ $(BUILD)/drafts/sel/$*.dxe
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    hex=$$(printf '0x%x' $$(($$expect))); \
+	    rm -f $(BUILD)/drafts/sel/$*.0x*.ldr; \
+	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr
