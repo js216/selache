@@ -153,18 +153,28 @@ pub fn size_words_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
         Type::Pointer(_) | Type::FunctionPtr { .. } => 1,
         Type::Array(elem, Some(n)) => {
             // Narrow-element arrays (`char`, `signed char`, `unsigned
-            // char`) are byte-packed: four bytes per 32-bit word, so
-            // C99 byte-address semantics hold through `(char *)` casts
-            // and `p[i]` indexing.  Without packing a `char s[5]`
-            // would reserve five words, forcing pointer arithmetic
-            // into a word-stride that the `(char *)&int` alias case
-            // cannot satisfy.
-            let ebytes = size_bytes_ctx(elem, ctx);
-            if ebytes == 1 {
-                (*n as u32).div_ceil(4).max(1)
-            } else {
-                size_words_ctx(elem, ctx) * (*n as u32)
-            }
+            // char`, `short`, `unsigned short`) are byte-packed: four
+            // bytes per 32-bit word, so C99 byte-address semantics hold
+            // through `(char *)` casts and `p[i]` indexing.  Without
+            // packing, a `char s[5]` would reserve five words, forcing
+            // pointer arithmetic into a word-stride that the
+            // `(char *)&int` alias case cannot satisfy.  The same logic
+            // extends to `short[N]`: with one short per word the index
+            // stride (`sizeof(short) == 2`) walks half a word instead
+            // of a full element, so `arr[1]` reads inside `arr[0]`.
+            //
+            // Multi-dimensional arrays of narrow elements byte-pack
+            // contiguously across the inner-array boundaries — `short
+            // m[2][3]` is six contiguous shorts, not two padded
+            // 8-byte rows — so compute the total reservation from the
+            // flat `size_bytes_ctx(self)` rather than the recursive
+            // `size_words(elem) * n` (which would pad each inner row
+            // up to a word boundary).  For wider elements (`int`,
+            // `long long`) `size_bytes(elem)` is already a multiple of
+            // 4 and the two formulas agree, so this branch keeps the
+            // existing layout intact.
+            let total_bytes = size_bytes_ctx(elem, ctx) * (*n as u32);
+            total_bytes.div_ceil(4).max(1)
         }
         Type::Array(_, None) => 0,
         Type::Struct { .. } => size_bytes_ctx(ty, ctx).div_ceil(4),

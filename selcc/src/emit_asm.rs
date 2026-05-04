@@ -657,6 +657,128 @@ enum InitWord {
     Sym(String),
 }
 
+/// Strip Array layers off `ty` until reaching the leaf scalar type, or
+/// return None for non-arrays / unsized arrays.  Used to detect
+/// multi-dimensional narrow-element arrays that need byte-packed
+/// flattening (`int16_t m[2][3]` → leaf `int16_t`).
+fn array_leaf_type<'a>(
+    ty: &'a crate::types::Type,
+    tctx: &'a dyn crate::types::TypeCtx,
+) -> Option<&'a crate::types::Type> {
+    let stripped = strip_type(ty, tctx);
+    match stripped {
+        crate::types::Type::Array(elem, Some(_)) => array_leaf_type(elem, tctx).or(Some(elem)),
+        _ => None,
+    }
+}
+
+/// Flatten an arbitrarily nested array initializer into a sequence of
+/// leaf-element half values (16 bits each for short arrays, 8 bits
+/// each for char arrays).  `byte_offset` is the starting byte offset
+/// within the outermost array, and `bytes_per_leaf` is the leaf scalar
+/// size.  Each leaf init expression contributes one entry; gaps caused
+/// by short positional lists or array designators are reflected by
+/// jumping the byte cursor.  Designated initializers (`[i] = v`) reset
+/// the cursor to `i * bytes_per_leaf`.
+///
+/// The output is a list of `(byte_offset, value)` pairs that callers
+/// can pack into 32-bit words via shift-and-merge.  Returning byte
+/// offsets — instead of word indices — is what makes a multi-dim
+/// short array (`int16_t m[2][3]`) span row boundaries within a single
+/// word: row 0's third short and row 1's first short share word 1,
+/// just as cces's `.byte` layout does.
+fn flatten_narrow_array_init(
+    init: &Expr,
+    ty: &crate::types::Type,
+    bytes_per_leaf: u32,
+    byte_offset: u32,
+    out: &mut Vec<(u32, u32)>,
+    tctx: &dyn crate::types::TypeCtx,
+) -> Result<()> {
+    let stripped = strip_type(ty, tctx);
+    match stripped {
+        crate::types::Type::Array(elem, Some(_)) => {
+            let elem_bytes = crate::types::size_bytes_ctx(elem, tctx);
+            // Walk the init list.  Positional items advance the cursor
+            // by one element; designators jump it.
+            let items: &[Expr] = match init {
+                Expr::InitList(items) => items.as_slice(),
+                // A non-init-list initializer at an array position is
+                // either a string literal (handled elsewhere) or a
+                // single-value implicit initializer; treat as a single
+                // positional value placed at the start.
+                _ => {
+                    return flatten_narrow_array_init(
+                        init,
+                        elem,
+                        bytes_per_leaf,
+                        byte_offset,
+                        out,
+                        tctx,
+                    );
+                }
+            };
+            let mut cursor: u32 = 0;
+            for item in items {
+                let (idx, inner) = match item {
+                    Expr::ArrayDesignator { index, value } => {
+                        let i = eval_const_expr(index, tctx)? as u32;
+                        (i, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                let inner_off = byte_offset + idx * elem_bytes;
+                flatten_narrow_array_init(inner, elem, bytes_per_leaf, inner_off, out, tctx)?;
+                cursor = idx + 1;
+            }
+            Ok(())
+        }
+        _ => {
+            // Leaf scalar.  Emit a single (byte_offset, value) entry.
+            // Use the 64-bit constant evaluator so a wide literal like
+            // `(int16_t)0x12345678` retains its bits before the mask
+            // truncates to the leaf width.  Symbol-typed initializers
+            // (`&array`, function names) are not legal here because a
+            // narrow array element cannot hold a relocatable address.
+            let n = eval_const_expr_i64(init).ok_or_else(|| Error::Compile {
+                msg: format!(
+                    "narrow array element requires a numeric constant initializer; \
+                     got {init:?}"
+                ),
+            })? as u32;
+            let mask = if bytes_per_leaf == 1 { 0xFFu32 } else { 0xFFFFu32 };
+            out.push((byte_offset, n & mask));
+            Ok(())
+        }
+    }
+}
+
+/// Pack a list of `(byte_offset, value)` entries into 32-bit
+/// little-endian words sized to cover `total_bytes` (rounded up).
+/// Multiple values landing in the same word are merged by left-shift
+/// and OR; `bytes_per_leaf` controls the per-entry width (1 for char,
+/// 2 for short).  Used by `build_init_words` to emit byte-packed
+/// global storage for multi-dimensional narrow-element arrays so the
+/// runtime sees the same contiguous byte layout cces produces.
+fn pack_narrow_entries(
+    entries: &[(u32, u32)],
+    bytes_per_leaf: u32,
+    total_bytes: u32,
+) -> Vec<InitWord> {
+    let words = total_bytes.div_ceil(4).max(1) as usize;
+    let mut buf = vec![0u32; words];
+    for &(byte_off, val) in entries {
+        let wi = (byte_off / 4) as usize;
+        if wi >= buf.len() {
+            continue;
+        }
+        let lane_bits = (byte_off % 4) * 8;
+        let mask = if bytes_per_leaf == 1 { 0xFFu32 } else { 0xFFFFu32 };
+        buf[wi] = (buf[wi] & !(mask << lane_bits)) | ((val & mask) << lane_bits);
+    }
+    buf.into_iter().map(InitWord::Num).collect()
+}
+
 /// Emit a `.VAR name = v0, v1, ...;` initializer line. Using `.VAR`
 /// keeps each logical word at 4 bytes regardless of char-size, which
 /// matches what the previous byte-level emitter produced.
@@ -834,6 +956,35 @@ fn build_init_words(
                 .collect())
         }
         Expr::InitList(items) => {
+            // Narrow-element-array fast path: any (possibly multi-
+            // dimensional) array whose leaf scalar is `char` or
+            // `short` byte-packs across all dimensions.  Without this
+            // detection a 2D `int16_t m[2][3]` would round each row
+            // up to two words and place row 1 at byte offset 8 while
+            // index scaling (2 bytes per element times 3 elements)
+            // expects row 1 at byte offset 6 — the runtime then loads
+            // garbage when reading `m[1][i]`.  Flattening the entire
+            // init tree into a flat byte buffer before packing into
+            // 32-bit words is the only layout that keeps the data
+            // emission, `sizeof`, and pointer arithmetic consistent.
+            if let Some(t) = ty {
+                if let Some(leaf) = array_leaf_type(t, tctx) {
+                    let leaf_bytes = crate::types::size_bytes_ctx(leaf, tctx);
+                    if leaf_bytes == 1 || leaf_bytes == 2 {
+                        let mut entries: Vec<(u32, u32)> = Vec::new();
+                        flatten_narrow_array_init(
+                            init,
+                            t,
+                            leaf_bytes,
+                            0,
+                            &mut entries,
+                            tctx,
+                        )?;
+                        return Ok(pack_narrow_entries(&entries, leaf_bytes, size_bytes));
+                    }
+                }
+            }
+
             // Honour designated initializers (`[n] = v`, `.field = v`).
             // Holes between designators are zero-filled to match C99.
             // Positional items after a designator continue from the
@@ -967,6 +1118,20 @@ fn build_init_words(
         other => {
             let words = size_bytes.div_ceil(4).max(1);
             let mut v: Vec<InitWord> = vec![InitWord::Num(0); words as usize];
+            // For 64-bit (or wider) integer literals — `static uint64_t
+            // g = 0x1021F5EB7F464F61LL;` — `eval_init_word` truncates
+            // to 32 bits and only fills the low word, leaving the high
+            // word zeroed.  Detect a multi-word integer constant and
+            // split the i64 value into little-endian word pairs so the
+            // matching `Load64` (low at offset 0, high at offset 1)
+            // sees the full literal.
+            if words >= 2 {
+                if let Some((lo, hi)) = const_i64_words(other) {
+                    v[0] = InitWord::Num(lo);
+                    v[1] = InitWord::Num(hi);
+                    return Ok(v);
+                }
+            }
             v[0] = eval_init_word(other, tctx, ictx)?;
             Ok(v)
         }
@@ -1154,6 +1319,81 @@ fn eval_init_word(
         },
         Expr::Cast(_, inner) => eval_init_word(inner, tctx, ictx),
         _ => Ok(InitWord::Num(eval_const_expr(expr, tctx)? as u32)),
+    }
+}
+
+/// Constant-fold a 64-bit integer initializer expression into a
+/// (low_word, high_word) pair, or None if the expression is not a
+/// recognisable 64-bit integer constant.  Used by `build_init_words` to
+/// split `0x1021F5EB7F464F61LL` style literals across the two words of
+/// a `uint64_t` global; without this the high word would stay zero
+/// because `eval_const_expr` truncates to i32.
+fn const_i64_words(expr: &Expr) -> Option<(u32, u32)> {
+    let v = eval_const_expr_i64(expr)?;
+    let u = v as u64;
+    Some((u as u32, (u >> 32) as u32))
+}
+
+/// Evaluate a constant-expression in 64-bit precision.  Mirrors the
+/// 32-bit `eval_const_expr` but keeps the full long-long range so a
+/// single literal `0x1021F5EB7F464F61LL` survives word splitting.
+/// Only the operations actually exercised by csmith-style file-scope
+/// initialisers are implemented; extending the set is mechanical.
+fn eval_const_expr_i64(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::IntLit(n, _) => Some(*n),
+        Expr::CharLit(n) => Some(*n),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => Some(eval_const_expr_i64(operand)?.wrapping_neg()),
+        Expr::Unary {
+            op: UnaryOp::BitNot,
+            operand,
+        } => Some(!eval_const_expr_i64(operand)?),
+        Expr::Cast(_, inner) => eval_const_expr_i64(inner),
+        Expr::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)?.wrapping_add(eval_const_expr_i64(rhs)?)),
+        Expr::Binary {
+            op: BinaryOp::Sub,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)?.wrapping_sub(eval_const_expr_i64(rhs)?)),
+        Expr::Binary {
+            op: BinaryOp::Mul,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)?.wrapping_mul(eval_const_expr_i64(rhs)?)),
+        Expr::Binary {
+            op: BinaryOp::BitOr,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)? | eval_const_expr_i64(rhs)?),
+        Expr::Binary {
+            op: BinaryOp::BitAnd,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)? & eval_const_expr_i64(rhs)?),
+        Expr::Binary {
+            op: BinaryOp::BitXor,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)? ^ eval_const_expr_i64(rhs)?),
+        Expr::Binary {
+            op: BinaryOp::Shl,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)? << (eval_const_expr_i64(rhs)? & 63)),
+        Expr::Binary {
+            op: BinaryOp::Shr,
+            lhs,
+            rhs,
+        } => Some(eval_const_expr_i64(lhs)? >> (eval_const_expr_i64(rhs)? & 63)),
+        Expr::Comma(_l, r) => eval_const_expr_i64(r),
+        _ => None,
     }
 }
 

@@ -1807,6 +1807,16 @@ fn is_byte_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
     crate::types::size_bytes_ctx(ty.unqualified(), ctx) == 1
 }
 
+/// Is `ty` a 2-byte scalar (short / unsigned short / int16_t)?  Short
+/// arrays are byte-packed (two halves per 32-bit word) so an `arr[i]`
+/// load striding by `sizeof(short) == 2` can land at byte offset 0 or
+/// 2 of the containing word.  The load must therefore mask the
+/// addressed half rather than treating the full DM read as a 32-bit
+/// element.  Mirrors `is_byte_scalar`'s role for `char`-element data.
+fn is_short_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
+    crate::types::size_bytes_ctx(ty.unqualified(), ctx) == 2
+}
+
 /// Emit a byte-granularity load from `addr` (a byte address that may
 /// not be word-aligned).  Produces a 32-bit vreg holding the byte at
 /// `addr`, zero-extended by default and sign-extended if `signed`.
@@ -1909,6 +1919,108 @@ fn emit_byte_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
     ctx.emit(IrOp::BitAnd(val_byte, val, ff2));
     let placed = ctx.alloc_vreg();
     ctx.emit(IrOp::Shl(placed, val_byte, shift));
+    // new_word = cleared | placed
+    let new_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitOr(new_word, cleared, placed));
+    ctx.emit(IrOp::Store(new_word, word_addr, 0));
+}
+
+/// Emit a 16-bit (short) granularity load from `addr` (a byte address
+/// that is short-aligned, i.e. addr & 1 == 0, but may not be
+/// word-aligned).  Produces a 32-bit vreg holding the half-word at
+/// `addr`, zero-extended by default and sign-extended if `signed`.
+/// Sequence:
+///   word_addr = addr & ~3
+///   word      = load(word_addr, 0)
+///   shift     = (addr & 2) << 3
+///   half      = (word >> shift) & 0xFFFF
+///   if signed: sign-extend from bit 15
+/// Short arrays are byte-packed with two halves per 32-bit word, so
+/// `arr[1]` lands at byte offset 2 of word 0.  A plain DM read at byte
+/// address 2 spans bytes 2..5 — it would happen to load the right half
+/// when both halves of word 0 hold the same value, but in general the
+/// software shift-and-mask is what makes `short *` indexing satisfy
+/// C99 6.3.2.3 p7 once `short[N]` is byte-packed.
+fn emit_short_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
+    // word_addr = addr & ~3
+    let mask_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_word, !3i64 & 0xFFFFFFFF));
+    let word_addr = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(word_addr, addr, mask_word));
+    // word = load(word_addr, 0)
+    let word = ctx.alloc_vreg();
+    ctx.emit(IrOp::Load(word, word_addr, 0));
+    // half_off_bits = (addr & 2) << 3   -- 0 for low half, 16 for high half
+    let two = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(two, 2));
+    let two_bit = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(two_bit, addr, two));
+    let three = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(three, 3));
+    let shift = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(shift, two_bit, three));
+    // shifted = word >> shift  (logical, since we mask to 16 bits next)
+    let neg_shift = ctx.alloc_vreg();
+    ctx.emit(IrOp::Neg(neg_shift, shift));
+    let shifted = ctx.alloc_vreg();
+    ctx.emit(IrOp::Lshr(shifted, word, neg_shift));
+    // half = shifted & 0xFFFF
+    let mask_ffff = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_ffff, 0xFFFF));
+    let half = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(half, shifted, mask_ffff));
+    if !signed {
+        return half;
+    }
+    // Sign-extend from bit 15: (half << 16) >> 16 arithmetic.
+    let shl16 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl16, 16));
+    let up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(up, half, shl16));
+    let neg16 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(neg16, -16));
+    let down = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(down, up, neg16));
+    down
+}
+
+/// Emit a short-granularity store: write the low 16 bits of `val` to
+/// the half-word at `addr` (byte address, short-aligned), preserving
+/// the other half-word of the containing 32-bit word.  Read-modify-
+/// write sequence parallels `emit_byte_store` but with a 16-bit mask
+/// shifted by 0 or 16 depending on `(addr & 2)`.
+fn emit_short_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
+    let mask_word = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask_word, !3i64 & 0xFFFFFFFF));
+    let word_addr = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(word_addr, addr, mask_word));
+    let old = ctx.alloc_vreg();
+    ctx.emit(IrOp::Load(old, word_addr, 0));
+    let two = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(two, 2));
+    let two_bit = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(two_bit, addr, two));
+    let three = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(three, 3));
+    let shift = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(shift, two_bit, three));
+    // half_mask = 0xFFFF << shift
+    let ffff = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(ffff, 0xFFFF));
+    let half_mask = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(half_mask, ffff, shift));
+    // clear_mask = ~half_mask
+    let clear_mask = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitNot(clear_mask, half_mask));
+    let cleared = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(cleared, old, clear_mask));
+    // placed = (val & 0xFFFF) << shift
+    let ffff2 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(ffff2, 0xFFFF));
+    let val_half = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(val_half, val, ffff2));
+    let placed = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(placed, val_half, shift));
     // new_word = cleared | placed
     let new_word = ctx.alloc_vreg();
     ctx.emit(IrOp::BitOr(new_word, cleared, placed));
@@ -3093,6 +3205,10 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             emit_byte_store(ctx, ptr, val);
                             return Ok(val);
                         }
+                        if is_short_scalar(pt, ctx) {
+                            emit_short_store(ctx, ptr, val);
+                            return Ok(val);
+                        }
                     }
                     ctx.emit(IrOp::Store(val, ptr, 0));
                 }
@@ -3114,6 +3230,10 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     if let Some(ref et) = elem_ty_opt {
                         if is_byte_scalar(et, ctx) {
                             emit_byte_store(ctx, addr, val);
+                            return Ok(val);
+                        }
+                        if is_short_scalar(et, ctx) {
+                            emit_short_store(ctx, addr, val);
                             return Ok(val);
                         }
                     }
@@ -3158,6 +3278,16 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 if is_byte_scalar(pt, ctx) {
                     let signed = !resolve_type(pt, ctx).is_unsigned();
                     return Ok(emit_byte_load(ctx, ptr, signed));
+                }
+                if is_short_scalar(pt, ctx) {
+                    // Short pointee: byte-packed `short[N]` puts two
+                    // halves per word, so the addressed half (low or
+                    // high) must be extracted by mask+shift just like
+                    // a char element.  Sign-extend per the resolved
+                    // pointee signedness so an `int16_t` load surfaces
+                    // negative values correctly through the int-promote.
+                    let signed = !resolve_type(pt, ctx).is_unsigned();
+                    return Ok(emit_short_load(ctx, ptr, signed));
                 }
             }
             // C99 6.3.2.1p3: when the pointee is itself an aggregate
@@ -3241,6 +3371,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     // branch above.
                     let signed = !resolve_type(et, ctx).is_unsigned();
                     return Ok(emit_byte_load(ctx, addr, signed));
+                }
+                if is_short_scalar(et, ctx) {
+                    // Short element: byte-packed two halves per word, so
+                    // the addressed half must be extracted by mask+shift
+                    // (see `emit_short_load`).  Sign-extend per resolved
+                    // signedness so a signed `int16_t` element promotes
+                    // correctly.
+                    let signed = !resolve_type(et, ctx).is_unsigned();
+                    return Ok(emit_short_load(ctx, addr, signed));
                 }
             }
             // A long-long element occupies two memory words; emit a
@@ -4940,15 +5079,26 @@ fn lower_aggregate_init(
     let struct_fields: Option<Vec<(String, Type)>> =
         resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
 
-    // Byte-packed char-element array: each item is an 8-bit byte that
-    // lives in one of four byte slots of a 32-bit word.  Use a
-    // separate pass so we can combine multiple items into a single
-    // `Store` per word, honouring the same deepest-slot-first layout
-    // aggregates use for downward-growing stacks.
-    if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
-        if crate::types::size_bytes_ctx(elem_ty, ctx) == 1 {
-            lower_byte_array_init(ctx, items, slot_base, num_words)?;
-            return Ok(());
+    // Byte-packed narrow-element arrays (any dimensionality) where the
+    // leaf scalar is `char` (1 byte) or `short` (2 bytes).  These pack
+    // contiguously across all dimensions: `int16_t m[2][3]` is six
+    // contiguous shorts in three 32-bit words, not two padded 8-byte
+    // rows.  Without this dispatch the generic positional loop would
+    // advance one word per element regardless of leaf width and write
+    // past the stack reservation that `size_words_ctx` computed for
+    // the (now byte-packed) array.  Mirrors the `build_init_words`
+    // file-scope flatten path so locals and globals see the same
+    // layout.
+    if let Type::Array(_, _) = resolved_ty.unqualified() {
+        if let Some(leaf_bytes) = narrow_array_leaf_bytes(&resolved_ty, ctx) {
+            if leaf_bytes == 1 {
+                lower_byte_array_init(ctx, items, ty, slot_base, num_words)?;
+                return Ok(());
+            }
+            if leaf_bytes == 2 {
+                lower_short_array_init(ctx, items, ty, slot_base, num_words)?;
+                return Ok(());
+            }
         }
     }
 
@@ -5242,57 +5392,132 @@ fn count_flat_items_for(ty: &Type, items: &[Expr], ctx: &mut LowerCtx) -> usize 
     consumed.max(1)
 }
 
-/// Initialise a byte-packed char-element array from an aggregate init
-/// list.  Each item lowers to a byte value (1-byte scalar), and four
-/// consecutive items share one 32-bit word at byte lanes 0..3 (little
-/// endian).  Designators `[n] = v` write byte index `n`; positional
-/// items continue from the cursor.  Because word storage is written in
-/// one `Store` per word and 32-bit vreg operations are the only
-/// primitive, items are assembled into a running word via shift-and-or
-/// and committed when the next word starts or at end of list.
-fn lower_byte_array_init(
+/// Walk the leaf scalar of a (possibly multi-dimensional) array type
+/// and return its byte size if the leaf is a narrow scalar (`char`,
+/// `unsigned char`, `bool`, `short`, `unsigned short`).  Returns None
+/// for non-array types or arrays whose leaf is wider than 2 bytes.
+/// Used to detect when an aggregate stack init should use byte-packed
+/// flattening instead of the generic word-per-element path.
+fn narrow_array_leaf_bytes(ty: &Type, ctx: &LowerCtx) -> Option<u32> {
+    let mut current = resolve_type(ty, ctx);
+    loop {
+        match current.unqualified().clone() {
+            Type::Array(elem, Some(_)) => {
+                current = resolve_type(&elem, ctx);
+            }
+            other => {
+                let b = crate::types::size_bytes_ctx(&other, ctx);
+                if b == 1 || b == 2 {
+                    return Some(b);
+                }
+                return None;
+            }
+        }
+    }
+}
+
+/// Flatten an arbitrarily nested array initializer into leaf-scalar
+/// stores, recording each leaf's byte offset within the outermost
+/// array and the lowered vreg holding its (already masked) value.
+/// `byte_offset` is the starting byte offset of the current sub-array.
+/// Designators (`[i] = v`) jump the inner cursor; positional items
+/// advance one element each.  Mirrors the file-scope
+/// `flatten_narrow_array_init` so locals and globals share the same
+/// layout.
+fn flatten_narrow_array_local(
+    ctx: &mut LowerCtx,
+    init: &Expr,
+    ty: &Type,
+    leaf_bytes: u32,
+    byte_offset: u32,
+    out: &mut Vec<(u32, VReg)>,
+) -> Result<()> {
+    let resolved = resolve_type(ty, ctx);
+    match resolved.unqualified() {
+        Type::Array(elem, Some(_)) => {
+            let elem_bytes = crate::types::size_bytes_ctx(elem, ctx);
+            let items: &[Expr] = match init {
+                Expr::InitList(items) => items.as_slice(),
+                _ => {
+                    return flatten_narrow_array_local(
+                        ctx,
+                        init,
+                        elem,
+                        leaf_bytes,
+                        byte_offset,
+                        out,
+                    );
+                }
+            };
+            let mut cursor: u32 = 0;
+            for item in items {
+                let (idx, inner) = match item {
+                    Expr::ArrayDesignator { index, value } => {
+                        let i = match index.as_ref() {
+                            Expr::IntLit(v, _) => *v as u32,
+                            _ => cursor,
+                        };
+                        (i, value.as_ref())
+                    }
+                    Expr::DesignatedInit { value, .. } => (cursor, value.as_ref()),
+                    other => (cursor, other),
+                };
+                let inner_off = byte_offset + idx * elem_bytes;
+                flatten_narrow_array_local(ctx, inner, elem, leaf_bytes, inner_off, out)?;
+                cursor = idx + 1;
+            }
+            Ok(())
+        }
+        _ => {
+            // Leaf scalar: lower the value and mask to leaf width.
+            let val = lower_expr(ctx, init)?;
+            let mask_v = ctx.alloc_vreg();
+            let mask = if leaf_bytes == 1 { 0xFFi64 } else { 0xFFFFi64 };
+            ctx.emit(IrOp::LoadImm(mask_v, mask));
+            let masked = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitAnd(masked, val, mask_v));
+            out.push((byte_offset, masked));
+            Ok(())
+        }
+    }
+}
+
+/// Initialise a byte-packed narrow-element array (any dimensionality)
+/// from an aggregate init list.  Leaf-element stores share a 32-bit
+/// word at four byte lanes (1-byte leaf) or two half-word lanes
+/// (2-byte leaf).  Designators `[n] = v` write byte index `n *
+/// elem_size`; positional items continue from the cursor.  Word
+/// storage is written in one `Store` per word, accumulating multiple
+/// leaves with shift-and-or.  Used for both `char` (`leaf_bytes=1`)
+/// and `short` (`leaf_bytes=2`) leaf types so multi-dim layouts pack
+/// contiguously across row boundaries the way cces emits them.
+fn lower_narrow_array_init(
     ctx: &mut LowerCtx,
     items: &[Expr],
+    ty: &Type,
     slot_base: u32,
     num_words: u32,
+    leaf_bytes: u32,
 ) -> Result<()> {
-    // Resolve each item into (byte_idx, value_vreg_masked_to_byte).
-    // Non-constant values still emit properly; constant-foldable values
-    // are handled by the generic lower_expr path.
-    let mut byte_vals: Vec<(u32, VReg)> = Vec::with_capacity(items.len());
-    let mut cursor: u32 = 0;
-    for item in items {
-        let (idx, inner) = match item {
-            Expr::ArrayDesignator { index, value } => {
-                let i = match index.as_ref() {
-                    Expr::IntLit(v, _) => *v as u32,
-                    _ => cursor,
-                };
-                (i, value.as_ref())
-            }
-            Expr::DesignatedInit { value, .. } => (cursor, value.as_ref()),
-            other => (cursor, other),
-        };
-        let val = lower_expr(ctx, inner)?;
-        let mask_v = ctx.alloc_vreg();
-        ctx.emit(IrOp::LoadImm(mask_v, 0xFF));
-        let masked = ctx.alloc_vreg();
-        ctx.emit(IrOp::BitAnd(masked, val, mask_v));
-        byte_vals.push((idx, masked));
-        cursor = idx.saturating_add(1);
-    }
+    // Walk the (possibly nested) init list into a flat list of
+    // (byte_offset, leaf_vreg) entries.
+    let outer_init = Expr::InitList(items.to_vec());
+    let mut entries: Vec<(u32, VReg)> = Vec::new();
+    flatten_narrow_array_local(ctx, &outer_init, ty, leaf_bytes, 0, &mut entries)?;
 
-    // Bucket bytes by word index (byte_idx / 4).  A missing byte stays
-    // zero from the outer zero-fill that `lower_aggregate_init` just
-    // emitted.
+    // Bucket by word index (byte_off / 4).  A missing leaf stays zero
+    // from the outer zero-fill that `lower_aggregate_init` emitted.
+    let lane_bits: u32 = if leaf_bytes == 1 { 8 } else { 16 };
+    let lane_mod: u32 = 4 / leaf_bytes;
     for wi in 0..num_words {
         let slot = slot_base + num_words - 1 - wi;
         let mut word_acc: Option<VReg> = None;
-        for &(bi, v) in &byte_vals {
-            if bi / 4 != wi {
+        for &(byte_off, v) in &entries {
+            if byte_off / 4 != wi {
                 continue;
             }
-            let lane = (bi % 4) * 8;
+            let lane_idx = (byte_off / leaf_bytes) % lane_mod;
+            let lane = lane_idx * lane_bits;
             let shifted = if lane == 0 {
                 v
             } else {
@@ -5316,6 +5541,30 @@ fn lower_byte_array_init(
         }
     }
     Ok(())
+}
+
+/// Local-stack byte-packed init for a `char[]` / `unsigned char[]`
+/// array; defers to the unified narrow-array path with a 1-byte leaf.
+fn lower_byte_array_init(
+    ctx: &mut LowerCtx,
+    items: &[Expr],
+    ty: &Type,
+    slot_base: u32,
+    num_words: u32,
+) -> Result<()> {
+    lower_narrow_array_init(ctx, items, ty, slot_base, num_words, 1)
+}
+
+/// Local-stack byte-packed init for a `short[]` / `unsigned short[]`
+/// array; defers to the unified narrow-array path with a 2-byte leaf.
+fn lower_short_array_init(
+    ctx: &mut LowerCtx,
+    items: &[Expr],
+    ty: &Type,
+    slot_base: u32,
+    num_words: u32,
+) -> Result<()> {
+    lower_narrow_array_init(ctx, items, ty, slot_base, num_words, 2)
 }
 
 /// Initialise a struct from an aggregate init list using real field
