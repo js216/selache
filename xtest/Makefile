@@ -148,7 +148,7 @@ $(BUILD)/cces/%.ldr: cases/%.c $(CCES_ARCHIVE) | $(BUILD)/cces
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/cces/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/cces/$*.$$hex.ldr; \
-	    printf '\033[32mcces %s PASS\033[0m expect=%s\n' "$*" "$$hex"
+	    printf 'cces %s built expect=%s\n' "$*" "$$hex"
 
 # Per-case sel .ldr. Same stem/encoded-sibling layout as cces.
 $(BUILD)/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) | $(BUILD)/sel
@@ -162,7 +162,7 @@ $(BUILD)/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) | $(BUILD)/sel
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/sel/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/sel/$*.$$hex.ldr; \
-	    printf '\033[32msel %s PASS\033[0m expect=%s\n' "$*" "$$hex"
+	    printf 'sel %s built expect=%s\n' "$*" "$$hex"
 
 # === drafts: same sweep applied to draft_cases/ ===
 # Mirrors the cases/ rules but reads from draft_cases/ and writes to
@@ -214,7 +214,7 @@ $(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cc
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/drafts/cces/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/drafts/cces/$*.$$hex.ldr; \
-	    printf '\033[32mcces (draft) %s PASS\033[0m expect=%s\n' "$*" "$$hex"
+	    printf 'cces (draft) %s built expect=%s\n' "$*" "$$hex"
 
 $(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) | $(BUILD)/drafts/sel
 	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/drafts/sel/$*.s $< > /dev/null
@@ -227,4 +227,4 @@ $(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) | $(BUILD)/drafts/sel
 	    hex=$$(printf '0x%x' $$(($$expect))); \
 	    rm -f $(BUILD)/drafts/sel/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr; \
-	    printf '\033[32msel (draft) %s PASS\033[0m expect=%s\n' "$*" "$$hex"
+	    printf 'sel (draft) %s built expect=%s\n' "$*" "$$hex"
