@@ -2,6 +2,10 @@
 # gcc/clang validate inline (run binary, compare to /* @expect */). cces/sel
 # emit cctest_<name>.<expect_hex>.ldr files for the mission Foreach loop.
 
+# Recipes use bash-only arithmetic ($((16#$got))) for hex parsing; pin the
+# recipe shell so /bin/sh (dash on Debian) doesn't get used.
+SHELL := /bin/bash
+
 R := $(abspath ..)
 
 CC21K     ?= cc21k
@@ -80,6 +84,9 @@ $(BUILD)/$(1)/%.run: cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/$(1)
 	$$(Q)$(1) $$(CFLAGS_HOST) -o $$(BUILD)/$(1)/$$*.bin $$< $$(BUILD)/host_wrap.c -lm
 	$$(Q)got=$$$$($$(BUILD)/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
+	    if [ -z "$$$$got" ]; then \
+	        echo "$(1) $$*: no 'got NN' output (binary crashed or produced nothing)"; exit 1; \
+	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
 	        echo "$(1) $$*: expect=$$$$expect got=0x$$$$got"; exit 1; \
 	    fi
@@ -180,6 +187,9 @@ $$(BUILD)/drafts/$(1)/%.run: draft_cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/d
 	$$(Q)$(1) $$(CFLAGS_HOST) -o $$(BUILD)/drafts/$(1)/$$*.bin $$< $$(BUILD)/host_wrap.c -lm
 	$$(Q)got=$$$$($$(BUILD)/drafts/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
+	    if [ -z "$$$$got" ]; then \
+	        echo "$(1) (draft) $$*: no 'got NN' output (binary crashed or produced nothing)"; exit 1; \
+	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
 	        echo "$(1) (draft) $$*: expect=$$$$expect got=0x$$$$got"; exit 1; \
 	    fi
