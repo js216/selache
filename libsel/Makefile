@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# Makefile --- TODO: description
+# Copyright (c) 2026 Jakob Kastelic
 CFLAGS  ?= -std=c99 -Wall -Wextra -Werror -pedantic -fno-builtin
 BUILD    = build
 SRCS     = $(wildcard src/*/*.c)

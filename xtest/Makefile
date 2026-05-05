@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0
+# Makefile --- TODO: description
+# Copyright (c) 2026 Jakob Kastelic
 # cctest sweep: build every cases/cctest_*.c through gcc, clang, cces, sel.
 # gcc/clang validate inline (run binary, compare to /* @expect */). cces/sel
 # emit cctest_<name>.<expect_hex>.ldr files for the mission Foreach loop.
