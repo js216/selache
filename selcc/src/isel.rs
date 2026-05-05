@@ -700,16 +700,11 @@ pub fn select_with_name(
                         ));
                     }
                 }
-                // Save the caller's frame pointer into the R2 frame-link
-                // slot that the CJUMP delay slot pushes for callee RFRAME.
-                instrs.push(MachInstr {
-                    instr: Instruction::URegMove {
-                        dest: target::UREG_FIXED_TAG | target::ureg_r(2),
-                        src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
-                    },
-                    reloc: None,
-                });
-
+                // Save this frame pointer into R2 for the callee's
+                // frame-link slot. Direct CJUMP updates I6 from I7, but
+                // it does not synthesize R2 = old I6 for the delay-slot
+                // push below.
+                emit_frame_link_save(&mut instrs);
                 // CJUMP (DB) target: the SHARC+ C-ABI call. The two
                 // delay slots execute before the branch takes effect:
                 //   slot 1: DM(I7,M7) = R2  — push R2 onto frame stack
@@ -1004,13 +999,7 @@ pub fn select_with_name(
                     ));
                 }
                 // CJUMP to callee: identical to IrOp::Call.
-                instrs.push(MachInstr {
-                    instr: Instruction::URegMove {
-                        dest: target::UREG_FIXED_TAG | target::ureg_r(2),
-                        src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
-                    },
-                    reloc: None,
-                });
+                emit_frame_link_save(&mut instrs);
                 instrs.push(MachInstr {
                     instr: Instruction::CJump {
                         addr: 0,
@@ -3108,6 +3097,16 @@ fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
     }
 }
 
+fn emit_frame_link_save(instrs: &mut Vec<MachInstr>) {
+    instrs.push(MachInstr {
+        instr: Instruction::URegMove {
+            dest: target::UREG_FIXED_TAG | target::ureg_r(2),
+            src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
+        },
+        reloc: None,
+    });
+}
+
 /// Emit a CJUMP-based call to a 64-bit divmod runtime wrapper
 /// (`___div64.`, `___udiv64.`, `___mod64.`, or `___umod64.`).
 ///
@@ -3142,14 +3141,8 @@ fn emit_runtime_call_64_divmod(
     instrs.push(MachInstr::compute_pass(0xC000u16 | 5u16, (lhs + 1) as u16));
     instrs.push(MachInstr::compute_pass(0xC000u16 | 8u16, rhs as u16));
     instrs.push(MachInstr::compute_pass(0xC000u16 | 9u16, (rhs + 1) as u16));
-    instrs.push(MachInstr {
-        instr: Instruction::URegMove {
-            dest: target::UREG_FIXED_TAG | target::ureg_r(2),
-            src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
-        },
-        reloc: None,
-    });
     // CJUMP (DB) to the helper.
+    emit_frame_link_save(instrs);
     instrs.push(MachInstr {
         instr: Instruction::CJump {
             addr: 0,
@@ -3246,15 +3239,9 @@ fn emit_runtime_call_32_divmod(
         0xC000u16 | target::ARG_REGS[1] as u16,
         rhs as u16,
     ));
-    instrs.push(MachInstr {
-        instr: Instruction::URegMove {
-            dest: target::UREG_FIXED_TAG | target::ureg_r(2),
-            src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
-        },
-        reloc: None,
-    });
     // CJUMP (DB) to the helper: two delay slots push R2 and the return
     // address, mirroring the ordinary SHARC+ C call.
+    emit_frame_link_save(instrs);
     instrs.push(MachInstr {
         instr: Instruction::CJump {
             addr: 0,

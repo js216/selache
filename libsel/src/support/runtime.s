@@ -20,7 +20,8 @@
 //   __divrem_u32. / __divrem_s32.
 //     In:  R4 = dividend,  R8 = divisor
 //     Out: R0 = quotient,  R1 = remainder
-//     Clobbers: R0, R1, R4, R8, R12 (+ BTF, M7, M14, I12, LCNTR, ASTAT).
+//     Clobbers: R0, R1, R4, R5, R6, R8, R12
+//               (+ BTF, M7, M14, I12, LCNTR, ASTAT).
 //
 //   __divrem_u64. / __divrem_s64.
 //     In:  R12:R13 = dividend low:high
@@ -115,8 +116,7 @@ __divrem_u32.:
 // which is exactly its magnitude as an unsigned value (2**31) -- the
 // big-divisor short-circuit handles that without special casing.
 //
-// Sign masks must survive the unsigned core, so both masks are spilled
-// to the stack.
+// Sign masks live in caller-saved R5/R6 across the inline unsigned core.
 
 .GLOBAL __divrem_s32.;
 __divrem_s32.:
@@ -125,13 +125,11 @@ __divrem_s32.:
 
       DM(I7, M7) = R2;                 // spill caller's R2
 
-      R0 = R4;
-      R0 = ASHIFT R0 BY -31;           // dividend sign mask
-      R1 = R8;
-      R1 = ASHIFT R1 BY -31;           // divisor sign mask
-      DM(I7, M7) = R0;                 // stack: dividend sign
-      R1 = R1 XOR R0;
-      DM(I7, M7) = R1;                 // stack: quotient sign
+      R5 = R4;
+      R5 = ASHIFT R5 BY -31;           // dividend sign mask
+      R6 = R8;
+      R6 = ASHIFT R6 BY -31;           // divisor sign mask
+      R6 = R6 XOR R5;                  // quotient sign mask
 
       // abs(R4) if dividend was negative.
       R4 = PASS R4;
@@ -168,23 +166,15 @@ __divrem_s32.:
       // fall through
 
 .s32_fixup_signs:
-      // Reload sign masks. Top of stack (DM(+1, I7)) is quotient sign;
-      // the slot just below (DM(+2, I7)) is the dividend sign. Keep I7
-      // fixed so the final R2 restore still addresses the caller's slot.
-      R12 = DM(1, I7);                 // quotient sign
-      R8  = DM(2, I7);                 // dividend sign
-
-      R12 = PASS R12;
+      R6 = PASS R6;
       IF GE JUMP .s32_q_done;
       R0 = -R0;
 .s32_q_done:
-      R8 = PASS R8;
+      R5 = PASS R5;
       IF GE JUMP .s32_r_done;
       R1 = -R1;
 .s32_r_done:
-      // Caller's R2 is three pushes above: R2, dividend sign, quotient
-      // sign. RFRAME below restores I7 = I6 and discards them.
-      R2 = DM(3, I7);
+      R2 = DM(M6, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
@@ -416,9 +406,8 @@ ___shl64.:
 // frame-link slot, so any argument passed in R2 would be silently
 // reinterpreted as the saved frame link by the wrapper's epilogue.
 
-// ___div64 -- signed 64-bit division for selcc
-      .GLOBAL ___div64.;
-___div64.:
+// Signed 64-bit public wrappers are implemented in div32.c.
+.___div64_asm.:
       DM(I7, M7) = R8;
       DM(I7, M7) = R9;
       DM(I7, M7) = R10;
@@ -432,6 +421,7 @@ ___div64.:
       R13 = R5;
       R14 = R8;
       R15 = R9;
+      R2 = I6;
       CJUMP __divrem_s64. (DB);
       DM(I7, M7) = R2;
       DM(I7, M7) = .___div64_ret - 1;
@@ -451,12 +441,10 @@ ___div64.:
       JUMP (M14, I12) (DB);
       RFRAME;
       NOP;
-.___div64..end:
-      .type ___div64.,STT_FUNC;
+.___div64_asm..end:
+      .type .___div64_asm.,STT_FUNC;
 
-// ___mod64 -- signed 64-bit modulo for selcc
-      .GLOBAL ___mod64.;
-___mod64.:
+.___mod64_asm.:
       DM(I7, M7) = R8;
       DM(I7, M7) = R9;
       DM(I7, M7) = R10;
@@ -469,6 +457,7 @@ ___mod64.:
       R13 = R5;
       R14 = R8;
       R15 = R9;
+      R2 = I6;
       CJUMP __divrem_s64. (DB);
       DM(I7, M7) = R2;
       DM(I7, M7) = .___mod64_ret - 1;
@@ -488,8 +477,8 @@ ___mod64.:
       JUMP (M14, I12) (DB);
       RFRAME;
       NOP;
-.___mod64..end:
-      .type ___mod64.,STT_FUNC;
+.___mod64_asm..end:
+      .type .___mod64_asm.,STT_FUNC;
 
 // ___udiv64 -- unsigned 64-bit division for selcc
       .GLOBAL ___udiv64.;
@@ -506,6 +495,7 @@ ___udiv64.:
       R13 = R5;
       R14 = R8;
       R15 = R9;
+      R2 = I6;
       CJUMP __divrem_u64. (DB);
       DM(I7, M7) = R2;
       DM(I7, M7) = .___udiv64_ret - 1;
@@ -542,6 +532,7 @@ ___umod64.:
       R13 = R5;
       R14 = R8;
       R15 = R9;
+      R2 = I6;
       CJUMP __divrem_u64. (DB);
       DM(I7, M7) = R2;
       DM(I7, M7) = .___umod64_ret - 1;

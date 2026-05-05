@@ -3325,6 +3325,18 @@ mod tests {
     }
 
     #[test]
+    fn direct_call_saves_frame_link_before_cjump() {
+        let m = compile("int ext(int); int f() { return ext(1); }");
+        let link = m.text.find("R2=I6;").expect("missing R2=I6");
+        let call = m.text.find("CJUMP ext.").expect("missing CJUMP ext.");
+        assert!(
+            link < call,
+            "frame link save must precede direct CJUMP:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
     fn global_address_load_uses_symbol_text() {
         let m = compile("int counter;\nint get() { return counter; }");
         assert!(m.text.contains("counter."), "got:\n{}", m.text);

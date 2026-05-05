@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* div32.c --- 32-bit integer divide/modulo runtime helpers */
+/* div32.c --- integer divide/modulo runtime helpers */
 /* Copyright (c) 2026 Jakob Kastelic */
 
 static unsigned int uabs32(int x)
@@ -75,4 +75,59 @@ unsigned int __sel_umod32_c(unsigned int dividend, unsigned int divisor)
 
     (void)udivmod32(dividend, divisor, &remainder);
     return remainder;
+}
+
+static void divmod_u64(unsigned long long dividend,
+                       unsigned long long divisor,
+                       unsigned long long *quotient,
+                       unsigned long long *remainder)
+{
+    unsigned long long q = 0;
+    unsigned long long r = 0;
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        r = (r << 1) | (dividend >> 63);
+        dividend <<= 1;
+        q <<= 1;
+        if (r >= divisor) {
+            r -= divisor;
+            q |= 1ULL;
+        }
+    }
+
+    *quotient = q;
+    *remainder = r;
+}
+
+long long ___div64(long long dividend, long long divisor)
+{
+    unsigned long long q;
+    unsigned long long r;
+    unsigned long long lhs = dividend < 0
+                                 ? 0ULL - (unsigned long long)dividend
+                                 : (unsigned long long)dividend;
+    unsigned long long rhs = divisor < 0
+                                 ? 0ULL - (unsigned long long)divisor
+                                 : (unsigned long long)divisor;
+
+    divmod_u64(lhs, rhs, &q, &r);
+    (void)r;
+    return (long long)(((dividend < 0) != (divisor < 0)) ? 0ULL - q : q);
+}
+
+long long ___mod64(long long dividend, long long divisor)
+{
+    unsigned long long q;
+    unsigned long long r;
+    unsigned long long lhs = dividend < 0
+                                 ? 0ULL - (unsigned long long)dividend
+                                 : (unsigned long long)dividend;
+    unsigned long long rhs = divisor < 0
+                                 ? 0ULL - (unsigned long long)divisor
+                                 : (unsigned long long)divisor;
+
+    divmod_u64(lhs, rhs, &q, &r);
+    (void)q;
+    return (long long)(dividend < 0 ? 0ULL - r : r);
 }
