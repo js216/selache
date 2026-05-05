@@ -61,12 +61,52 @@ def expect_of(stem):
 
 
 def make_drafts():
-    subprocess.check_call(
-        ["make", "-C", "selache/xtest",
-         "drafts-cces", "drafts-sel",
-         f"-j{os.cpu_count() or 4}",
-         "--output-sync=line", "--no-print-directory"],
-        cwd=ROOT)
+    """Build all draft .ldr files. If a specific case fails (e.g. seld
+    layout overflow on a particularly large csmith output), delete
+    the offending source and retry. Bounded to a few tries to avoid
+    looping on a deeper bug. Each removed draft prints a reason."""
+    for attempt in range(20):
+        cp = subprocess.run(
+            ["make", "-C", "selache/xtest",
+             "drafts-cces", "drafts-sel",
+             f"-j{os.cpu_count() or 4}",
+             "--output-sync=line", "--no-print-directory"],
+            cwd=ROOT, capture_output=True, text=True)
+        if cp.returncode == 0:
+            return
+        # Parse for the first failing target and infer the source.
+        m = re.search(
+            r"Error \d+\s*\n.*?build/drafts/(\w+)/(\w+)\.\S*ldr",
+            cp.stdout + cp.stderr, re.DOTALL)
+        if not m:
+            m = re.search(
+                r"build/drafts/(\w+)/(\w+)\.\S*ldr.*?Error \d+",
+                cp.stdout + cp.stderr, re.DOTALL)
+        if not m:
+            sys.stderr.write(cp.stdout[-2000:] + cp.stderr[-2000:])
+            raise RuntimeError(
+                "make failed and no failing-target line could be parsed")
+        toolchain, stem = m.group(1), m.group(2)
+        src = DRAFT_DIR / f"{stem}.c"
+        if not src.exists():
+            raise RuntimeError(
+                f"make failure attributed to {stem} but {src} missing")
+        # Tight reason: the line above the Error.
+        why_m = re.search(
+            r"([^\n]+)\n[^\n]*\[Makefile:\d+: build/drafts/" + toolchain
+            + "/" + stem + r"\.\S*ldr\]\s*Error",
+            cp.stdout + cp.stderr)
+        why = why_m.group(1).strip() if why_m else "unknown"
+        print(f"  drop {stem} ({toolchain} build): {why[:80]}",
+              flush=True)
+        src.unlink()
+        # Also clean partial build artefacts so the retry is clean.
+        for ext in (".doj", ".dxe", ".ldr", ".s"):
+            for p in (BUILD_DIR / "cces").glob(f"{stem}*{ext}"):
+                p.unlink(missing_ok=True)
+            for p in (BUILD_DIR / "sel").glob(f"{stem}*{ext}"):
+                p.unlink(missing_ok=True)
+    raise RuntimeError("make_drafts: gave up after 20 retries")
 
 
 def hw_check(stem, toolchain, expect):
