@@ -122,7 +122,7 @@ def hw_check(stem, toolchain, expect):
             f'# nonce {time.time_ns()}\n'
             f'dsp:reset\n'
             f'dsp:uart_open\n'
-            f'dsp:boot ldr=@ldr\n'
+            f'dsp:boot ldr=@ldr timeout_ms=2500\n'
             f'dsp:uart_expect sentinel="got " timeout_ms=3000\n'
             f'dsp:uart_close\n'
             f'mark tag=draft_hw\n')

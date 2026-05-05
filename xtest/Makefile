@@ -88,12 +88,12 @@ $(BUILD)/$(1)/%.run: cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/$(1)
 	$$(Q)got=$$$$($$(BUILD)/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
 	    if [ -z "$$$$got" ]; then \
-	        printf '\033[31m$(1) %s FAIL\033[0m: no got NN output\n' "$$*"; exit 1; \
+	        printf '$(1) %s \033[31mFAIL\033[0m: no got NN output\n' "$$*"; exit 1; \
 	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
-	        printf '\033[31m$(1) %s FAIL\033[0m expect=%s got=0x%s\n' "$$*" "$$$$expect" "$$$$got"; exit 1; \
+	        printf '$(1) %s \033[31mFAIL\033[0m expect=%s got=0x%s\n' "$$*" "$$$$expect" "$$$$got"; exit 1; \
 	    fi; \
-	    printf '\033[32m$(1) %s PASS\033[0m\n' "$$*"
+	    printf '$(1) %s \033[32mPASS\033[0m\n' "$$*"
 	$$(Q)touch $$@
 endef
 
@@ -194,12 +194,12 @@ $$(BUILD)/drafts/$(1)/%.run: draft_cases/%.c $$(BUILD)/host_wrap.c | $$(BUILD)/d
 	$$(Q)got=$$$$($$(BUILD)/drafts/$(1)/$$*.bin | awk '/^got/ {print $$$$2}'); \
 	    expect=$$$$(awk '$$(EXPECT_AWK)' $$<); \
 	    if [ -z "$$$$got" ]; then \
-	        printf '\033[31m$(1) (draft) %s FAIL\033[0m: no got NN output\n' "$$*"; exit 1; \
+	        printf '$(1) (draft) %s \033[31mFAIL\033[0m: no got NN output\n' "$$*"; exit 1; \
 	    fi; \
 	    if [ "$$$$((16#$$$$got))" -ne "$$$$(($$$$expect))" ]; then \
-	        printf '\033[31m$(1) (draft) %s FAIL\033[0m expect=%s got=0x%s\n' "$$*" "$$$$expect" "$$$$got"; exit 1; \
+	        printf '$(1) (draft) %s \033[31mFAIL\033[0m expect=%s got=0x%s\n' "$$*" "$$$$expect" "$$$$got"; exit 1; \
 	    fi; \
-	    printf '\033[32m$(1) (draft) %s PASS\033[0m\n' "$$*"
+	    printf '$(1) (draft) %s \033[32mPASS\033[0m\n' "$$*"
 	$$(Q)touch $$@
 endef
 
