@@ -6530,15 +6530,16 @@ fn lower_call_args_with_params(
             let pair = lower_complex_expr(ctx, arg)?;
             arg_vregs.push(pair.real);
             arg_vregs.push(pair.imag);
-        } else if arg_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx))
-            || param_is_long_long
+        } else if param_is_long_long
+            || (param_ty.is_none() && arg_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx)))
         {
             // Either the argument itself is `long long` or the
-            // prototype's parameter is. In both cases the callee's
-            // ABI slot is a 64-bit pair: widen any 32-bit-or-narrower
-            // value to 64 bits before pushing the (low, high) vreg
-            // pair so the callee's incoming-arg register pinning
-            // sees a complete value rather than a half-set pair.
+            // prototype's parameter is `long long`. With no prototype
+            // the legacy/default path also passes a `long long`
+            // expression as a pair. With a prototype for a narrower
+            // parameter, though, C99 6.5.2.2p7 converts as if by
+            // assignment first; that case must consume one ABI slot,
+            // not the source expression's two-word width.
             let pair = lower_expr(ctx, arg)?;
             let pair = if ctx.is_64bit_vreg(pair) {
                 pair
@@ -6548,10 +6549,34 @@ fn lower_call_args_with_params(
             arg_vregs.push(pair);
             arg_vregs.push(pair + 1);
         } else {
-            arg_vregs.push(lower_expr(ctx, arg)?);
+            let val = lower_expr(ctx, arg)?;
+            let val = if let Some(param_ty) = param_ty {
+                coerce_call_arg_to_param(ctx, val, param_ty)
+            } else {
+                val
+            };
+            arg_vregs.push(val);
         }
     }
     Ok(arg_vregs)
+}
+
+fn coerce_call_arg_to_param(ctx: &mut LowerCtx, val: VReg, param_ty: &Type) -> VReg {
+    let param_is_64 = ty_is_long_long(param_ty, ctx);
+    let val_is_64 = ctx.is_64bit_vreg(val);
+
+    if val_is_64 && !param_is_64 {
+        let tmp = ctx.alloc_vreg();
+        ctx.emit(IrOp::LongLongToInt(tmp, val));
+        coerce_vreg(ctx, tmp, param_ty)
+    } else if !val_is_64 && param_is_64 {
+        // The 64-bit-parameter path normally handles this before
+        // flattening the pair. Keep this branch for completeness when
+        // callers reuse the scalar coercion helper.
+        val
+    } else {
+        coerce_vreg(ctx, val, param_ty)
+    }
 }
 
 /// Pull the return type out of a `Type::FunctionPtr`, peeling any
@@ -7613,6 +7638,44 @@ mod tests {
         assert!(ops
             .iter()
             .any(|op| matches!(op, IrOp::Call(_, name, args) if name == "g" && args.len() == 5)));
+    }
+
+    #[test]
+    fn lower_long_long_call_arg_to_short_param_consumes_one_slot() {
+        let src = "typedef unsigned short uint16_t; uint16_t g(uint16_t, unsigned int); int f(long long x) { return g(x, 2); }";
+        let unit = parse::parse(src).unwrap();
+        let func = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let known = HashSet::from(["g".to_string(), "f".to_string()]);
+        let returns = HashMap::from([
+            ("g".to_string(), Type::Typedef("uint16_t".to_string())),
+            ("f".to_string(), Type::Int),
+        ]);
+        let params = HashMap::from([(
+            "g".to_string(),
+            vec![
+                Type::Typedef("uint16_t".to_string()),
+                Type::Unsigned(Box::new(Type::Int)),
+            ],
+        )]);
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+        };
+        let ops = lower_function_with_known(
+            func,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(
+            |op| matches!(op, IrOp::Call(_, name, args) if name == "g" && args.len() == 2)
+        ));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::LongLongToInt(..))));
     }
 
     #[test]

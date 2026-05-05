@@ -120,6 +120,9 @@ __divrem_u32.:
 
 .GLOBAL __divrem_s32.;
 __divrem_s32.:
+      R0 = R4 OR R8;
+      IF GE JUMP __divrem_u32.;        // fast path: both operands non-negative
+
       DM(I7, M7) = R2;                 // spill caller's R2
 
       R0 = R4;
@@ -166,8 +169,9 @@ __divrem_s32.:
 
 .s32_fixup_signs:
       // Reload sign masks. Top of stack (DM(+1, I7)) is quotient sign;
-      // the slot just below (DM(+2, I7)) is the dividend sign.
-      R12 = DM(M6, I7);                // quotient sign
+      // the slot just below (DM(+2, I7)) is the dividend sign. Keep I7
+      // fixed so the final R2 restore still addresses the caller's slot.
+      R12 = DM(1, I7);                 // quotient sign
       R8  = DM(2, I7);                 // dividend sign
 
       R12 = PASS R12;
