@@ -240,13 +240,17 @@ def host_eval(case_text):
             if cp.returncode != 0:
                 raise UBDetected(
                     f"{tool} failed to compile case:\n{cp.stderr}")
-            cp = subprocess.run(
-                [str(bin_path)], capture_output=True, text=True, timeout=10,
-                env={**os.environ, "UBSAN_OPTIONS":
-                     "print_stacktrace=0:halt_on_error=0"})
+            try:
+                cp = subprocess.run(
+                    [str(bin_path)], capture_output=True, text=True,
+                    timeout=10,
+                    env={**os.environ, "UBSAN_OPTIONS":
+                         "print_stacktrace=0:halt_on_error=0"})
+            except subprocess.TimeoutExpired:
+                raise UBDetected(
+                    f"{tool} binary hung > 10 s (likely UB-induced loop)")
             both = (cp.stdout or "") + "\n" + (cp.stderr or "")
             if "runtime error:" in both or "UndefinedBehaviorSanitizer" in both:
-                # Pull the first runtime-error line for a tight reason.
                 rm = re.search(r"runtime error: [^\n]+", both)
                 raise UBDetected(
                     f"{tool} UBSan: {rm.group(0) if rm else 'UB detected'}")
