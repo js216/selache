@@ -210,16 +210,19 @@ class UBDetected(Exception):
 
 
 def host_eval(case_text):
-    """Compile + run the case under host gcc AND clang at -m32 -O0;
-    require both to print the same `got NN`. On disagreement raise
-    UBDetected so the caller can retry with a fresh seed. Returns the
-    agreed integer on success."""
+    """Compile + run the case under host gcc AND clang at -m32 -O0
+    with UBSan. Any UndefinedBehaviorSanitizer diagnostic ("runtime
+    error: ...") raises UBDetected -- e.g. shift count >= width,
+    divide-by-zero, signed overflow, OOB indexing -- so the caller
+    can retry with a fresh seed. Both compilers must print the same
+    `got NN`. Returns the agreed integer on success."""
     wrap = (
         "#include <stdio.h>\n"
         "extern int test_main(void);\n"
         "int main(void) { printf(\"got %x\\n\", test_main()); return 0; }\n"
     )
-    flags = ["-m32", "-funsigned-char", "-std=c99", "-w", "-O0"]
+    flags = ["-m32", "-funsigned-char", "-std=c99", "-w", "-O0",
+             "-fsanitize=undefined"]
     with tempfile.TemporaryDirectory(prefix="csmith_eval_") as tmp:
         tmpd = pathlib.Path(tmp)
         case_path = tmpd / "first.c"
@@ -238,7 +241,15 @@ def host_eval(case_text):
                 raise UBDetected(
                     f"{tool} failed to compile case:\n{cp.stderr}")
             cp = subprocess.run(
-                [str(bin_path)], capture_output=True, text=True, timeout=10)
+                [str(bin_path)], capture_output=True, text=True, timeout=10,
+                env={**os.environ, "UBSAN_OPTIONS":
+                     "print_stacktrace=0:halt_on_error=0"})
+            both = (cp.stdout or "") + "\n" + (cp.stderr or "")
+            if "runtime error:" in both or "UndefinedBehaviorSanitizer" in both:
+                # Pull the first runtime-error line for a tight reason.
+                rm = re.search(r"runtime error: [^\n]+", both)
+                raise UBDetected(
+                    f"{tool} UBSan: {rm.group(0) if rm else 'UB detected'}")
             if cp.returncode != 0:
                 raise UBDetected(
                     f"{tool} binary exited rc={cp.returncode} "
