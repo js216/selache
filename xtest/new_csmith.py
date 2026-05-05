@@ -36,14 +36,17 @@ DRAFT_DIR = SCRIPT_DIR / "draft_cases"
 # exercise every selcc/selas/seld/selload codegen path against
 # realistic but small C; csmith without these limits emits
 # multi-thousand-line programs whose translation time dominates the
-# board turnaround. --safe-math-wrappers 0 drops the safe_math.h
-# dependency, which keeps the wrapped case header-clean against the
-# minimal cctest runtime. --no-volatiles drops the volatile-load /
+# board turnaround. Safe-math wrappers stay ON (default): csmith
+# emits safe_div/safe_mod/safe_lshift/etc. calls which short-circuit
+# divisor-zero, INT_MIN/-1 division, and shift-count >= width into
+# defined fallbacks before the raw operator runs. We paste the
+# expanded wrapper bodies (csmith_safe_math.h.inc) into each case so
+# the generated source is self-contained -- no -I/usr/include/csmith
+# at compile time.  --no-volatiles drops the volatile-load /
 # volatile-store paths the embedded driver model has not been
 # verified against.
 CSMITH_FLAGS = [
     "--concise",
-    "--safe-math-wrappers", "0",
     "--no-bitfields",
     "--no-pointers",
     "--no-structs",
@@ -102,6 +105,7 @@ CCTEST_INCLUDES = """\
 #include <float.h>
 #include <iso646.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -190,13 +194,18 @@ def transform_csmith(src):
     return src
 
 
+SAFE_MATH_PATH = SCRIPT_DIR / "csmith_safe_math.h.inc"
+
+
 def assemble_case(src, seed, stem):
-    """Stitch the SPDX header, includes, runtime, and transformed
-    csmith body into a single cctest case body. The @expect directive
-    is left out of the result; it gets prepended by the caller after
-    the host run has produced the expected value."""
+    """Stitch the SPDX header, includes, runtime, csmith's safe-math
+    wrapper bodies, and the transformed csmith body into a single
+    self-contained cctest case. The @expect directive is left out;
+    it gets prepended by the caller after the host run."""
     header = SPDX_HEADER_TEMPLATE.format(stem=stem, seed=seed)
-    return f"{header}\n{CCTEST_INCLUDES}\n{CSMITH_RUNTIME}\n{src.lstrip()}"
+    safe_math = SAFE_MATH_PATH.read_text()
+    return (f"{header}\n{CCTEST_INCLUDES}\n{CSMITH_RUNTIME}\n"
+            f"{safe_math}\n{src.lstrip()}")
 
 
 class UBDetected(Exception):
