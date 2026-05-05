@@ -2616,10 +2616,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let base_ty = expr_type(base, ctx);
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
-            let scaled = match base_ty
-                .as_ref()
-                .and_then(|t| pointee_type_resolved(t, ctx))
-            {
+            let scaled = match base_ty.as_ref().and_then(|t| pointee_type_resolved(t, ctx)) {
                 Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
                 None => index,
             };
@@ -3096,11 +3093,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
                         .map(|p| p.to_vec())
                 });
-            let arg_vregs = lower_call_args_with_params(
-                ctx,
-                args,
-                param_tys_owned.as_deref(),
-            )?;
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
             // The destination vreg's float/int classification must match
             // the callee's return type. Without this, a function returning
             // `double` lands in a non-float vreg, and any downstream
@@ -3164,11 +3157,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // widened to a 64-bit pair on the indirect path.
             let param_tys_owned: Option<Vec<Type>> =
                 expr_function_ptr_param_types(func_expr, ctx).map(|p| p.to_vec());
-            let arg_vregs = lower_call_args_with_params(
-                ctx,
-                args,
-                param_tys_owned.as_deref(),
-            )?;
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
             // Mirror the float-vs-int classification fix from the direct
             // `Expr::Call` arm: an indirect callee whose return type is
             // `float`/`double` must yield a float vreg so downstream
@@ -3793,11 +3782,7 @@ fn lower_complex_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<ComplexPair> {
                     expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
                         .map(|p| p.to_vec())
                 });
-            let arg_vregs = lower_call_args_with_params(
-                ctx,
-                args,
-                param_tys_owned.as_deref(),
-            )?;
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
             let slot = ctx.frame_size;
             ctx.frame_size += 2;
             let storage_slot = slot + 1; // deepest of the two
@@ -6351,11 +6336,7 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
                         .map(|p| p.to_vec())
                 });
-            let arg_vregs = lower_call_args_with_params(
-                ctx,
-                args,
-                param_tys_owned.as_deref(),
-            )?;
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
             // Reserve the `num_words`-slot buffer and point the
             // destination address at the *deepest* slot: field 0 of an
             // aggregate lives at the highest address (deepest frame
@@ -6406,11 +6387,7 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let fn_addr = lower_expr(ctx, func_expr)?;
             let param_tys_owned: Option<Vec<Type>> =
                 expr_function_ptr_param_types(func_expr, ctx).map(|p| p.to_vec());
-            let arg_vregs = lower_call_args_with_params(
-                ctx,
-                args,
-                param_tys_owned.as_deref(),
-            )?;
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
             // See direct-call branch for the rationale behind
             // pointing `dst_addr` at the deepest slot.
             let slot = ctx.frame_size;

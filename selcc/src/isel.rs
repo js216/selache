@@ -170,7 +170,7 @@ pub fn select_with_name(
 
             IrOp::Div(dst, lhs, rhs) => {
                 // Signed 32-bit integer divide: runtime call to
-                // `___div32` (shift-and-subtract). The earlier inline
+                // `__sel_div32_c` (shift-and-subtract). The earlier inline
                 // float-reciprocal path gave a 24-bit-mantissa answer
                 // whose TRUNC rounded 100000/1000 down to 99.
                 let mut ctx = CallSiteCtx {
@@ -178,40 +178,65 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(&mut instrs, "___div32", *dst, *lhs, *rhs, &mut ctx);
+                emit_runtime_call_32_divmod(
+                    &mut instrs,
+                    "__sel_div32_c",
+                    *dst,
+                    *lhs,
+                    *rhs,
+                    &mut ctx,
+                );
             }
 
             IrOp::UDiv(dst, lhs, rhs) => {
-                // Unsigned 32-bit integer divide: runtime call to
-                // `___udiv32`.
+                // Unsigned 32-bit integer divide: runtime call to `__sel_udiv32_c`.
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(&mut instrs, "___udiv32", *dst, *lhs, *rhs, &mut ctx);
+                emit_runtime_call_32_divmod(
+                    &mut instrs,
+                    "__sel_udiv32_c",
+                    *dst,
+                    *lhs,
+                    *rhs,
+                    &mut ctx,
+                );
             }
 
             IrOp::Mod(dst, lhs, rhs) => {
-                // Signed 32-bit integer modulo: runtime call to
-                // `___mod32`.
+                // Signed 32-bit integer modulo: runtime call to `__sel_mod32_c`.
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(&mut instrs, "___mod32", *dst, *lhs, *rhs, &mut ctx);
+                emit_runtime_call_32_divmod(
+                    &mut instrs,
+                    "__sel_mod32_c",
+                    *dst,
+                    *lhs,
+                    *rhs,
+                    &mut ctx,
+                );
             }
 
             IrOp::UMod(dst, lhs, rhs) => {
-                // Unsigned 32-bit integer modulo: runtime call to
-                // `___umod32`.
+                // Unsigned 32-bit integer modulo: runtime call to `__sel_umod32_c`.
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(&mut instrs, "___umod32", *dst, *lhs, *rhs, &mut ctx);
+                emit_runtime_call_32_divmod(
+                    &mut instrs,
+                    "__sel_umod32_c",
+                    *dst,
+                    *lhs,
+                    *rhs,
+                    &mut ctx,
+                );
             }
 
             IrOp::BitAnd(dst, lhs, rhs) => {
@@ -675,6 +700,16 @@ pub fn select_with_name(
                         ));
                     }
                 }
+                // Save the caller's frame pointer into the R2 frame-link
+                // slot that the CJUMP delay slot pushes for callee RFRAME.
+                instrs.push(MachInstr {
+                    instr: Instruction::URegMove {
+                        dest: target::UREG_FIXED_TAG | target::ureg_r(2),
+                        src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
+                    },
+                    reloc: None,
+                });
+
                 // CJUMP (DB) target: the SHARC+ C-ABI call. The two
                 // delay slots execute before the branch takes effect:
                 //   slot 1: DM(I7,M7) = R2  — push R2 onto frame stack
@@ -969,6 +1004,13 @@ pub fn select_with_name(
                     ));
                 }
                 // CJUMP to callee: identical to IrOp::Call.
+                instrs.push(MachInstr {
+                    instr: Instruction::URegMove {
+                        dest: target::UREG_FIXED_TAG | target::ureg_r(2),
+                        src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
+                    },
+                    reloc: None,
+                });
                 instrs.push(MachInstr {
                     instr: Instruction::CJump {
                         addr: 0,
@@ -3100,6 +3142,13 @@ fn emit_runtime_call_64_divmod(
     instrs.push(MachInstr::compute_pass(0xC000u16 | 5u16, (lhs + 1) as u16));
     instrs.push(MachInstr::compute_pass(0xC000u16 | 8u16, rhs as u16));
     instrs.push(MachInstr::compute_pass(0xC000u16 | 9u16, (rhs + 1) as u16));
+    instrs.push(MachInstr {
+        instr: Instruction::URegMove {
+            dest: target::UREG_FIXED_TAG | target::ureg_r(2),
+            src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
+        },
+        reloc: None,
+    });
     // CJUMP (DB) to the helper.
     instrs.push(MachInstr {
         instr: Instruction::CJump {
@@ -3169,10 +3218,9 @@ struct CallSiteCtx<'a> {
     return_labels: &'a mut Vec<(usize, String)>,
 }
 
-/// Emit a CJUMP-based call to a 32-bit divmod runtime wrapper
-/// (`___div32.`, `___udiv32.`, `___mod32.`, or `___umod32.`).
+/// Emit a CJUMP-based call to a 32-bit div/mod runtime helper.
 /// Arguments land in R4 (dividend) and R8 (divisor) per the standard
-/// SHARC+ C ABI; the result comes back in R0.
+/// SHARC+ C ABI; the selected result comes back in R0.
 ///
 /// The CJUMP form (not a raw `CALL`) is required so regalloc spills
 /// caller-saved registers across the call and lays down the two
@@ -3198,6 +3246,13 @@ fn emit_runtime_call_32_divmod(
         0xC000u16 | target::ARG_REGS[1] as u16,
         rhs as u16,
     ));
+    instrs.push(MachInstr {
+        instr: Instruction::URegMove {
+            dest: target::UREG_FIXED_TAG | target::ureg_r(2),
+            src: target::UREG_FIXED_TAG | target::ureg_i(target::FRAME_PTR),
+        },
+        reloc: None,
+    });
     // CJUMP (DB) to the helper: two delay slots push R2 and the return
     // address, mirroring the ordinary SHARC+ C call.
     instrs.push(MachInstr {

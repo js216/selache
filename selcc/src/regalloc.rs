@@ -877,10 +877,7 @@ impl Allocator {
             )
             && match &new_instr {
                 Instruction::ComputeLoadStore {
-                    access:
-                        MemAccess {
-                            i_reg, ..
-                        },
+                    access: MemAccess { i_reg, .. },
                     offset,
                     ..
                 } => *i_reg == target::FRAME_PTR && *offset == 0,

@@ -746,7 +746,11 @@ fn flatten_narrow_array_init(
                      got {init:?}"
                 ),
             })? as u32;
-            let mask = if bytes_per_leaf == 1 { 0xFFu32 } else { 0xFFFFu32 };
+            let mask = if bytes_per_leaf == 1 {
+                0xFFu32
+            } else {
+                0xFFFFu32
+            };
             out.push((byte_offset, n & mask));
             Ok(())
         }
@@ -773,7 +777,11 @@ fn pack_narrow_entries(
             continue;
         }
         let lane_bits = (byte_off % 4) * 8;
-        let mask = if bytes_per_leaf == 1 { 0xFFu32 } else { 0xFFFFu32 };
+        let mask = if bytes_per_leaf == 1 {
+            0xFFu32
+        } else {
+            0xFFFFu32
+        };
         buf[wi] = (buf[wi] & !(mask << lane_bits)) | ((val & mask) << lane_bits);
     }
     buf.into_iter().map(InitWord::Num).collect()
@@ -972,14 +980,7 @@ fn build_init_words(
                     let leaf_bytes = crate::types::size_bytes_ctx(leaf, tctx);
                     if leaf_bytes == 1 || leaf_bytes == 2 {
                         let mut entries: Vec<(u32, u32)> = Vec::new();
-                        flatten_narrow_array_init(
-                            init,
-                            t,
-                            leaf_bytes,
-                            0,
-                            &mut entries,
-                            tctx,
-                        )?;
+                        flatten_narrow_array_init(init, t, leaf_bytes, 0, &mut entries, tctx)?;
                         return Ok(pack_narrow_entries(&entries, leaf_bytes, size_bytes));
                     }
                 }
@@ -2083,7 +2084,7 @@ fn runtime_helper_clobbers_reg(mi: &MachInstr, reg: u16) -> bool {
     }
     matches!(
         reloc.symbol.as_str(),
-        "___div32" | "___udiv32" | "___mod32" | "___umod32"
+        "___div32" | "___udiv32" | "___mod32" | "___umod32" | "__divrem_s32" | "__divrem_u32"
     ) && reg == 12
 }
 
@@ -3505,7 +3506,14 @@ mod tests {
         // sequence (which rounded 100000/1000 to 99 because two Newton
         // iterations leave only 24 bits of mantissa precision).
         let text = round_trip_disasm("int f(int a, int b) { return a / b; }");
-        assert!(text.iter().any(|t| t.contains("CJUMP")), "got: {text:?}");
+        let cjump = text
+            .iter()
+            .position(|t| t.contains("CJUMP"))
+            .unwrap_or_else(|| panic!("expected CJUMP, got: {text:?}"));
+        assert!(
+            cjump > 0 && text[cjump - 1].contains("R2=I6"),
+            "runtime CJUMP must push caller frame link, got: {text:?}"
+        );
         assert!(
             !text.iter().any(|t| t.contains("RECIPS")),
             "inline reciprocal should no longer appear: {text:?}"

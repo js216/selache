@@ -700,8 +700,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     });
                     if has_extras {
                         for (extra_sym, _sign) in &pi.extra_label_refs {
-                            if !externs.contains(extra_sym) && !label_map.contains_key(extra_sym)
-                            {
+                            if !externs.contains(extra_sym) && !label_map.contains_key(extra_sym) {
                                 externs.push(extra_sym.clone());
                             }
                             relocs.push(PendingReloc {

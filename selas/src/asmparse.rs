@@ -309,8 +309,7 @@ impl<'a> AsmParser<'a> {
         }
 
         // Parse instruction
-        let (instr, label_ref, extra_label_refs) =
-            parse_instruction_at_line(rest, self.line)?;
+        let (instr, label_ref, extra_label_refs) = parse_instruction_at_line(rest, self.line)?;
         Ok(ParsedLine {
             label,
             instruction: Some(instr),
@@ -6340,10 +6339,7 @@ mod tests {
         let mut parser = AsmParser::new("I7 = ldf_stack_space + ldf_stack_length;\n");
         let lines = parser.parse_all().unwrap();
         let line = lines.into_iter().find(|l| l.instruction.is_some()).unwrap();
-        assert_eq!(
-            line.label_ref.as_deref(),
-            Some("ldf_stack_space")
-        );
+        assert_eq!(line.label_ref.as_deref(), Some("ldf_stack_space"));
         assert_eq!(
             line.extra_label_refs,
             vec![("ldf_stack_length".to_string(), 1)]

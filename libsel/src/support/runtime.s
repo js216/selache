@@ -565,17 +565,10 @@ ___umod64.:
 
 // ===== 32-bit divide/modulo helpers ====================================
 // Standard SHARC+ C calling convention: R4 = dividend, R8 = divisor,
-// result in R0. Internally each wrapper CJUMPs to `__divrem_[us]32.`
-// (which already follows that same R4/R8 in ABI and returns quotient
-// in R0 / remainder in R1) and, for the modulo wrappers, shuffles R1
-// into R0 before returning.
-//
-// The inner `CJUMP ... (DB)` uses the ordinary selcc delay-slot push
-// idiom (`DM(I7,M7) = R2` + return-address push) so that
-// `__divrem_[us]32.`'s RFRAME-based epilogue finds the correct frame
-// link and return PC. The outer caller enters via its own CJUMP, so
-// the wrapper's epilogue likewise uses `I12 = DM(M7,I6); JUMP
-// (M14,I12) (DB); RFRAME` to return.
+// result in R0. The division entry points tail-jump into the existing
+// divrem cores so they return directly to the selcc caller's CJUMP
+// frame. The modulo entry points carry direct copies of the matching
+// divrem core and move the remainder into R0 before returning.
 //
 // Motivation: selcc's isel lowers 32-bit `/` and `%` to a CJUMP into
 // one of these. The previous inline-float-reciprocal sequence rounded
@@ -587,14 +580,7 @@ ___umod64.:
 // ___div32 -- signed 32-bit division
       .GLOBAL ___div32.;
 ___div32.:
-      CJUMP __divrem_s32. (DB);
-      DM(I7, M7) = R2;
-      DM(I7, M7) = .___div32_ret - 1;
-.___div32_ret:
-      // Quotient already in R0.
-      I12 = DM(M7, I6);
-      JUMP (M14, I12) (DB);
-      RFRAME;
+      JUMP __divrem_s32.;
       NOP;
 .___div32..end:
       .type ___div32.,STT_FUNC;
@@ -602,11 +588,60 @@ ___div32.:
 // ___mod32 -- signed 32-bit modulo
       .GLOBAL ___mod32.;
 ___mod32.:
-      CJUMP __divrem_s32. (DB);
       DM(I7, M7) = R2;
-      DM(I7, M7) = .___mod32_ret - 1;
-.___mod32_ret:
-      R0 = R1;                         // remainder -> R0
+
+      R0 = R4;
+      R0 = ASHIFT R0 BY -31;
+      R1 = R8;
+      R1 = ASHIFT R1 BY -31;
+      DM(I7, M7) = R0;
+      R1 = R1 XOR R0;
+      DM(I7, M7) = R1;
+
+      R4 = PASS R4;
+      IF GE JUMP .mod32_abs_div_done;
+      R4 = -R4;
+.mod32_abs_div_done:
+      R8 = PASS R8;
+      IF GE JUMP .mod32_abs_dsr_done;
+      R8 = -R8;
+.mod32_abs_dsr_done:
+
+      R8 = PASS R8;
+      IF LT JUMP .mod32_big_divisor;
+      R0 = 0;
+      R1 = 0;
+      LCNTR = 32, DO .mod32_loop_end UNTIL LCE;
+            R4 = R4 + R4;
+            R1 = R1 + R1 + CI;
+            R0 = R0 + R0;
+            R12 = R1 - R8;
+            IF AC R1 = R12;
+.mod32_loop_end:
+            IF AC R0 = BSET R0 BY 0;
+      JUMP .mod32_fixup_signs;
+
+.mod32_big_divisor:
+      R12 = R4 - R8;
+      R1 = R4;
+      R0 = 0;
+      IF AC R1 = R12;
+      IF AC R0 = BSET R0 BY 0;
+
+.mod32_fixup_signs:
+      R12 = DM(M6, I7);
+      R8  = DM(2, I7);
+
+      R12 = PASS R12;
+      IF GE JUMP .mod32_q_done;
+      R0 = -R0;
+.mod32_q_done:
+      R8 = PASS R8;
+      IF GE JUMP .mod32_r_done;
+      R1 = -R1;
+.mod32_r_done:
+      R0 = R1;
+      R2 = DM(3, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
@@ -617,13 +652,7 @@ ___mod32.:
 // ___udiv32 -- unsigned 32-bit division
       .GLOBAL ___udiv32.;
 ___udiv32.:
-      CJUMP __divrem_u32. (DB);
-      DM(I7, M7) = R2;
-      DM(I7, M7) = .___udiv32_ret - 1;
-.___udiv32_ret:
-      I12 = DM(M7, I6);
-      JUMP (M14, I12) (DB);
-      RFRAME;
+      JUMP __divrem_u32.;
       NOP;
 .___udiv32..end:
       .type ___udiv32.,STT_FUNC;
@@ -631,11 +660,35 @@ ___udiv32.:
 // ___umod32 -- unsigned 32-bit modulo
       .GLOBAL ___umod32.;
 ___umod32.:
-      CJUMP __divrem_u32. (DB);
       DM(I7, M7) = R2;
-      DM(I7, M7) = .___umod32_ret - 1;
-.___umod32_ret:
+
+      R8 = PASS R8;
+      IF LT JUMP .umod32_big_divisor;
+
+      R0 = 0;
+      R1 = 0;
+      LCNTR = 32, DO .umod32_loop_end UNTIL LCE;
+            R4 = R4 + R4;
+            R1 = R1 + R1 + CI;
+            R0 = R0 + R0;
+            R12 = R1 - R8;
+            IF AC R1 = R12;
+.umod32_loop_end:
+            IF AC R0 = BSET R0 BY 0;
       R0 = R1;
+      R2 = DM(M6, I7);
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+
+.umod32_big_divisor:
+      R12 = R4 - R8;
+      R1 = R4;
+      R0 = 0;
+      IF AC R1 = R12;
+      R0 = R1;
+      R2 = DM(M6, I7);
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
