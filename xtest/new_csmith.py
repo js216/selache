@@ -199,31 +199,60 @@ def assemble_case(src, seed, stem):
     return f"{header}\n{CCTEST_INCLUDES}\n{CSMITH_RUNTIME}\n{src.lstrip()}"
 
 
+class UBDetected(Exception):
+    """Raised by host_eval when gcc and clang disagree on the output of
+    the generated case. Csmith with --safe-math-wrappers 0 emits raw
+    `/` and `%` expressions whose divisors can be zero, which is UB
+    that the two compilers resolve differently (one traps, one folds
+    to garbage). Any disagreement -- compile error, runtime crash,
+    missing `got NN`, or differing values -- means the case isn't
+    portable and shouldn't land in draft_cases/."""
+
+
 def host_eval(case_text):
-    """Compile + run the case under host gcc and return the printed
-    checksum as an integer. The harness's wrap.c form is reproduced
-    inline here to keep new_csmith.py free of run.py imports."""
+    """Compile + run the case under host gcc AND clang at -m32 -O0;
+    require both to print the same `got NN`. On disagreement raise
+    UBDetected so the caller can retry with a fresh seed. Returns the
+    agreed integer on success."""
     wrap = (
         "#include <stdio.h>\n"
         "extern int test_main(void);\n"
         "int main(void) { printf(\"got %x\\n\", test_main()); return 0; }\n"
     )
+    flags = ["-m32", "-funsigned-char", "-std=c99", "-w", "-O0"]
     with tempfile.TemporaryDirectory(prefix="csmith_eval_") as tmp:
         tmpd = pathlib.Path(tmp)
         case_path = tmpd / "first.c"
         wrap_path = tmpd / "wrap.c"
-        bin_path = tmpd / "host_bin"
         case_path.write_text(case_text)
         wrap_path.write_text(wrap)
-        run([
-            "gcc", "-m32", "-funsigned-char", "-std=c99", "-w", "-O0",
-            "-o", str(bin_path), str(case_path), str(wrap_path), "-lm",
-        ])
-        out = run([str(bin_path)])
-    m = re.search(r"got\s+([0-9a-fA-F]+)", out)
-    if not m:
-        sys.exit(f"could not parse `got NN` from host output:\n{out}")
-    return int(m.group(1), 16)
+
+        results = {}
+        for tool in ("gcc", "clang"):
+            bin_path = tmpd / f"host_bin_{tool}"
+            cp = subprocess.run(
+                [tool, *flags, "-o", str(bin_path),
+                 str(case_path), str(wrap_path), "-lm"],
+                capture_output=True, text=True, timeout=30)
+            if cp.returncode != 0:
+                raise UBDetected(
+                    f"{tool} failed to compile case:\n{cp.stderr}")
+            cp = subprocess.run(
+                [str(bin_path)], capture_output=True, text=True, timeout=10)
+            if cp.returncode != 0:
+                raise UBDetected(
+                    f"{tool} binary exited rc={cp.returncode} "
+                    f"(crash on UB?): stdout={cp.stdout!r}")
+            m = re.search(r"got\s+([0-9a-fA-F]+)", cp.stdout)
+            if not m:
+                raise UBDetected(
+                    f"{tool} produced no `got NN` line: {cp.stdout!r}")
+            results[tool] = int(m.group(1), 16)
+    if results["gcc"] != results["clang"]:
+        raise UBDetected(
+            f"gcc=0x{results['gcc']:x} clang=0x{results['clang']:x} "
+            f"(divergent UB)")
+    return results["gcc"]
 
 
 def insert_expect(case_text, expect):
@@ -256,29 +285,41 @@ def main():
 
     DRAFT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # csmith picks its own seed when none is given, but we want it
-    # surfaced in the case filename so reruns are reproducible.
-    if args.seed is None:
-        # csmith reads /dev/urandom for its default seed; mirror that
-        # so the value lands in our filename too.
-        args.seed = int.from_bytes(os.urandom(4), "big")
-    stem = args.name if args.name else f"{args.seed:08x}"
-
-    with tempfile.TemporaryDirectory(prefix="csmith_gen_") as tmp:
-        raw_path = pathlib.Path(tmp) / "csmith.c"
-        run(["csmith", "-s", str(args.seed), "-o", str(raw_path), *CSMITH_FLAGS])
-        raw = raw_path.read_text()
-        if args.keep_csmith:
-            (DRAFT_DIR / f"cctest_csmith_{stem}.csmith.c").write_text(raw)
-
-    transformed = transform_csmith(raw)
-    case_text = assemble_case(transformed, args.seed, stem)
-    expect = host_eval(case_text)
-    case_text = insert_expect(case_text, expect)
-
-    out_path = DRAFT_DIR / f"cctest_csmith_{stem}.c"
-    out_path.write_text(case_text)
-    print(f"wrote {out_path}  (@expect 0x{expect:x})")
+    # When the user pins --seed, do exactly one attempt and surface
+    # any UB to them; csmith --safe-math-wrappers 0 means a fixed seed
+    # can land on UB-divergent code, and silently substituting a
+    # different seed would defeat the point of pinning. With a random
+    # seed, retry up to MAX_TRIES times: the typical hit rate of
+    # UB-divergent output is well under 1 in 10 at these flags.
+    MAX_TRIES = 1 if args.seed is not None else 20
+    user_seed = args.seed
+    last_reason = None
+    for attempt in range(MAX_TRIES):
+        seed = user_seed if user_seed is not None else \
+            int.from_bytes(os.urandom(4), "big")
+        stem = args.name if args.name else f"{seed:08x}"
+        with tempfile.TemporaryDirectory(prefix="csmith_gen_") as tmp:
+            raw_path = pathlib.Path(tmp) / "csmith.c"
+            run(["csmith", "-s", str(seed), "-o", str(raw_path),
+                 *CSMITH_FLAGS])
+            raw = raw_path.read_text()
+            if args.keep_csmith:
+                (DRAFT_DIR / f"cctest_csmith_{stem}.csmith.c").write_text(raw)
+        transformed = transform_csmith(raw)
+        case_text = assemble_case(transformed, seed, stem)
+        try:
+            expect = host_eval(case_text)
+        except UBDetected as e:
+            last_reason = f"seed {seed:#x}: {e}"
+            print(f"reject {last_reason}", file=sys.stderr)
+            continue
+        case_text = insert_expect(case_text, expect)
+        out_path = DRAFT_DIR / f"cctest_csmith_{stem}.c"
+        out_path.write_text(case_text)
+        print(f"wrote {out_path}  (@expect 0x{expect:x})")
+        return
+    sys.exit(f"could not generate a UB-clean case in {MAX_TRIES} tries; "
+             f"last: {last_reason}")
 
 
 if __name__ == "__main__":
