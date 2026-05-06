@@ -32,9 +32,10 @@ import tempfile
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 DRAFT_DIR = SCRIPT_DIR / "draft_cases"
 
-# Bounded stress csmith options. Keep programs small enough for target
-# turnaround, but drive deeper blocks, larger arrays, more functions,
-# and more complex expressions than the first draft wave.
+# Aggregate-heavy csmith options. These drafts intentionally exercise
+# C99 aggregate features that have exposed selcc/seld implementation
+# gaps: structs, unions, bitfields, nested aggregate initializers,
+# aggregate copies, and aggregate return/argument lowering.
 # Safe-math wrappers stay ON (default): csmith emits
 # safe_div/safe_mod/safe_lshift/etc. calls which short-circuit
 # divisor-zero, INT_MIN/-1 division, and shift-count >= width into
@@ -43,17 +44,11 @@ DRAFT_DIR = SCRIPT_DIR / "draft_cases"
 # the generated source is self-contained -- no -I/usr/include/csmith
 # at compile time.  --no-volatiles drops the volatile-load /
 # volatile-store paths the embedded driver model has not been
-# verified against. Pointers and aggregate types stay off until the
-# cctest harness has dedicated pointer/aggregate-heavy CSmith lanes:
-# selcc still has known gaps for file-scope packed/narrow aggregate
-# initializers, and this lane is intended to generate drafts that every
-# current toolchain can build and run.
+# verified against. Pointers stay off so failures in this lane point at
+# C99 aggregate support rather than pointer aliasing.
 CSMITH_FLAGS = [
     "--concise",
     "--no-pointers",
-    "--no-structs",
-    "--no-unions",
-    "--no-bitfields",
     "--no-volatiles",
     "--no-volatile-pointers",
     "--max-funcs", "4",
@@ -62,6 +57,8 @@ CSMITH_FLAGS = [
     "--max-expr-complexity", "5",
     "--max-array-dim", "3",
     "--max-array-len-per-dim", "5",
+    "--max-struct-fields", "6",
+    "--max-union-fields", "4",
 ]
 
 # A self-contained replacement for csmith.h: just the CRC32 hash, the
@@ -282,6 +279,23 @@ def host_eval(case_text):
     return results["gcc"]
 
 
+def has_c99_aggregate_stress(src):
+    """Return True when a csmith source actually hits this lane's focus.
+
+    Csmith flags make aggregate generation likely, not guaranteed.  The
+    draft corpus should not merely allow structs/unions/bitfields; each
+    accepted case should contain them so the mission keeps pressure on
+    the C99 aggregate implementation paths.
+    """
+    has_struct = re.search(r"\bstruct\s+S\d+\s*\{", src) is not None
+    has_union = re.search(r"\bunion\s+U\d+\s*\{", src) is not None
+    has_bitfield = re.search(r":\s*\d+\s*;", src) is not None
+    has_nested_init = re.search(r"=\s*\{\s*\{", src) is not None
+    has_aggregate_access = re.search(r"\.(?:f\d+)\b", src) is not None
+    return (has_struct and has_union and has_bitfield and
+            has_nested_init and has_aggregate_access)
+
+
 def insert_expect(case_text, expect):
     """Place the `@expect 0xNN` directive between the SPDX header and
     the include block. Match the formatting the existing cases use."""
@@ -316,9 +330,9 @@ def main():
     # any UB to them; csmith --safe-math-wrappers 0 means a fixed seed
     # can land on UB-divergent code, and silently substituting a
     # different seed would defeat the point of pinning. With a random
-    # seed, retry up to MAX_TRIES times: the typical hit rate of
-    # UB-divergent output is well under 1 in 10 at these flags.
-    MAX_TRIES = 1 if args.seed is not None else 20
+    # seed, retry enough times to find a UB-clean candidate that also
+    # contains the aggregate features this lane is meant to test.
+    MAX_TRIES = 1 if args.seed is not None else 200
     user_seed = args.seed
     last_reason = None
     for attempt in range(MAX_TRIES):
@@ -332,6 +346,11 @@ def main():
             raw = raw_path.read_text()
             if args.keep_csmith:
                 (DRAFT_DIR / f"cctest_csmith_{stem}.csmith.c").write_text(raw)
+        if not has_c99_aggregate_stress(raw):
+            last_reason = (
+                f"seed {seed:#x}: missing required C99 aggregate stress")
+            print(f"reject {last_reason}", file=sys.stderr)
+            continue
         transformed = transform_csmith(raw)
         case_text = assemble_case(transformed, seed, stem)
         try:
