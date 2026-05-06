@@ -9,7 +9,7 @@ global into a CRC32 context and calls platform_main_end() to print the
 final checksum. cctest cases instead expect `int test_main(void)` to
 return a single integer, which the harness compares against an
 `@expect` directive embedded in the source. The two formats line up
-neatly: this script runs csmith with a conservative option set,
+neatly: this script runs csmith with a bounded stress option set,
 strips the standard csmith.h dependencies, rewrites main() into
 test_main() so it returns the lower 32 bits of the checksum
 directly, executes the program once on host gcc to recover the
@@ -32,33 +32,36 @@ import tempfile
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 DRAFT_DIR = SCRIPT_DIR / "draft_cases"
 
-# Conservative csmith options. The point of the cctest sweep is to
-# exercise every selcc/selas/seld/selload codegen path against
-# realistic but small C; csmith without these limits emits
-# multi-thousand-line programs whose translation time dominates the
-# board turnaround. Safe-math wrappers stay ON (default): csmith
-# emits safe_div/safe_mod/safe_lshift/etc. calls which short-circuit
+# Bounded stress csmith options. Keep programs small enough for target
+# turnaround, but drive deeper blocks, larger arrays, more functions,
+# and more complex expressions than the first draft wave.
+# Safe-math wrappers stay ON (default): csmith emits
+# safe_div/safe_mod/safe_lshift/etc. calls which short-circuit
 # divisor-zero, INT_MIN/-1 division, and shift-count >= width into
 # defined fallbacks before the raw operator runs. We paste the
 # expanded wrapper bodies (csmith_safe_math.h.inc) into each case so
 # the generated source is self-contained -- no -I/usr/include/csmith
 # at compile time.  --no-volatiles drops the volatile-load /
 # volatile-store paths the embedded driver model has not been
-# verified against.
+# verified against. Pointers and aggregate types stay off until the
+# cctest harness has dedicated pointer/aggregate-heavy CSmith lanes:
+# selcc still has known gaps for file-scope packed/narrow aggregate
+# initializers, and this lane is intended to generate drafts that every
+# current toolchain can build and run.
 CSMITH_FLAGS = [
     "--concise",
-    "--no-bitfields",
     "--no-pointers",
     "--no-structs",
     "--no-unions",
+    "--no-bitfields",
     "--no-volatiles",
     "--no-volatile-pointers",
-    "--max-funcs", "3",
+    "--max-funcs", "4",
     "--max-block-size", "3",
     "--max-block-depth", "3",
-    "--max-expr-complexity", "4",
-    "--max-array-dim", "2",
-    "--max-array-len-per-dim", "4",
+    "--max-expr-complexity", "5",
+    "--max-array-dim", "3",
+    "--max-array-len-per-dim", "5",
 ]
 
 # A self-contained replacement for csmith.h: just the CRC32 hash, the

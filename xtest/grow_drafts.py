@@ -168,7 +168,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", type=int, default=1000,
                     help="grow corpus until cctest_csmith_*.c hits this count")
-    ap.add_argument("--batch", type=int, default=10,
+    ap.add_argument("--batch", type=int, default=50,
                     help="how many drafts to generate per outer iteration")
     args = ap.parse_args()
 
@@ -180,6 +180,8 @@ def main():
               f"validated={len(validated)} untested={len(untested)}")
         if untested:
             make_drafts()
+            all_drafts = list_drafts()
+            untested = [d for d in all_drafts if d not in validated]
             for stem in untested:
                 t0 = time.monotonic()
                 ok, why = validate_one(stem)
