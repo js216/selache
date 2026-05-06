@@ -802,21 +802,17 @@ impl Type {
             }
         } else {
             // Different signedness.
-            let (unsigned_ty, signed_rank, unsigned_rank) = if a_unsigned {
-                (&pa, b_rank, a_rank)
+            let (unsigned_ty, signed_ty, signed_rank, unsigned_rank) = if a_unsigned {
+                (&pa, &pb, b_rank, a_rank)
             } else {
-                (&pb, a_rank, b_rank)
+                (&pb, &pa, a_rank, b_rank)
             };
             if unsigned_rank >= signed_rank {
                 unsigned_ty.clone()
+            } else if signed_integer_can_represent_all_unsigned(signed_ty, unsigned_ty) {
+                signed_ty.clone()
             } else {
-                // Signed type can represent all values of unsigned type.
-                // On SHARC, int (32 bits) can represent all unsigned short values.
-                if a_unsigned {
-                    pb
-                } else {
-                    pa
-                }
+                unsigned_variant_of_signed(signed_ty)
             }
         }
     }
@@ -850,6 +846,25 @@ impl Type {
             Type::Const(inner) | Type::Volatile(inner) => inner.unqualified(),
             _ => self,
         }
+    }
+}
+
+fn integer_bits(ty: &Type) -> usize {
+    ty.unqualified().size_bytes() as usize * 8
+}
+
+fn signed_integer_can_represent_all_unsigned(signed_ty: &Type, unsigned_ty: &Type) -> bool {
+    debug_assert!(!signed_ty.is_unsigned());
+    debug_assert!(unsigned_ty.is_unsigned());
+    // A two's-complement signed N-bit integer cannot represent all values of
+    // an unsigned N-bit integer. It needs strictly more value bits.
+    integer_bits(signed_ty) > integer_bits(unsigned_ty)
+}
+
+fn unsigned_variant_of_signed(signed_ty: &Type) -> Type {
+    match signed_ty.unqualified() {
+        Type::LongLong => Type::ULongLong,
+        other => Type::Unsigned(Box::new(other.clone())),
     }
 }
 
@@ -1101,10 +1116,14 @@ mod tests {
         let r = Type::usual_arithmetic_conversion(&Type::Int, &uint);
         assert_eq!(r, uint);
 
-        // long + unsigned int -> depends on rank: unsigned int has rank 3,
-        // long has rank 4. Since signed rank > unsigned rank, result is long.
+        // long + unsigned int -> unsigned long on SHARC. `long` has higher
+        // rank, but it is still 32-bit and cannot represent every uint32_t.
         let r = Type::usual_arithmetic_conversion(&Type::Long, &uint);
-        assert_eq!(r, Type::Long);
+        assert_eq!(r, Type::Unsigned(Box::new(Type::Long)));
+
+        // long long can represent every unsigned int, so it remains signed.
+        let r = Type::usual_arithmetic_conversion(&Type::LongLong, &uint);
+        assert_eq!(r, Type::LongLong);
 
         // int + long long -> long long
         let r = Type::usual_arithmetic_conversion(&Type::Int, &Type::LongLong);

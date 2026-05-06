@@ -593,7 +593,7 @@ pub fn select_with_name(
             IrOp::Call(dst, name, args) => {
                 let is_variadic = variadic_callees.contains(name);
                 let is_complex_args = complex_arg_callees.contains(name);
-                if is_variadic || is_complex_args {
+                let stack_arg_count = if is_variadic || is_complex_args {
                     // SHARC+ variadic call ABI: the *last* named
                     // argument (and every variadic argument after
                     // it) is always pushed on the caller's stack so
@@ -629,6 +629,7 @@ pub fn select_with_name(
                             .unwrap_or(args.len());
                         target::variadic_reg_named(named)
                     };
+                    let stack_arg_count = args.len().saturating_sub(reg_count);
                     for (i, arg) in args.iter().enumerate().rev() {
                         if i >= reg_count {
                             instrs.push(MachInstr {
@@ -656,6 +657,7 @@ pub fn select_with_name(
                             *arg as u16,
                         ));
                     }
+                    stack_arg_count
                 } else {
                     // Stack arguments (args ARG_REGS.len()+): push in
                     // reverse order via post-modify `DM(I7, M7) = Rn`
@@ -669,6 +671,7 @@ pub fn select_with_name(
                     // stored args in the range CJUMP's own delay-slot
                     // pushes (R2 link and return address) overwrite,
                     // silently trampling the first stack-passed arg.
+                    let stack_arg_count = args.len().saturating_sub(target::ARG_REGS.len());
                     for (i, arg) in args.iter().enumerate().rev() {
                         if i >= target::ARG_REGS.len() {
                             instrs.push(MachInstr {
@@ -699,7 +702,8 @@ pub fn select_with_name(
                             *arg as u16,
                         ));
                     }
-                }
+                    stack_arg_count
+                };
                 // Save this frame pointer into R2 for the callee's
                 // frame-link slot. Direct CJUMP updates I6 from I7, but
                 // it does not synthesize R2 = old I6 for the delay-slot
@@ -762,6 +766,21 @@ pub fn select_with_name(
                 // Mark the instruction after the delay slots with the
                 // return label so selas can resolve the relocation.
                 call_return_labels.push((instrs.len(), ret_label_name));
+                if stack_arg_count > 0 {
+                    // Stack-passed arguments are caller-owned. RFRAME
+                    // restores I7 to the value captured by CJUMP after
+                    // those argument pushes, so reclaim them explicitly
+                    // before the next call or frame access.
+                    instrs.push(MachInstr {
+                        instr: Instruction::Modify {
+                            i_reg: target::STACK_PTR,
+                            value: stack_arg_count as i32,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
+                        reloc: None,
+                    });
+                }
                 // Result in R0. Use the pinned `RETURN_REG_VREG`
                 // as the source so regalloc reads physical R0 (where
                 // the callee placed the value) instead of whatever
@@ -957,6 +976,7 @@ pub fn select_with_name(
                 } else {
                     target::ARG_REGS.len()
                 };
+                let stack_arg_count = args.len().saturating_sub(reg_count);
                 // Stack args (beyond reg_count): push in reverse order.
                 for (i, arg) in args.iter().enumerate().rev() {
                     if i >= reg_count {
@@ -1039,6 +1059,17 @@ pub fn select_with_name(
                     }),
                 });
                 call_return_labels.push((instrs.len(), ret_label_name));
+                if stack_arg_count > 0 {
+                    instrs.push(MachInstr {
+                        instr: Instruction::Modify {
+                            i_reg: target::STACK_PTR,
+                            value: stack_arg_count as i32,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
+                        reloc: None,
+                    });
+                }
                 // Unpack the returned struct into *dst_addr. For the
                 // hidden-ptr path the callee already wrote through
                 // R1 (aliased to our dst_addr), so nothing to do.
@@ -3550,6 +3581,7 @@ fn ir_cond_to_sharc(cond: Cond) -> u8 {
 mod tests {
     use super::*;
     use crate::ir::IrOp;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn select_load_imm() {
@@ -3618,6 +3650,51 @@ mod tests {
             )
         });
         assert!(has_branch);
+    }
+
+    #[test]
+    fn direct_call_pops_stack_passed_args() {
+        let ir = vec![IrOp::Call(10, "g".to_string(), vec![0, 1, 2, 3])];
+        let result = select_with_name(&ir, "f", &HashSet::new(), &HashMap::new(), &HashSet::new());
+        let cjump_idx = result
+            .instrs
+            .iter()
+            .position(|m| matches!(m.instr, Instruction::CJump { .. }))
+            .expect("missing direct call");
+        assert!(matches!(
+            result.instrs.get(cjump_idx + 3).map(|m| m.instr),
+            Some(Instruction::Modify {
+                i_reg: target::STACK_PTR,
+                value: 1,
+                width: MemWidth::Nw,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn direct_struct_call_pops_stack_passed_args() {
+        let ir = vec![IrOp::CallStruct {
+            dst_addr: 20,
+            name: "g".to_string(),
+            args: vec![0, 1, 2, 3],
+            num_words: 2,
+        }];
+        let result = select_with_name(&ir, "f", &HashSet::new(), &HashMap::new(), &HashSet::new());
+        let cjump_idx = result
+            .instrs
+            .iter()
+            .position(|m| matches!(m.instr, Instruction::CJump { .. }))
+            .expect("missing direct struct call");
+        assert!(matches!(
+            result.instrs.get(cjump_idx + 3).map(|m| m.instr),
+            Some(Instruction::Modify {
+                i_reg: target::STACK_PTR,
+                value: 1,
+                width: MemWidth::Nw,
+                ..
+            })
+        ));
     }
 
     #[test]

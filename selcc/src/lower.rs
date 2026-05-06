@@ -2360,7 +2360,18 @@ fn int_literal_type(val: i64, suffix: IntSuffix) -> Type {
                 Type::ULongLong
             }
         }
-        IntSuffix::LL => Type::LongLong,
+        IntSuffix::LL => {
+            // C99 6.4.4.1 gives hexadecimal `LL` literals the candidate
+            // sequence long long -> unsigned long long. The lexer stores the
+            // raw token value in an i64, so a high-bit-set hex literal such as
+            // `0xEFA42B4837182ABBLL` arrives here as a negative bit pattern;
+            // that means it did not fit signed long long and must be unsigned.
+            if val < 0 {
+                Type::ULongLong
+            } else {
+                Type::LongLong
+            }
+        }
         IntSuffix::Ull => Type::ULongLong,
     }
 }
@@ -2446,8 +2457,8 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
         }
         Expr::Binary { op, lhs, rhs } => {
             // Apply integer promotions, then usual arithmetic conversions.
-            let lt = expr_type(lhs, ctx).map(|t| t.integer_promoted());
-            let rt = expr_type(rhs, ctx).map(|t| t.integer_promoted());
+            let lt = expr_type(lhs, ctx).map(|t| resolve_type(&t, ctx).integer_promoted());
+            let rt = expr_type(rhs, ctx).map(|t| resolve_type(&t, ctx).integer_promoted());
             // Complex operations: if either operand is complex, result is complex.
             match (&lt, &rt) {
                 (Some(Type::Complex(e)), _) | (_, Some(Type::Complex(e))) => {
@@ -2555,8 +2566,8 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
                 (Some(t), Some(e))
                     if (t.is_integer() || t.is_float()) && (e.is_integer() || e.is_float()) =>
                 {
-                    let pt = t.integer_promoted();
-                    let pe = e.integer_promoted();
+                    let pt = resolve_type(t, ctx).integer_promoted();
+                    let pe = resolve_type(e, ctx).integer_promoted();
                     match (&pt, &pe) {
                         (Type::Complex(c), _) | (_, Type::Complex(c)) => {
                             Some(Type::Complex(c.clone()))
@@ -7380,8 +7391,9 @@ mod tests {
     fn lower_long_long_pre_decrement_stores_both_words() {
         let src = "long long g; void f(void) { --g; }";
         let unit = parse::parse(src).unwrap();
-        let globals: HashMap<String, Type> =
-            vec![("g".to_string(), Type::LongLong)].into_iter().collect();
+        let globals: HashMap<String, Type> = vec![("g".to_string(), Type::LongLong)]
+            .into_iter()
+            .collect();
         let ops = lower_function(
             &unit.functions[0],
             &globals,
@@ -8217,6 +8229,23 @@ mod tests {
     }
 
     #[test]
+    fn lower_high_hex_ll_literal_compare_is_unsigned() {
+        let src = "typedef unsigned int uint32_t; int f(uint32_t x) { return 0xEFA42B4837182ABBLL <= x; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::UCmp64(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))));
+    }
+
+    #[test]
     fn lower_uint32_vs_int64_compare_is_signed() {
         let src = "typedef unsigned int uint32_t; typedef long long int64_t; int f(uint32_t a, int64_t b) { return a > b; }";
         let unit = parse::parse(src).unwrap();
@@ -8231,6 +8260,35 @@ mod tests {
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))));
         assert!(!ops.iter().any(|op| matches!(op, IrOp::UCmp64(..))));
+    }
+
+    #[test]
+    fn lower_typedef_call_bitxor_compare_keeps_unsigned() {
+        let src = "typedef unsigned int uint32_t; uint32_t h(void); int f(int p) { return ((h() ^ -1L) < p); }";
+        let unit = parse::parse(src).unwrap();
+        let func = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let known = HashSet::from(["h".to_string(), "f".to_string()]);
+        let returns = HashMap::from([
+            ("h".to_string(), Type::Typedef("uint32_t".to_string())),
+            ("f".to_string(), Type::Int),
+        ]);
+        let params = HashMap::new();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+        };
+        let ops = lower_function_with_known(
+            func,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::UCmp(..))));
     }
 
     #[test]

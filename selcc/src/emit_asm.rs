@@ -330,15 +330,17 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         out.push('\n');
     }
 
-    // Code sections: most functions stay in block2, while generated csmith
-    // support helpers can live in block0 to keep support code from exhausting
-    // block2 without splitting generated program bodies away from the rest of
-    // the main code path.
+    // Code sections: generated csmith support helpers and entry points live in
+    // block0, the generated csmith root body lives in block1, and ordinary code
+    // stays in block2. Moving only `func_1` relieves block2 for large csmith
+    // cases without overfilling block1 with every generated helper body.
     if !compiled.is_empty() {
         let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
             let code_section = if should_emit_in_block0_code(cf.is_static, &cf.name) {
                 "seg_l1_block0_swco"
+            } else if should_emit_in_block1_code(cf.is_static, &cf.name) {
+                "seg_l1_block1_swco"
             } else {
                 split_runtime_code_section(&cf.name).unwrap_or("seg_swco")
             };
@@ -634,6 +636,10 @@ fn should_emit_in_block0_code(is_static: bool, name: &str) -> bool {
                 name,
                 "crc32_gentab" | "crc32_byte" | "platform_main_begin" | "transparent_crc"
             ) || name.starts_with("safe_")))
+}
+
+fn should_emit_in_block1_code(is_static: bool, name: &str) -> bool {
+    is_static && name == "func_1"
 }
 
 fn split_runtime_code_section(name: &str) -> Option<&'static str> {
@@ -1895,8 +1901,19 @@ fn emit_function_instrs(
     let has_calls = optimized
         .iter()
         .any(|mi| matches!(mi.instr, Instruction::CJump { .. }));
-    let prologue = build_prologue(frame_size, &used_callee_saved, has_calls);
-    let epilogue = build_epilogue(frame_size, &used_callee_saved, has_calls);
+    let outgoing_stack_args = max_outgoing_stack_args(&optimized);
+    let prologue = build_prologue(
+        frame_size,
+        &used_callee_saved,
+        has_calls,
+        outgoing_stack_args,
+    );
+    let epilogue = build_epilogue(
+        frame_size,
+        &used_callee_saved,
+        has_calls,
+        outgoing_stack_args,
+    );
 
     // Non-leaf functions do NOT need to save I12 in the prologue.
     // The SHARC+ C-ABI reads I12 = DM(M7, I6) right before each
@@ -2153,17 +2170,24 @@ fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u16) -> bool {
     match *op {
         Add { rn, rx, ry }
         | Sub { rn, rx, ry }
+        | AddCi { rn, rx, ry }
+        | SubCi { rn, rx, ry }
+        | Avg { rn, rx, ry }
         | And { rn, rx, ry }
         | Or { rn, rx, ry }
-        | Xor { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
+        | Xor { rn, rx, ry }
+        | Min { rn, rx, ry }
+        | Max { rn, rx, ry }
+        | Clip { rn, rx, ry } => rn == reg || rx == reg || ry == reg,
         Pass { rn, rx }
         | Neg { rn, rx }
         | Not { rn, rx }
+        | PassCi { rn, rx }
+        | PassCiMinus1 { rn, rx }
         | Inc { rn, rx }
         | Dec { rn, rx }
         | Abs { rn, rx } => rn == reg || rx == reg,
         Comp { rx, ry } | CompU { rx, ry } => rx == reg || ry == reg,
-        _ => false,
     }
 }
 
@@ -2256,31 +2280,42 @@ fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u16) -> bool {
 const FRAME_SKIP: i32 = 2;
 
 /// Extra slots reserved BELOW the spill region for the callee's own
-/// CJUMP delay-slot pushes. `CJUMP (DB)` writes two words via
+/// outgoing call pushes. `CJUMP (DB)` writes two delay-slot words via
 /// `DM(I7,M7)=...` (post-decrement by `M7=-1`), starting at the I7 the
-/// callee set up in its prologue. Without this reserve those two writes
-/// would land at `DM(-frame_size, I6)` and `DM(-(frame_size-1), I6)`,
-/// i.e. on top of the deepest spill slots that the regalloc has already
-/// populated. Bumping the prologue/epilogue `MODIFY` magnitude by
-/// `CJUMP_PUSH_RESERVE` pushes I7 two words further below the spill
-/// region so the delay-slot writes land in previously unused memory.
+/// callee set up in its prologue. Calls with stack-passed arguments push
+/// those argument words immediately before the delayed branch. Without
+/// reserving the whole outgoing area, those pushes land on top of the
+/// deepest spill slots that regalloc has already populated.
 /// Only non-leaf functions need this reserve; a leaf function never
-/// executes `CJUMP` so the two extra words would be dead stack.
+/// executes `CJUMP` so the extra words would be dead stack.
 const CJUMP_PUSH_RESERVE: i32 = 2;
 
-fn build_prologue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec<MachInstr> {
+fn outgoing_push_reserve(has_calls: bool, outgoing_stack_args: u32) -> i32 {
+    if has_calls {
+        CJUMP_PUSH_RESERVE + outgoing_stack_args as i32
+    } else {
+        0
+    }
+}
+
+fn build_prologue(
+    frame_size: u32,
+    callee_saved: &[u16],
+    has_calls: bool,
+    outgoing_stack_args: u32,
+) -> Vec<MachInstr> {
+    let extra = outgoing_push_reserve(has_calls, outgoing_stack_args);
     debug_assert!(
         callee_saved
             .iter()
             .all(|r| target::CALLER_SAVED.iter().all(|c| (*c as u16) != *r)),
         "callee-saved register overlaps with caller-saved set"
     );
-    if frame_size == 0 && callee_saved.is_empty() {
+    if frame_size == 0 && extra == 0 && callee_saved.is_empty() {
         return Vec::new();
     }
     let mut instrs = Vec::new();
-    if frame_size > 0 {
-        let extra = if has_calls { CJUMP_PUSH_RESERVE } else { 0 };
+    if frame_size > 0 || extra > 0 {
         instrs.push(MachInstr {
             // (NW) suffix: the immediate is in 32-bit-word units, matching
             // the word-scaled frame offsets used in the callee-saved
@@ -2323,8 +2358,14 @@ fn build_prologue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec
     instrs
 }
 
-fn build_epilogue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec<MachInstr> {
-    if frame_size == 0 && callee_saved.is_empty() {
+fn build_epilogue(
+    frame_size: u32,
+    callee_saved: &[u16],
+    has_calls: bool,
+    outgoing_stack_args: u32,
+) -> Vec<MachInstr> {
+    let extra = outgoing_push_reserve(has_calls, outgoing_stack_args);
+    if frame_size == 0 && extra == 0 && callee_saved.is_empty() {
         return Vec::new();
     }
     let mut instrs = Vec::new();
@@ -2345,8 +2386,7 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec
             reloc: None,
         });
     }
-    if frame_size > 0 {
-        let extra = if has_calls { CJUMP_PUSH_RESERVE } else { 0 };
+    if frame_size > 0 || extra > 0 {
         instrs.push(MachInstr {
             // (NW) suffix: mirror the prologue's word-scaled modify so
             // the epilogue unwinds by the same amount the prologue
@@ -2361,6 +2401,46 @@ fn build_epilogue(frame_size: u32, callee_saved: &[u16], has_calls: bool) -> Vec
         });
     }
     instrs
+}
+
+fn is_stack_post_push(instr: &Instruction) -> bool {
+    matches!(
+        instr,
+        Instruction::UregDagMove {
+            pm: false,
+            write: true,
+            i_reg,
+            m_reg: 7,
+            post_modify: true,
+            ..
+        } if *i_reg == target::STACK_PTR
+    )
+}
+
+fn max_outgoing_stack_args(instrs: &[MachInstr]) -> u32 {
+    let mut max_args = 0u32;
+    let mut pending_pushes = 0u32;
+    for mi in instrs {
+        match &mi.instr {
+            instr if is_stack_post_push(instr) => {
+                pending_pushes += 1;
+            }
+            Instruction::CJump { .. } => {
+                max_args = max_args.max(pending_pushes);
+                pending_pushes = 0;
+            }
+            Instruction::ImmStore {
+                pm: false,
+                i_reg,
+                m_reg: 7,
+                ..
+            } if *i_reg == target::STACK_PTR => {
+                pending_pushes = 0;
+            }
+            _ => {}
+        }
+    }
+    max_args
 }
 
 fn count_local_slots(instrs: &[MachInstr]) -> u32 {
@@ -3418,6 +3498,87 @@ mod tests {
     }
 
     #[test]
+    fn prologue_reserves_outgoing_stack_args() {
+        let prologue = build_prologue(5, &[], true, 1);
+        assert!(matches!(
+            prologue.first().map(|mi| mi.instr),
+            Some(Instruction::Modify {
+                i_reg: target::STACK_PTR,
+                value: -8,
+                width: MemWidth::Nw,
+                ..
+            })
+        ));
+        let epilogue = build_epilogue(5, &[], true, 1);
+        assert!(matches!(
+            epilogue.last().map(|mi| mi.instr),
+            Some(Instruction::Modify {
+                i_reg: target::STACK_PTR,
+                value: 8,
+                width: MemWidth::Nw,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn max_outgoing_stack_args_ignores_cjump_delay_slots() {
+        let stack_push = MachInstr {
+            instr: Instruction::UregDagMove {
+                pm: false,
+                write: true,
+                ureg: 4,
+                i_reg: target::STACK_PTR,
+                m_reg: 7,
+                cond: target::COND_TRUE,
+                compute: None,
+                post_modify: true,
+            },
+            reloc: None,
+        };
+        let cjump = MachInstr {
+            instr: Instruction::CJump {
+                addr: 0,
+                delayed: true,
+            },
+            reloc: None,
+        };
+        let ret_store = MachInstr {
+            instr: Instruction::ImmStore {
+                pm: false,
+                i_reg: target::STACK_PTR,
+                m_reg: 7,
+                value: 0,
+            },
+            reloc: None,
+        };
+        let instrs = vec![
+            stack_push.clone(),
+            stack_push.clone(),
+            cjump,
+            stack_push,
+            ret_store,
+        ];
+        assert_eq!(max_outgoing_stack_args(&instrs), 2);
+    }
+
+    #[test]
+    fn callee_saved_scan_counts_carry_alu_ops() {
+        let instrs = vec![MachInstr {
+            instr: Instruction::Compute {
+                cond: target::COND_TRUE,
+                compute: encode::ComputeOp::Alu(encode::AluOp::SubCi {
+                    rn: 15,
+                    rx: 10,
+                    ry: 13,
+                }),
+            },
+            reloc: None,
+        }];
+        assert!(callee_saved_used(&instrs).contains(&15));
+    }
+
+    #[test]
     fn has_global_and_label() {
         let m = compile("int main() { return 42; }");
         assert!(m.text.contains(".GLOBAL main.;"));
@@ -3439,8 +3600,9 @@ mod tests {
              static void transparent_crc(unsigned long long v, const char *n, int f) { (void)v; (void)n; (void)f; }
              static int safe_helper(void) { return 3; }
              static int func_1(void) { return 5; }
+             static int func_2(void) { return 6; }
              static int helper(void) { return 4; }
-             int test_main(void) { crc32_byte(1); transparent_crc(1, 0, 0); return safe_helper() + func_1() + helper(); }
+             int test_main(void) { crc32_byte(1); transparent_crc(1, 0, 0); return safe_helper() + func_1() + func_2() + helper(); }
              int main(void) { return test_main(); }",
         );
         let block0 = m
@@ -3456,7 +3618,12 @@ mod tests {
             .text
             .find("safe_helper.:")
             .expect("missing safe_helper label");
+        let block1 = m
+            .text
+            .find(".SECTION/SW seg_l1_block1_swco;")
+            .expect("missing block1 generated-body section");
         let func_1 = m.text.find("func_1.:").expect("missing func_1 label");
+        let func_2 = m.text.find("func_2.:").expect("missing func_2 label");
         let helper_section = m
             .text
             .find(".SECTION/SW seg_swco;")
@@ -3486,8 +3653,13 @@ mod tests {
             m.text
         );
         assert!(
-            helper_section < func_1 && func_1 < helper,
-            "generated func_* bodies should stay in the main code section:\n{}",
+            block1 < func_1 && func_1 < helper_section,
+            "generated func_1 body should be split into block1:\n{}",
+            m.text
+        );
+        assert!(
+            helper_section < func_2,
+            "generated helper func_* bodies should remain in main code section:\n{}",
             m.text
         );
         assert!(
