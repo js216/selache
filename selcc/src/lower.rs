@@ -1179,10 +1179,24 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     let pair = lower_return_expr(ctx, e)?;
                     let slot = ctx.frame_size;
                     ctx.frame_size += 2;
-                    let storage_slot = slot + 1;
-                    ctx.emit(IrOp::Store64(pair, 0, storage_slot as i32));
+                    // Lay out the long-long pair as a 2-word struct so
+                    // `RetStruct` (which reloads via the byte-addressed
+                    // indirect path with hi at `src_addr + 4` bytes)
+                    // reads the same memory we wrote.  This mirrors the
+                    // layout used to unpack incoming struct parameters
+                    // (see the `is_struct_type` arm above): the address
+                    // points at the numerically-highest frame slot,
+                    // which lives at the *lowest* memory address, and
+                    // successive `+4`-byte offsets walk into higher
+                    // memory.  Frame-relative `Store64(pair, 0, slot)`
+                    // would put hi at lo - 1 word (one slot deeper),
+                    // and `RetStruct` would then re-read hi from the
+                    // wrong direction (uninitialized memory above lo).
+                    let base_slot = slot + 1;
                     let src_addr = ctx.alloc_vreg_ptr();
-                    ctx.emit(IrOp::FrameAddr(src_addr, storage_slot as i32));
+                    ctx.emit(IrOp::FrameAddr(src_addr, base_slot as i32));
+                    ctx.emit(IrOp::Store(pair, src_addr, 0));
+                    ctx.emit(IrOp::Store(pair + 1, src_addr, 4));
                     ctx.emit(IrOp::RetStruct {
                         src_addr,
                         dst_addr: None,
