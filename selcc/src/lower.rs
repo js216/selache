@@ -4148,14 +4148,14 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
                 if is_unsigned {
                     ctx.emit(IrOp::UDiv64(dst, l, r));
                 } else {
-                    ctx.emit(IrOp::Div64(dst, l, r));
+                    lower_signed_divmod_64(ctx, dst, l, r, false);
                 }
             }
             BinaryOp::Mod => {
                 if is_unsigned {
                     ctx.emit(IrOp::UMod64(dst, l, r));
                 } else {
-                    ctx.emit(IrOp::Mod64(dst, l, r));
+                    lower_signed_divmod_64(ctx, dst, l, r, true);
                 }
             }
             BinaryOp::BitAnd => ctx.emit(IrOp::BitAnd64(dst, l, r)),
@@ -4395,6 +4395,89 @@ fn lower_comparison_64(
     ctx.emit(IrOp::Copy(dst, one));
     ctx.emit(IrOp::Label(lbl_end));
     Ok(dst)
+}
+
+fn lower_abs_64(ctx: &mut LowerCtx, src: VReg) -> VReg {
+    let dst = ctx.alloc_vreg_pair();
+    let zero_pair = ctx.alloc_vreg_pair();
+    ctx.emit(IrOp::LoadImm64(zero_pair, 0));
+    ctx.emit(IrOp::Cmp64(src, zero_pair));
+
+    let lbl_nonneg = ctx.alloc_label();
+    let lbl_end = ctx.alloc_label();
+    ctx.emit(IrOp::BranchCond(Cond::Ge, lbl_nonneg));
+    ctx.emit(IrOp::Neg64(dst, src));
+    ctx.emit(IrOp::Branch(lbl_end));
+    ctx.emit(IrOp::Label(lbl_nonneg));
+    ctx.emit(IrOp::Copy(dst, src));
+    ctx.emit(IrOp::Copy(dst + 1, src + 1));
+    ctx.emit(IrOp::Label(lbl_end));
+    dst
+}
+
+fn copy_pair(ctx: &mut LowerCtx, dst: VReg, src: VReg) {
+    ctx.emit(IrOp::Copy(dst, src));
+    ctx.emit(IrOp::Copy(dst + 1, src + 1));
+}
+
+fn lower_signed_divmod_64(
+    ctx: &mut LowerCtx,
+    dst: VReg,
+    lhs: VReg,
+    rhs: VReg,
+    want_remainder: bool,
+) {
+    let zero_pair = ctx.alloc_vreg_pair();
+    ctx.emit(IrOp::LoadImm64(zero_pair, 0));
+    let zero = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(zero, 0));
+
+    let lhs_neg = ctx.alloc_vreg();
+    ctx.emit(IrOp::Cmp64(lhs, zero_pair));
+    let lhs_neg_true = ctx.alloc_label();
+    let lhs_neg_end = ctx.alloc_label();
+    ctx.emit(IrOp::BranchCond(Cond::Lt, lhs_neg_true));
+    ctx.emit(IrOp::Copy(lhs_neg, zero));
+    ctx.emit(IrOp::Branch(lhs_neg_end));
+    ctx.emit(IrOp::Label(lhs_neg_true));
+    let one = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(one, 1));
+    ctx.emit(IrOp::Copy(lhs_neg, one));
+    ctx.emit(IrOp::Label(lhs_neg_end));
+
+    let abs_lhs = lower_abs_64(ctx, lhs);
+    let abs_rhs = lower_abs_64(ctx, rhs);
+    let tmp = ctx.alloc_vreg_pair();
+    if want_remainder {
+        ctx.emit(IrOp::UMod64(tmp, abs_lhs, abs_rhs));
+    } else {
+        ctx.emit(IrOp::UDiv64(tmp, abs_lhs, abs_rhs));
+    }
+    copy_pair(ctx, dst, tmp);
+
+    let negate = if want_remainder {
+        lhs_neg
+    } else {
+        let rhs_neg = ctx.alloc_vreg();
+        ctx.emit(IrOp::Cmp64(rhs, zero_pair));
+        let rhs_neg_true = ctx.alloc_label();
+        let rhs_neg_end = ctx.alloc_label();
+        ctx.emit(IrOp::BranchCond(Cond::Lt, rhs_neg_true));
+        ctx.emit(IrOp::Copy(rhs_neg, zero));
+        ctx.emit(IrOp::Branch(rhs_neg_end));
+        ctx.emit(IrOp::Label(rhs_neg_true));
+        ctx.emit(IrOp::Copy(rhs_neg, one));
+        ctx.emit(IrOp::Label(rhs_neg_end));
+        let sign = ctx.alloc_vreg();
+        ctx.emit(IrOp::BitXor(sign, lhs_neg, rhs_neg));
+        sign
+    };
+
+    ctx.emit(IrOp::Cmp(negate, zero));
+    let lbl_end = ctx.alloc_label();
+    ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_end));
+    ctx.emit(IrOp::Neg64(dst, tmp));
+    ctx.emit(IrOp::Label(lbl_end));
 }
 
 fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
@@ -4901,14 +4984,14 @@ fn emit_compound_op_64(
             if is_unsigned {
                 ctx.emit(IrOp::UDiv64(result, lhs, rhs));
             } else {
-                ctx.emit(IrOp::Div64(result, lhs, rhs));
+                lower_signed_divmod_64(ctx, result, lhs, rhs, false);
             }
         }
         BinaryOp::Mod => {
             if is_unsigned {
                 ctx.emit(IrOp::UMod64(result, lhs, rhs));
             } else {
-                ctx.emit(IrOp::Mod64(result, lhs, rhs));
+                lower_signed_divmod_64(ctx, result, lhs, rhs, true);
             }
         }
         BinaryOp::BitAnd => ctx.emit(IrOp::BitAnd64(result, lhs, rhs)),
@@ -8046,6 +8129,40 @@ mod tests {
         .unwrap()
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::Mul64(..))));
+    }
+
+    #[test]
+    fn lower_signed_long_long_div_uses_unsigned_helper() {
+        let src = "long long f(long long a, long long b) { return a / b; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::UDiv64(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Div64(..))));
+    }
+
+    #[test]
+    fn lower_signed_long_long_mod_uses_unsigned_helper() {
+        let src = "long long f(long long a, long long b) { return a % b; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::UMod64(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Mod64(..))));
     }
 
     #[test]
