@@ -2073,7 +2073,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_64_divmod(&mut instrs, "___div64", *dst, *lhs, *rhs, &mut ctx);
+                emit_runtime_call_64_c_abi(&mut instrs, "___div64", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UDiv64(dst, lhs, rhs) => {
@@ -2091,7 +2091,7 @@ pub fn select_with_name(
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_64_divmod(&mut instrs, "___mod64", *dst, *lhs, *rhs, &mut ctx);
+                emit_runtime_call_64_c_abi(&mut instrs, "___mod64", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UMod64(dst, lhs, rhs) => {
@@ -3191,6 +3191,82 @@ fn emit_runtime_call_64_divmod(
     // RETURN_REG_VREG / RETURN_REG_HI_VREG so regalloc reads the
     // physical R0/R1 the wrapper left the result in, even when the
     // dst vreg id happens to equal 0 or 1.
+    instrs.push(MachInstr::compute_pass(dst as u16, target::RETURN_REG_VREG));
+    instrs.push(MachInstr::compute_pass(
+        (dst + 1) as u16,
+        target::RETURN_REG_HI_VREG,
+    ));
+}
+
+fn emit_runtime_call_64_c_abi(
+    instrs: &mut Vec<MachInstr>,
+    name: &str,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    ctx: &mut CallSiteCtx<'_>,
+) {
+    // C ABI for two long long arguments:
+    //   arg0 lo -> R4, arg0 hi -> R8, arg1 lo -> R12, arg1 hi -> stack arg 0.
+    instrs.push(MachInstr {
+        instr: Instruction::UregDagMove {
+            pm: false,
+            write: true,
+            ureg: (rhs + 1) as u16,
+            i_reg: target::STACK_PTR,
+            m_reg: 7,
+            cond: target::COND_TRUE,
+            compute: None,
+            post_modify: true,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 4u16, lhs as u16));
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 8u16, (lhs + 1) as u16));
+    instrs.push(MachInstr::compute_pass(0xC000u16 | 12u16, rhs as u16));
+    emit_frame_link_save(instrs);
+    instrs.push(MachInstr {
+        instr: Instruction::CJump {
+            addr: 0,
+            delayed: true,
+        },
+        reloc: Some(Reloc {
+            symbol: name.to_string(),
+            kind: RelocKind::Addr24,
+        }),
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::UregDagMove {
+            pm: false,
+            write: true,
+            ureg: target::UREG_FIXED_TAG | target::ureg_r(2),
+            i_reg: target::STACK_PTR,
+            m_reg: 7,
+            cond: target::COND_TRUE,
+            compute: None,
+            post_modify: true,
+        },
+        reloc: None,
+    });
+    let ret_label_name = format!(
+        ".L_ret_{}_{name}_{counter}",
+        ctx.func_name,
+        counter = *ctx.counter,
+    );
+    *ctx.counter += 1;
+    instrs.push(MachInstr {
+        instr: Instruction::ImmStore {
+            pm: false,
+            i_reg: target::STACK_PTR,
+            m_reg: 7,
+            value: 0,
+        },
+        reloc: Some(Reloc {
+            symbol: ret_label_name.clone(),
+            kind: RelocKind::Addr24,
+        }),
+    });
+    ctx.return_labels.push((instrs.len(), ret_label_name));
     instrs.push(MachInstr::compute_pass(dst as u16, target::RETURN_REG_VREG));
     instrs.push(MachInstr::compute_pass(
         (dst + 1) as u16,

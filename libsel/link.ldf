@@ -17,7 +17,7 @@ MEMORY
    mem_iv_code   { TYPE(PM RAM) START(0x00090000) END(0x000900a7) WIDTH(48) }
    mem_l1_block0 { TYPE(BW RAM) START(0x002403f0) END(0x0026ffff) WIDTH(8)  }
    mem_l1_block1 { TYPE(BW RAM) START(0x002c0000) END(0x002ebfff) WIDTH(8)  }
-   mem_l1_block2 { TYPE(BW RAM) START(0x00300000) END(0x0031bfff) WIDTH(8)  }
+   mem_l1_block2 { TYPE(BW RAM) START(0x00300000) END(0x0031ffff) WIDTH(8)  }
    mem_l2        { TYPE(BW RAM) START(0x20000000) END(0x200f9fff) WIDTH(8)  }
 }
 
@@ -40,6 +40,25 @@ PROCESSOR p0
       {
          RESERVE(ldf_stack_space, ldf_stack_length = 65536, 8)
       } > mem_l1_block0
+
+      // Cold/generated helper code can execute from block0 below the
+      // high-end stack reserve. selcc uses this for selected generated
+      // csmith support helpers so large cases do not consume all of L1
+      // block2, while still staying within the 24-bit direct-call range
+      // used by CJUMP.
+      block0_sw_code SW
+      {
+         INPUT_SECTION_ALIGN(2)
+         FILL(0x1)
+         INPUT_SECTIONS( $OBJECTS(seg_l1_block0_swco seg_l1_block0_pmco) )
+      } > mem_l1_block0
+
+      block1_sw_code SW
+      {
+         INPUT_SECTION_ALIGN(2)
+         FILL(0x1)
+         INPUT_SECTIONS( $OBJECTS(seg_l1_block1_swco seg_l1_block1_pmco) )
+      } > mem_l1_block1
 
       // Read-only string literals and other initialised data.
       block1_data BW
@@ -69,6 +88,13 @@ PROCESSOR p0
          INPUT_SECTIONS( $OBJECTS(seg_l2_bss) )
       } > mem_l2
 
+      l2_sw_code SW
+      {
+         INPUT_SECTION_ALIGN(2)
+         FILL(0x1)
+         INPUT_SECTIONS( $OBJECTS(seg_l2_swco seg_l2_pmco) )
+      } > mem_l2
+
       // Code. seg_swco holds 16/32-bit SW-compressed instructions;
       // seg_pmco is the fallback section for any full-width 48-bit
       // NW instructions a driver might still want to emit.
@@ -76,7 +102,21 @@ PROCESSOR p0
       {
          INPUT_SECTION_ALIGN(2)
          FILL(0x1)
-         INPUT_SECTIONS( $OBJECTS(seg_swco seg_pmco) )
+         INPUT_SECTIONS( $OBJECTS(seg_swco seg_pmco
+                                  seg_swco_uabs32 seg_swco_udivmod32
+                                  seg_swco___sel_div32_c
+                                  seg_swco___sel_mod32_c
+                                  seg_swco___sel_udiv32_c
+                                  seg_swco___sel_umod32_c
+                                  seg_swco_divmod_u64
+                                  seg_swco____div64 seg_swco____mod64
+                                  seg_pmco_divrem_u32 seg_pmco_divrem_s32
+                                  seg_pmco_divrem_u64 seg_pmco_divrem_s64
+                                  seg_pmco_shl64 seg_pmco_div64_asm
+                                  seg_pmco_udiv64 seg_pmco_umod64
+                                  seg_pmco_div32 seg_pmco_mod32
+                                  seg_pmco_udiv32 seg_pmco_umod32
+                                  seg_pmco_fdiv) )
       } > mem_l1_block2
    }
 }

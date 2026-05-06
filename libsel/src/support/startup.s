@@ -59,7 +59,7 @@ ___interrupt_table:
 // Reset entry: bring the core into a usable state
 // ============================================================
 
-.SECTION/CODE/DOUBLEANY seg_pmco;
+.SECTION/CODE/DOUBLEANY seg_l1_block0_pmco;
 
 .EXTERN main.;
 .EXTERN ldf_stack_space, ldf_stack_length;  // defined by link.ldf

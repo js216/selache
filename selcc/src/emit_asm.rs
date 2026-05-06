@@ -330,10 +330,22 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         out.push('\n');
     }
 
-    // Code section: all functions.
+    // Code sections: most functions stay in block2, while generated csmith
+    // support helpers can live in block0 to keep support code from exhausting
+    // block2 without splitting generated program bodies away from the rest of
+    // the main code path.
     if !compiled.is_empty() {
-        out.push_str(".SECTION/SW seg_swco;\n");
+        let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
+            let code_section = if should_emit_in_block0_code(cf.is_static, &cf.name) {
+                "seg_l1_block0_swco"
+            } else {
+                split_runtime_code_section(&cf.name).unwrap_or("seg_swco")
+            };
+            if current_code_section != Some(code_section) {
+                let _ = writeln!(out, ".SECTION/SW {code_section};");
+                current_code_section = Some(code_section);
+            }
             let sym = with_abi_suffix(&cf.name);
             if cf.is_weak {
                 let _ = writeln!(out, ".WEAK {sym};");
@@ -612,6 +624,30 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
 
     Ok(AsmModule { text: out })
+}
+
+fn should_emit_in_block0_code(is_static: bool, name: &str) -> bool {
+    name == "main"
+        || name == "test_main"
+        || (is_static
+            && (matches!(
+                name,
+                "crc32_gentab" | "crc32_byte" | "platform_main_begin" | "transparent_crc"
+            ) || name.starts_with("safe_")))
+}
+
+fn split_runtime_code_section(name: &str) -> Option<&'static str> {
+    match name {
+        "uabs32" => Some("seg_swco_uabs32"),
+        "udivmod32" => Some("seg_swco_udivmod32"),
+        "__sel_div32_c" => Some("seg_swco___sel_div32_c"),
+        "__sel_mod32_c" => Some("seg_swco___sel_mod32_c"),
+        "__sel_udiv32_c" => Some("seg_swco___sel_udiv32_c"),
+        "__sel_umod32_c" => Some("seg_swco___sel_umod32_c"),
+        "divmod_u64" => Some("seg_swco_divmod_u64"),
+        "___div64" | "___mod64" => Some("seg_l1_block1_swco"),
+        _ => None,
+    }
 }
 
 /// Pack a byte sequence into 32-bit words in little-endian order.
@@ -2444,6 +2480,83 @@ fn adjust_frame_offsets(
                 continue;
             }
         }
+        if let (
+            Instruction::Modify { i_reg, value, .. },
+            Some(MachInstr {
+                instr:
+                    Instruction::UregDagMove {
+                        pm,
+                        write,
+                        ureg,
+                        i_reg: access_i_reg,
+                        m_reg,
+                        cond,
+                        compute,
+                        post_modify,
+                    },
+                reloc,
+            }),
+            Some(MachInstr {
+                instr:
+                    Instruction::Modify {
+                        i_reg: restore_i_reg,
+                        value: restore_value,
+                        ..
+                    },
+                ..
+            }),
+        ) = (mi.instr, instrs.get(i + 1), instrs.get(i + 2))
+        {
+            if i_reg == target::FRAME_PTR
+                && *restore_i_reg == target::FRAME_PTR
+                && value != 0
+                && *restore_value == -value
+                && *access_i_reg == target::FRAME_PTR
+                && !*pm
+            {
+                let new_offset = if value < 0 {
+                    value - shift
+                } else {
+                    -(spill_base + value + 1)
+                };
+                let start = result.len();
+                result.push(MachInstr {
+                    instr: Instruction::Modify {
+                        i_reg: target::FRAME_PTR,
+                        value: new_offset,
+                        width: MemWidth::Nw,
+                        bitrev: false,
+                    },
+                    reloc: None,
+                });
+                result.push(MachInstr {
+                    instr: Instruction::UregDagMove {
+                        pm: *pm,
+                        write: *write,
+                        ureg: *ureg,
+                        i_reg: *access_i_reg,
+                        m_reg: *m_reg,
+                        cond: *cond,
+                        compute: *compute,
+                        post_modify: *post_modify,
+                    },
+                    reloc: reloc.clone(),
+                });
+                result.push(MachInstr {
+                    instr: Instruction::Modify {
+                        i_reg: target::FRAME_PTR,
+                        value: -new_offset,
+                        width: MemWidth::Nw,
+                        bitrev: false,
+                    },
+                    reloc: None,
+                });
+                idx_map.push(start.saturating_add(1).min(result.len()));
+                idx_map.push(start.saturating_add(2).min(result.len()));
+                i += 3;
+                continue;
+            }
+        }
         match mi.instr {
             Instruction::ComputeLoadStore {
                 compute,
@@ -3210,9 +3323,15 @@ mod tests {
         let doj = selas::assemble_text(&m.text, None, &[], &[], false)
             .unwrap_or_else(|e| panic!("selas rejected selcc asm: {e}\nasm:\n{}", m.text));
         let hdr = selelf::elf::parse_header(&doj).unwrap();
-        let code = code_section_bytes(&doj, &hdr, "seg_swco")
-            .or_else(|| code_section_bytes(&doj, &hdr, "seg_pmco"))
-            .unwrap_or_default();
+        let code = [
+            "seg_l1_block0_swco",
+            "seg_l1_block1_swco",
+            "seg_swco",
+            "seg_pmco",
+        ]
+        .into_iter()
+        .find_map(|section| code_section_bytes(&doj, &hdr, section))
+        .unwrap_or_default();
         selinstr::disasm::disassemble(&code, 0, false)
             .into_iter()
             .map(|l| l.text)
@@ -3311,6 +3430,76 @@ mod tests {
         assert!(m.text.contains(".WEAK hook.;"), "asm:\n{}", m.text);
         assert!(!m.text.contains(".GLOBAL hook.;"), "asm:\n{}", m.text);
         assert!(m.text.contains("hook.:"));
+    }
+
+    #[test]
+    fn static_safe_helpers_emit_to_block0_code_section() {
+        let m = compile(
+        "static void crc32_byte(unsigned char b) { (void)b; }
+             static void transparent_crc(unsigned long long v, const char *n, int f) { (void)v; (void)n; (void)f; }
+             static int safe_helper(void) { return 3; }
+             static int func_1(void) { return 5; }
+             static int helper(void) { return 4; }
+             int test_main(void) { crc32_byte(1); transparent_crc(1, 0, 0); return safe_helper() + func_1() + helper(); }
+             int main(void) { return test_main(); }",
+        );
+        let block0 = m
+            .text
+            .find(".SECTION/SW seg_l1_block0_swco;")
+            .expect("missing block0 support-helper section");
+        let crc32_byte = m.text.find("crc32_byte.:").expect("missing crc32 label");
+        let transparent_crc = m
+            .text
+            .find("transparent_crc.:")
+            .expect("missing transparent_crc label");
+        let safe_helper = m
+            .text
+            .find("safe_helper.:")
+            .expect("missing safe_helper label");
+        let func_1 = m.text.find("func_1.:").expect("missing func_1 label");
+        let helper_section = m
+            .text
+            .find(".SECTION/SW seg_swco;")
+            .expect("missing helper code section");
+        let helper = m.text.find("\nhelper.:").expect("missing helper label");
+        let main = m.text.find(".GLOBAL main.;").expect("missing main global");
+        let test_main = m
+            .text
+            .find(".GLOBAL test_main.;")
+            .expect("missing test_main global");
+        let entry_section = m.text[..test_main]
+            .rfind(".SECTION/SW seg_l1_block0_swco;")
+            .expect("missing reopened block0 entry section");
+        assert!(
+            block0 < crc32_byte,
+            "crc32 support should be in block0 section:\n{}",
+            m.text
+        );
+        assert!(
+            block0 < transparent_crc && transparent_crc < helper_section,
+            "transparent_crc should be in block0 section:\n{}",
+            m.text
+        );
+        assert!(
+            block0 < safe_helper,
+            "safe_helper should be in block0 section:\n{}",
+            m.text
+        );
+        assert!(
+            helper_section < func_1 && func_1 < helper,
+            "generated func_* bodies should stay in the main code section:\n{}",
+            m.text
+        );
+        assert!(
+            helper_section < helper,
+            "ordinary static helper should remain in main code section:\n{}",
+            m.text
+        );
+        assert!(
+            entry_section < test_main && test_main < main,
+            "test_main and main should be in the reopened block0 section:\n{}",
+            m.text
+        );
     }
 
     #[test]

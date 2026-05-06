@@ -120,14 +120,18 @@ long long ___mod64(long long dividend, long long divisor)
 {
     unsigned long long q;
     unsigned long long r;
-    unsigned long long lhs = dividend < 0
-                                 ? 0ULL - (unsigned long long)dividend
+    int dividend_neg = ((int)(dividend >> 32)) < 0;
+    int divisor_neg = ((int)(divisor >> 32)) < 0;
+    unsigned long long lhs = dividend_neg
+                                 ? (~(unsigned long long)dividend + 1ULL)
                                  : (unsigned long long)dividend;
-    unsigned long long rhs = divisor < 0
-                                 ? 0ULL - (unsigned long long)divisor
+    unsigned long long rhs = divisor_neg
+                                 ? (~(unsigned long long)divisor + 1ULL)
                                  : (unsigned long long)divisor;
 
+    (void)dividend;
+    (void)divisor;
     divmod_u64(lhs, rhs, &q, &r);
     (void)q;
-    return (long long)(dividend < 0 ? 0ULL - r : r);
+    return (long long)(dividend_neg ? (~r + 1ULL) : r);
 }

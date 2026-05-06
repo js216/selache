@@ -19,6 +19,9 @@ use crate::target;
 
 use selinstr::encode::{AluOp, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, ShiftOp};
 
+const UREG_ASTATX: u16 = 0x73;
+const DAG_M_ZERO: u8 = 5;
+
 /// Rewrite virtual register references in a list of machine instructions,
 /// mapping them to physical registers R0-R15.
 ///
@@ -160,6 +163,41 @@ fn emit_spill_access(out: &mut Vec<MachInstr>, slot: u32, dreg: u16, write: bool
         instr: Instruction::Modify {
             i_reg: target::FRAME_PTR,
             value: -(slot as i32),
+            width: MemWidth::Nw,
+            bitrev: false,
+        },
+        reloc: None,
+    });
+}
+
+fn emit_astat_spill_access(out: &mut Vec<MachInstr>, slot_marker: u32, write: bool) {
+    let offset = slot_marker as i32;
+    out.push(MachInstr {
+        instr: Instruction::Modify {
+            i_reg: target::FRAME_PTR,
+            value: offset,
+            width: MemWidth::Nw,
+            bitrev: false,
+        },
+        reloc: None,
+    });
+    out.push(MachInstr {
+        instr: Instruction::UregDagMove {
+            pm: false,
+            write,
+            ureg: UREG_ASTATX,
+            i_reg: target::FRAME_PTR,
+            m_reg: DAG_M_ZERO,
+            cond: target::COND_TRUE,
+            compute: None,
+            post_modify: false,
+        },
+        reloc: None,
+    });
+    out.push(MachInstr {
+        instr: Instruction::Modify {
+            i_reg: target::FRAME_PTR,
+            value: -offset,
             width: MemWidth::Nw,
             bitrev: false,
         },
@@ -580,7 +618,20 @@ impl Allocator {
                 // its spill slot before control transfers. The
                 // matching label-landing flush in `allocate` handles
                 // the fall-through side of the merge.
-                self.flush_all_vregs(&mut spill_pre);
+                if cond == target::COND_TRUE {
+                    self.flush_all_vregs(&mut spill_pre);
+                } else {
+                    // Conditional branches consume flags from the
+                    // immediately preceding compare. The spill stores
+                    // inserted by the boundary flush may update ASTAT,
+                    // so preserve the condition codes across the flush
+                    // and restore them directly before the branch.
+                    let slot_marker = self.spill_slots + 1;
+                    self.spill_slots += 2;
+                    emit_astat_spill_access(&mut spill_pre, slot_marker, true);
+                    self.flush_all_vregs(&mut spill_pre);
+                    emit_astat_spill_access(&mut spill_pre, slot_marker, false);
+                }
                 Instruction::Branch {
                     call,
                     cond,

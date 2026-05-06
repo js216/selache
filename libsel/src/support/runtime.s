@@ -42,7 +42,7 @@
 
 .FILE_ATTR libName="libruntime";
 
-.SECTION/PM seg_pmco;
+.SECTION/PM seg_pmco_divrem_u32;
 
 // =====================================================================
 // __divrem_u32: unsigned 32-bit divide and remainder
@@ -117,6 +117,8 @@ __divrem_u32.:
 // big-divisor short-circuit handles that without special casing.
 //
 // Sign masks live in caller-saved R5/R6 across the inline unsigned core.
+
+.SECTION/PM seg_pmco_divrem_s32;
 
 .GLOBAL __divrem_s32.;
 __divrem_s32.:
@@ -200,6 +202,8 @@ __divrem_s32.:
 // top bit set: when R15 >= 0x80000000 the quotient is 0 or 1 because
 // 2 * divisor exceeds 2**64.
 
+.SECTION/PM seg_pmco_divrem_u64;
+
 .GLOBAL __divrem_u64.;
 __divrem_u64.:
       DM(I7, M7) = R2;
@@ -264,6 +268,8 @@ __divrem_u64.:
 //   2) quotient sign mask       (lands at DM(+1, I7_final))
 // We cannot keep quotient sign in R4 across the loop because R4 is
 // reused as the 64-bit trial-subtract scratch inside the loop body.
+
+.SECTION/PM seg_pmco_divrem_s64;
 
 .GLOBAL __divrem_s64.;
 __divrem_s64.:
@@ -361,6 +367,8 @@ __divrem_s64.:
 // amount must be treated as unsigned in [0, 63]; counts outside that
 // range invoke C undefined behaviour and the caller is responsible
 // for masking.
+.SECTION/PM seg_pmco_shl64;
+
       .GLOBAL ___shl64.;
 ___shl64.:
       R8 = PASS R2;                  // shift count
@@ -407,6 +415,8 @@ ___shl64.:
 // reinterpreted as the saved frame link by the wrapper's epilogue.
 
 // Signed 64-bit public wrappers are implemented in div32.c.
+.SECTION/PM seg_pmco_div64_asm;
+
 .___div64_asm.:
       DM(I7, M7) = R8;
       DM(I7, M7) = R9;
@@ -481,6 +491,8 @@ ___shl64.:
       .type .___mod64_asm.,STT_FUNC;
 
 // ___udiv64 -- unsigned 64-bit division for selcc
+.SECTION/PM seg_pmco_udiv64;
+
       .GLOBAL ___udiv64.;
 ___udiv64.:
       DM(I7, M7) = R8;
@@ -518,6 +530,8 @@ ___udiv64.:
       .type ___udiv64.,STT_FUNC;
 
 // ___umod64 -- unsigned 64-bit modulo for selcc
+.SECTION/PM seg_pmco_umod64;
+
       .GLOBAL ___umod64.;
 ___umod64.:
       DM(I7, M7) = R8;
@@ -569,6 +583,8 @@ ___umod64.:
 // exact across the full 32-bit range.
 
 // ___div32 -- signed 32-bit division
+.SECTION/PM seg_pmco_div32;
+
       .GLOBAL ___div32.;
 ___div32.:
       JUMP __divrem_s32.;
@@ -577,6 +593,8 @@ ___div32.:
       .type ___div32.,STT_FUNC;
 
 // ___mod32 -- signed 32-bit modulo
+.SECTION/PM seg_pmco_mod32;
+
       .GLOBAL ___mod32.;
 ___mod32.:
       DM(I7, M7) = R2;
@@ -641,6 +659,8 @@ ___mod32.:
       .type ___mod32.,STT_FUNC;
 
 // ___udiv32 -- unsigned 32-bit division
+.SECTION/PM seg_pmco_udiv32;
+
       .GLOBAL ___udiv32.;
 ___udiv32.:
       JUMP __divrem_u32.;
@@ -649,6 +669,8 @@ ___udiv32.:
       .type ___udiv32.,STT_FUNC;
 
 // ___umod32 -- unsigned 32-bit modulo
+.SECTION/PM seg_pmco_umod32;
+
       .GLOBAL ___umod32.;
 ___umod32.:
       DM(I7, M7) = R2;
@@ -720,6 +742,8 @@ ___umod32.:
 // modes other than round-to-nearest, and the Markstein last-bit
 // correction) are not handled: the test corpus exercises only normal
 // finite operands, matching the contract of this minimal helper.
+
+.SECTION/PM seg_pmco_fdiv;
 
       .GLOBAL __lib_fdiv.;
 __lib_fdiv.:

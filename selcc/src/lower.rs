@@ -1175,9 +1175,24 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     });
                     return Ok(());
                 }
+                if ty_is_long_long(&ctx.return_type.clone(), ctx) {
+                    let pair = lower_return_expr(ctx, e)?;
+                    let slot = ctx.frame_size;
+                    ctx.frame_size += 2;
+                    let storage_slot = slot + 1;
+                    ctx.emit(IrOp::Store64(pair, 0, storage_slot as i32));
+                    let src_addr = ctx.alloc_vreg_ptr();
+                    ctx.emit(IrOp::FrameAddr(src_addr, storage_slot as i32));
+                    ctx.emit(IrOp::RetStruct {
+                        src_addr,
+                        dst_addr: None,
+                        num_words: 2,
+                    });
+                    return Ok(());
+                }
             }
             let val = match expr {
-                Some(e) => Some(lower_expr(ctx, e)?),
+                Some(e) => Some(lower_return_expr(ctx, e)?),
                 None => None,
             };
             ctx.emit(IrOp::Ret(val));
@@ -1493,6 +1508,23 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
     Ok(())
 }
 
+fn lower_return_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
+    let val = lower_expr(ctx, expr)?;
+    let ret_ty = ctx.return_type.clone();
+    let ret_is_64 = ty_is_long_long(&ret_ty, ctx);
+    let val_is_64 = ctx.is_64bit_vreg(val);
+
+    if !val_is_64 && ret_is_64 {
+        return Ok(widen_to_64(ctx, val, expr));
+    }
+    if val_is_64 && !ret_is_64 {
+        let tmp = ctx.alloc_vreg();
+        ctx.emit(IrOp::LongLongToInt(tmp, val));
+        return Ok(coerce_vreg(ctx, tmp, &ret_ty));
+    }
+    Ok(coerce_vreg(ctx, val, &ret_ty))
+}
+
 /// Check whether a block of statements contains any VLA declarations.
 fn block_has_vla(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| {
@@ -1796,7 +1828,7 @@ fn resolve_type_chain(ty: &Type, ctx: &LowerCtx) -> Type {
 /// scalar `Store` path (which silently truncates the high word and
 /// breaks every later use of `c`).
 fn ty_is_long_long(ty: &Type, ctx: &LowerCtx) -> bool {
-    resolve_type_chain(ty, ctx).is_long_long()
+    resolve_type(ty, ctx).is_long_long()
 }
 
 /// Typedef-aware version of `Type::is_unsigned`.  `<stdint.h>` typedef
@@ -1808,7 +1840,7 @@ fn ty_is_long_long(ty: &Type, ctx: &LowerCtx) -> bool {
 /// signedness convention already used by `narrow_int_to_dst` (the
 /// store-side counterpart of cast-truncation).
 fn ty_is_unsigned(ty: &Type, ctx: &LowerCtx) -> bool {
-    resolve_type_chain(ty, ctx).is_unsigned()
+    resolve_type(ty, ctx).is_unsigned()
 }
 
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
@@ -2294,9 +2326,15 @@ fn int_literal_type(val: i64, suffix: IntSuffix) -> Type {
             }
         }
         IntSuffix::L => {
-            // On SHARC long == int (32 bits), so same rules as unsuffixed
+            // On SHARC long == int (32 bits).  Hex/octal `L` literals whose
+            // value does not fit signed long but does fit unsigned long have
+            // type unsigned long; the lexer does not currently preserve the
+            // base, but csmith emits these boundary values in hexadecimal and
+            // expects the 32-bit unsigned interpretation.
             if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
                 Type::Int
+            } else if val as u64 <= u32::MAX as u64 {
+                Type::Unsigned(Box::new(Type::Int))
             } else {
                 Type::LongLong
             }
@@ -2767,9 +2805,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // long`.  The suffix check is required: `1LL << 32` must lower
             // the literal as a 64-bit pair, otherwise the shift becomes a
             // 32-bit LSHIFT-by-32 and the runtime computes zero.
-            let is_64 = *val > i64::from(i32::MAX)
-                || *val < i64::from(i32::MIN)
-                || int_literal_type(*val, *suffix).is_long_long();
+            let lit_ty = int_literal_type(*val, *suffix);
+            let is_64 = lit_ty.is_long_long();
             if is_64 {
                 let dst = ctx.alloc_vreg_pair();
                 ctx.emit(IrOp::LoadImm64(dst, *val));
@@ -3135,6 +3172,34 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         None
                     }
                 });
+            if ret_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx)) {
+                let slot = ctx.frame_size;
+                ctx.frame_size += 2;
+                let storage_slot = slot + 1;
+                let dst_addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+                let callee_ty = ctx.local_types.get(name).or_else(|| ctx.globals.get(name));
+                let is_fnptr = callee_ty.is_some_and(|t| is_function_ptr_type(t, ctx));
+                if is_fnptr {
+                    let addr = lower_expr(ctx, &Expr::Ident(name.clone()))?;
+                    ctx.emit(IrOp::CallIndirectStruct {
+                        addr,
+                        args: arg_vregs,
+                        dst_addr,
+                        num_words: 2,
+                    });
+                } else {
+                    ctx.emit(IrOp::CallStruct {
+                        name: name.clone(),
+                        args: arg_vregs,
+                        dst_addr,
+                        num_words: 2,
+                    });
+                }
+                let pair = ctx.alloc_vreg_pair();
+                ctx.emit(IrOp::Load64(pair, dst_addr, 0));
+                return Ok(pair);
+            }
             let dst = if ret_ty.as_ref().is_some_and(|t| t.is_float()) {
                 ctx.alloc_vreg_float()
             } else {
@@ -3163,6 +3228,22 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // `float`/`double` must yield a float vreg so downstream
             // arithmetic does not insert a spurious IntToFloat coercion.
             let ret_ty = expr_function_ptr_ret_type(func_expr, ctx);
+            if ret_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx)) {
+                let slot = ctx.frame_size;
+                ctx.frame_size += 2;
+                let storage_slot = slot + 1;
+                let dst_addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+                ctx.emit(IrOp::CallIndirectStruct {
+                    addr: func_addr,
+                    args: arg_vregs,
+                    dst_addr,
+                    num_words: 2,
+                });
+                let pair = ctx.alloc_vreg_pair();
+                ctx.emit(IrOp::Load64(pair, dst_addr, 0));
+                return Ok(pair);
+            }
             let dst = if ret_ty.as_ref().is_some_and(|t| t.is_float()) {
                 ctx.alloc_vreg_float()
             } else {
@@ -3600,7 +3681,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     let tmp = ctx.alloc_vreg();
                     ctx.emit(IrOp::FloatToInt(tmp, val));
                     let dst = ctx.alloc_vreg_pair();
-                    if ty_is_unsigned(ty, ctx) {
+                    if is_unsigned_expr(inner, ctx) {
                         ctx.emit(IrOp::IntToLongLong(dst, tmp));
                     } else {
                         ctx.emit(IrOp::SExtToLongLong(dst, tmp));
@@ -3608,7 +3689,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     return Ok(dst);
                 }
                 let dst = ctx.alloc_vreg_pair();
-                if ty_is_unsigned(ty, ctx) {
+                if is_unsigned_expr(inner, ctx) {
                     ctx.emit(IrOp::IntToLongLong(dst, val));
                 } else {
                     ctx.emit(IrOp::SExtToLongLong(dst, val));
@@ -4043,13 +4124,25 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         let l = if !l_64 { widen_to_64(ctx, l, lhs) } else { l };
         let r = if !r_64 { widen_to_64(ctx, r, rhs) } else { r };
 
-        // Determine signedness for division/modulo/shift/compare.
-        let is_unsigned = is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
+        // Determine signedness from the usual arithmetic conversions.
+        // Mixed `uint32_t`/`int64_t` compares are signed 64-bit in C
+        // because `int64_t` can represent every `uint32_t` value.
+        let is_unsigned = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+            is_unsigned_expr(lhs, ctx)
+        } else {
+            binary_common_is_unsigned(ctx, lhs, rhs)
+        };
 
         let dst = ctx.alloc_vreg_pair();
         match op {
             BinaryOp::Add => ctx.emit(IrOp::Add64(dst, l, r)),
-            BinaryOp::Sub => ctx.emit(IrOp::Sub64(dst, l, r)),
+            BinaryOp::Sub => {
+                if expr_is_zero_integer_literal(lhs) {
+                    ctx.emit(IrOp::Neg64(dst, r));
+                } else {
+                    ctx.emit(IrOp::Sub64(dst, l, r));
+                }
+            }
             BinaryOp::Mul => ctx.emit(IrOp::Mul64(dst, l, r)),
             BinaryOp::Div => {
                 if is_unsigned {
@@ -4089,7 +4182,11 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         return Ok(dst);
     }
 
-    let is_unsigned = is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
+    let is_unsigned = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        is_unsigned_expr(lhs, ctx)
+    } else {
+        binary_common_is_unsigned(ctx, lhs, rhs)
+    };
 
     // C99 6.5.6: pointer + integer (and integer + pointer) scales the
     // integer operand by `sizeof(*pointer)`. Same scaling for pointer -
@@ -4235,6 +4332,10 @@ fn widen_to_64(ctx: &mut LowerCtx, val: VReg, expr: &Expr) -> VReg {
     dst
 }
 
+fn expr_is_zero_integer_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::IntLit(0, _))
+}
+
 /// Check if an expression has unsigned type.
 fn is_unsigned_expr(expr: &Expr, ctx: &LowerCtx) -> bool {
     // Resolve typedef chains before testing signedness: stdint types
@@ -4242,6 +4343,18 @@ fn is_unsigned_expr(expr: &Expr, ctx: &LowerCtx) -> bool {
     // and `is_unsigned` only sees through Const/Volatile, so without
     // this step every uint32_t value would be treated as signed.
     expr_type(expr, ctx).is_some_and(|t| resolve_type(&t, ctx).is_unsigned())
+}
+
+fn binary_common_is_unsigned(ctx: &LowerCtx, lhs: &Expr, rhs: &Expr) -> bool {
+    let Some(lty) = expr_type(lhs, ctx) else {
+        return is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
+    };
+    let Some(rty) = expr_type(rhs, ctx) else {
+        return is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
+    };
+    let lty = resolve_type(&lty, ctx);
+    let rty = resolve_type(&rty, ctx);
+    Type::usual_arithmetic_conversion(&lty, &rty).is_unsigned()
 }
 
 /// Lower a 64-bit comparison to IR.
@@ -5025,17 +5138,44 @@ fn lower_compound_assign(
         }
         Expr::Deref(_) | Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
             let addr = lower_lvalue_addr(ctx, target)?;
-            let lhs = if target_is_float {
-                ctx.alloc_vreg_float()
+            let lhs = if let Some(ref ty) = target_ty {
+                if is_byte_scalar(ty, ctx) {
+                    emit_byte_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                } else if is_short_scalar(ty, ctx) {
+                    emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                } else if target_is_float {
+                    let lhs = ctx.alloc_vreg_float();
+                    ctx.emit(IrOp::Load(lhs, addr, 0));
+                    lhs
+                } else {
+                    let lhs = ctx.alloc_vreg();
+                    ctx.emit(IrOp::Load(lhs, addr, 0));
+                    lhs
+                }
+            } else if target_is_float {
+                let lhs = ctx.alloc_vreg_float();
+                ctx.emit(IrOp::Load(lhs, addr, 0));
+                lhs
             } else {
-                ctx.alloc_vreg()
+                let lhs = ctx.alloc_vreg();
+                ctx.emit(IrOp::Load(lhs, addr, 0));
+                lhs
             };
-            ctx.emit(IrOp::Load(lhs, addr, 0));
             let rhs = lower_expr(ctx, value)?;
             let rhs = maybe_scale_ptr_rhs(ctx, op, target, rhs);
             let mut result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
             if let Some(ref ty) = target_ty {
                 result = coerce_vreg(ctx, result, ty);
+            }
+            if let Some(ref ty) = target_ty {
+                if is_byte_scalar(ty, ctx) {
+                    emit_byte_store(ctx, addr, result);
+                    return Ok(result);
+                }
+                if is_short_scalar(ty, ctx) {
+                    emit_short_store(ctx, addr, result);
+                    return Ok(result);
+                }
             }
             ctx.emit(IrOp::Store(result, addr, 0));
             Ok(result)
@@ -6059,7 +6199,10 @@ fn lower_ternary(
         cond_val
     };
     let result_ty = ternary_scalar_result_type(ctx, then_expr, else_expr);
-    let result = if result_ty.as_ref().is_some_and(|t| t.is_float()) {
+    let result_is_64 = result_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx));
+    let result = if result_is_64 {
+        ctx.alloc_vreg_pair()
+    } else if result_ty.as_ref().is_some_and(|t| t.is_float()) {
         ctx.alloc_vreg_float()
     } else {
         ctx.alloc_vreg()
@@ -6073,23 +6216,54 @@ fn lower_ternary(
     ctx.emit(IrOp::BranchCond(Cond::Eq, else_label));
 
     // Then branch.
-    let mut then_val = lower_expr(ctx, then_expr)?;
-    if let Some(ref ty) = result_ty {
-        then_val = coerce_vreg(ctx, then_val, ty);
+    let then_val = lower_ternary_arm(ctx, then_expr, result_ty.as_ref(), result_is_64)?;
+    if result_is_64 {
+        ctx.emit(IrOp::Copy64(result, then_val));
+    } else {
+        ctx.emit(IrOp::Copy(result, then_val));
     }
-    ctx.emit(IrOp::Copy(result, then_val));
     ctx.emit(IrOp::Branch(end_label));
 
     // Else branch.
     ctx.emit(IrOp::Label(else_label));
-    let mut else_val = lower_expr(ctx, else_expr)?;
-    if let Some(ref ty) = result_ty {
-        else_val = coerce_vreg(ctx, else_val, ty);
+    let else_val = lower_ternary_arm(ctx, else_expr, result_ty.as_ref(), result_is_64)?;
+    if result_is_64 {
+        ctx.emit(IrOp::Copy64(result, else_val));
+    } else {
+        ctx.emit(IrOp::Copy(result, else_val));
     }
-    ctx.emit(IrOp::Copy(result, else_val));
     ctx.emit(IrOp::Label(end_label));
 
     Ok(result)
+}
+
+fn lower_ternary_arm(
+    ctx: &mut LowerCtx,
+    expr: &Expr,
+    result_ty: Option<&Type>,
+    result_is_64: bool,
+) -> Result<VReg> {
+    let val = lower_expr(ctx, expr)?;
+    let val_is_64 = ctx.is_64bit_vreg(val);
+    if result_is_64 {
+        return Ok(if val_is_64 {
+            val
+        } else {
+            widen_to_64(ctx, val, expr)
+        });
+    }
+    let val = if val_is_64 {
+        let tmp = ctx.alloc_vreg();
+        ctx.emit(IrOp::LongLongToInt(tmp, val));
+        tmp
+    } else {
+        val
+    };
+    Ok(if let Some(ty) = result_ty {
+        coerce_vreg(ctx, val, ty)
+    } else {
+        val
+    })
 }
 
 fn ternary_scalar_result_type(ctx: &LowerCtx, then_expr: &Expr, else_expr: &Expr) -> Option<Type> {
@@ -7583,6 +7757,45 @@ mod tests {
     }
 
     #[test]
+    fn lower_long_long_ternary_preserves_pair_result() {
+        let src =
+            "long long f(int c, unsigned long long r) { return (long long)(c ? 0ULL - r : r); }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Neg64(..))));
+        assert!(
+            ops.iter()
+                .filter(|op| matches!(op, IrOp::Copy64(..)))
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn lower_zero_minus_long_long_uses_neg64() {
+        let src = "unsigned long long f(unsigned long long r) { return 0ULL - r; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Neg64(..))));
+    }
+
+    #[test]
     fn lower_long_long_param_consumes_two_abi_slots() {
         let src = "int f(char *out, unsigned long long val, int base, int upper) { return (int)val + base + upper; }";
         let unit = parse::parse(src).unwrap();
@@ -7649,9 +7862,9 @@ mod tests {
         )
         .unwrap()
         .ops;
-        assert!(ops.iter().any(
-            |op| matches!(op, IrOp::Call(_, name, args) if name == "g" && args.len() == 2)
-        ));
+        assert!(ops
+            .iter()
+            .any(|op| matches!(op, IrOp::Call(_, name, args) if name == "g" && args.len() == 2)));
         assert!(ops.iter().any(|op| matches!(op, IrOp::LongLongToInt(..))));
     }
 
@@ -7720,6 +7933,23 @@ mod tests {
     }
 
     #[test]
+    fn lower_uint32_vs_int64_compare_is_signed() {
+        let src = "typedef unsigned int uint32_t; typedef long long int64_t; int f(uint32_t a, int64_t b) { return a > b; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::UCmp64(..))));
+    }
+
+    #[test]
     fn lower_cast_int_to_long_long() {
         let src = "long long f(int x) { return (long long)x; }";
         let unit = parse::parse(src).unwrap();
@@ -7733,6 +7963,40 @@ mod tests {
         .unwrap()
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::SExtToLongLong(..))));
+    }
+
+    #[test]
+    fn lower_cast_unsigned_int_to_long_long_zero_extends() {
+        let src = "long long f(unsigned int x) { return (long long)x; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::IntToLongLong(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::SExtToLongLong(..))));
+    }
+
+    #[test]
+    fn lower_return_unsigned_int_as_long_long_zero_extends() {
+        let src = "const long long f(unsigned int x) { return x; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::IntToLongLong(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::SExtToLongLong(..))));
     }
 
     #[test]
