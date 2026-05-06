@@ -2782,16 +2782,13 @@ fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
         },
         reloc: None,
     });
-    // MRF = a_lo * b_lo  (full 64-bit unsigned product in MRF, or
-    // signed — we just read both halves as a bit pattern).  SHARC+'s
-    // `MRF = Rx * Ry (SSI)` writes the 64-bit product to the MR
-    // register; MR0F holds the low 32 bits, MR1F the high 32 bits.
-    // The sign interpretation does not affect the low 64 bits of the
-    // final 64-bit product in two's complement.
+    // MRF = a_lo * b_lo as an unsigned 32x32 product.  The low words
+    // are limbs, not signed operands: `(-1LL) * 42` still needs
+    // 0xffffffff * 42 to contribute 41 to the high limb, not -1.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::MrfMulSsi { rx: 0, ry: 2 }),
+            compute: ComputeOp::Mul(MulOp::MrfMulUuf { rx: 0, ry: 2 }),
         },
         reloc: None,
     });
@@ -3915,9 +3912,9 @@ mod tests {
             !references_legacy,
             "unexpected relocation to legacy ___mul64 helper"
         );
-        // The sequence must contain at least one SSI integer multiply
-        // and one MRF-SSI multiply (for the cross terms and the
-        // low-low product respectively).
+        // The sequence must contain at least two SSI integer multiplies
+        // for the signed cross terms and one MRF-UUF multiply for the
+        // low-low limb product.
         let ssi_count = result
             .instrs
             .iter()
@@ -3935,18 +3932,18 @@ mod tests {
             ssi_count >= 2,
             "expected at least two SSI multiplies for the cross terms, got {ssi_count}",
         );
-        let has_mrf_ssi = result.instrs.iter().any(|m| {
+        let has_mrf_uuf = result.instrs.iter().any(|m| {
             matches!(
                 &m.instr,
                 Instruction::Compute {
-                    compute: ComputeOp::Mul(MulOp::MrfMulSsi { .. }),
+                    compute: ComputeOp::Mul(MulOp::MrfMulUuf { .. }),
                     ..
                 }
             )
         });
         assert!(
-            has_mrf_ssi,
-            "missing MRF SSI multiply for the low-low product"
+            has_mrf_uuf,
+            "missing MRF UUF multiply for the low-low limb product"
         );
     }
 
