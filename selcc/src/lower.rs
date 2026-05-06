@@ -4854,8 +4854,101 @@ fn ptr_stride(ty: Option<&Type>, ctx: &LowerCtx) -> i64 {
     crate::types::size_bytes_ctx(pt, ctx).max(1) as i64
 }
 
+fn lower_inc_dec_64(
+    ctx: &mut LowerCtx,
+    operand: &Expr,
+    is_inc: bool,
+    is_pre: bool,
+    is_unsigned: bool,
+) -> Result<VReg> {
+    let one = ctx.alloc_vreg_pair();
+    ctx.emit(IrOp::LoadImm64(one, 1));
+
+    let apply = |ctx: &mut LowerCtx, old_val: VReg| -> Result<VReg> {
+        let new_val = emit_compound_op_64(
+            ctx,
+            if is_inc { BinaryOp::Add } else { BinaryOp::Sub },
+            old_val,
+            one,
+            is_unsigned,
+        )?;
+        Ok(new_val)
+    };
+
+    match operand {
+        Expr::Ident(name) => {
+            if let Some(storage) = ctx.locals.get(name).cloned() {
+                let old_val = match storage {
+                    LocalStorage::Stack(offset) => {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::Load64(dst, 0, offset as i32));
+                        dst
+                    }
+                    LocalStorage::Reg(vreg) => {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::Copy64(dst, vreg));
+                        dst
+                    }
+                    LocalStorage::Static(ref sym) => {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::ReadGlobal64(dst, sym.clone()));
+                        dst
+                    }
+                };
+                let new_val = apply(ctx, old_val)?;
+                match storage {
+                    LocalStorage::Stack(offset) => {
+                        ctx.emit(IrOp::Store64(new_val, 0, offset as i32));
+                    }
+                    LocalStorage::Reg(vreg) => {
+                        ctx.emit(IrOp::Copy(vreg, new_val));
+                        ctx.emit(IrOp::Copy(vreg + 1, new_val + 1));
+                    }
+                    LocalStorage::Static(ref sym) => {
+                        ctx.emit(IrOp::WriteGlobal64(new_val, sym.clone()));
+                    }
+                }
+                Ok(if is_pre { new_val } else { old_val })
+            } else if ctx.globals.contains_key(name) {
+                let old_val = ctx.alloc_vreg_pair();
+                ctx.emit(IrOp::ReadGlobal64(old_val, name.clone()));
+                let new_val = apply(ctx, old_val)?;
+                ctx.emit(IrOp::WriteGlobal64(new_val, name.clone()));
+                Ok(if is_pre { new_val } else { old_val })
+            } else {
+                Err(Error::NotImplemented(format!("undefined variable: {name}")))
+            }
+        }
+        Expr::Deref(inner) => {
+            let ptr = lower_expr(ctx, inner)?;
+            let old_val = ctx.alloc_vreg_pair();
+            ctx.emit(IrOp::Load64(old_val, ptr, 0));
+            let new_val = apply(ctx, old_val)?;
+            ctx.emit(IrOp::Store64(new_val, ptr, 0));
+            Ok(if is_pre { new_val } else { old_val })
+        }
+        Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
+            let addr = lower_lvalue_addr(ctx, operand)?;
+            let old_val = ctx.alloc_vreg_pair();
+            ctx.emit(IrOp::Load64(old_val, addr, 0));
+            let new_val = apply(ctx, old_val)?;
+            ctx.emit(IrOp::Store64(new_val, addr, 0));
+            Ok(if is_pre { new_val } else { old_val })
+        }
+        _ => Err(Error::NotImplemented(
+            "increment/decrement of complex expression".into(),
+        )),
+    }
+}
+
 fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool) -> Result<VReg> {
-    let stride = ptr_stride(expr_type(operand, ctx).as_ref(), ctx);
+    let operand_ty = expr_type(operand, ctx);
+    if let Some(ref ty) = operand_ty {
+        if ty_is_long_long(ty, ctx) {
+            return lower_inc_dec_64(ctx, operand, is_inc, is_pre, ty_is_unsigned(ty, ctx));
+        }
+    }
+    let stride = ptr_stride(operand_ty.as_ref(), ctx);
     match operand {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
@@ -4957,8 +5050,21 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
         }
         Expr::Deref(_) | Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
             let addr = lower_lvalue_addr(ctx, operand)?;
-            let old_val = ctx.alloc_vreg();
-            ctx.emit(IrOp::Load(old_val, addr, 0));
+            let old_val = if let Some(ref ty) = operand_ty {
+                if is_byte_scalar(ty, ctx) {
+                    emit_byte_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                } else if is_short_scalar(ty, ctx) {
+                    emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                } else {
+                    let old_val = ctx.alloc_vreg();
+                    ctx.emit(IrOp::Load(old_val, addr, 0));
+                    old_val
+                }
+            } else {
+                let old_val = ctx.alloc_vreg();
+                ctx.emit(IrOp::Load(old_val, addr, 0));
+                old_val
+            };
             let one = ctx.alloc_vreg();
             ctx.emit(IrOp::LoadImm(one, stride));
             let new_val = ctx.alloc_vreg();
@@ -4967,7 +5073,22 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
             } else {
                 ctx.emit(IrOp::Sub(new_val, old_val, one));
             }
-            ctx.emit(IrOp::Store(new_val, addr, 0));
+            let new_val = if let Some(ref ty) = operand_ty {
+                coerce_vreg(ctx, new_val, ty)
+            } else {
+                new_val
+            };
+            if let Some(ref ty) = operand_ty {
+                if is_byte_scalar(ty, ctx) {
+                    emit_byte_store(ctx, addr, new_val);
+                } else if is_short_scalar(ty, ctx) {
+                    emit_short_store(ctx, addr, new_val);
+                } else {
+                    ctx.emit(IrOp::Store(new_val, addr, 0));
+                }
+            } else {
+                ctx.emit(IrOp::Store(new_val, addr, 0));
+            }
             if is_pre {
                 Ok(new_val)
             } else {
@@ -7253,6 +7374,72 @@ mod tests {
         .unwrap()
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::Add(_, _, _))));
+    }
+
+    #[test]
+    fn lower_long_long_pre_decrement_stores_both_words() {
+        let src = "long long g; void f(void) { --g; }";
+        let unit = parse::parse(src).unwrap();
+        let globals: HashMap<String, Type> =
+            vec![("g".to_string(), Type::LongLong)].into_iter().collect();
+        let ops = lower_function(
+            &unit.functions[0],
+            &globals,
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Sub64(..))));
+        assert!(ops
+            .iter()
+            .any(|op| matches!(op, IrOp::WriteGlobal64(_, name) if name == "g")));
+        assert!(!ops
+            .iter()
+            .any(|op| matches!(op, IrOp::StoreGlobal(_, name) if name == "g")));
+    }
+
+    #[test]
+    fn lower_long_long_post_increment_returns_old_pair() {
+        let src = "long long f(void) { long long x = -1; return x++; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Add64(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Store64(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::RetStruct { .. })));
+    }
+
+    #[test]
+    fn lower_byte_index_post_increment_preserves_packed_word() {
+        let src = "typedef unsigned char uint8_t; uint8_t a[2]; int f(void) { return a[1]++; }";
+        let unit = parse::parse(src).unwrap();
+        let globals: HashMap<String, Type> = vec![(
+            "a".to_string(),
+            Type::Array(Box::new(Type::Typedef("uint8_t".to_string())), Some(2)),
+        )]
+        .into_iter()
+        .collect();
+        let ops = lower_function(
+            &unit.functions[0],
+            &globals,
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::BitNot(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::BitOr(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Store(..))));
     }
 
     #[test]
