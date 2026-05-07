@@ -206,6 +206,17 @@ endef
 $(eval $(call DRAFT_HOST_RULE,gcc))
 $(eval $(call DRAFT_HOST_RULE,clang))
 
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_58953aa9.0xf57f2c63.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_58953aa9.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_4c2338b1.0xab757f71.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_4c2338b1.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f1fa455.0x39f2cfc.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f1fa455.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f5ea6f7.0x7d4b5790.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f5ea6f7.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_62d5d342.0x925dcb2e.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_62d5d342.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_95d42820.0x298c9077.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_95d42820.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_c19baf86.0x83abec32.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_c19baf86.ldr
+$(BUILD)/drafts/sel/cctest_csmith_0f4d7af9.0xaa43ccd0.ldr: $(BUILD)/drafts/sel/cctest_csmith_0f4d7af9.ldr
+$(BUILD)/drafts/sel/cctest_csmith_38842b22.0x88090718.ldr: $(BUILD)/drafts/sel/cctest_csmith_38842b22.ldr
+$(BUILD)/drafts/sel/cctest_csmith_84e46ffd.0xae67a84.ldr: $(BUILD)/drafts/sel/cctest_csmith_84e46ffd.ldr
+
 $(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cces
 	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/cces/$*.doj $< > /dev/null
 	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \

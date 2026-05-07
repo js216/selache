@@ -356,6 +356,11 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             .map(|cf| cf.name.as_str());
         let spill_small_helpers_to_block0 = root_is_small && spill_nonroot_func.is_none();
         let mut block0_instrs_used: usize = 0;
+        let mut block1_instrs_used: usize = if root_too_large_for_block0 {
+            root_instrs
+        } else {
+            0
+        };
         let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
             let initial_section = if should_emit_in_block0_code(
@@ -388,8 +393,22 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 block0_instrs_used,
                 BLOCK0_INSTR_BUDGET,
             );
+            let code_section = apply_block1_budget_cap(
+                code_section,
+                cf.is_static,
+                &cf.name,
+                cf.instrs.len(),
+                root_too_large_for_block0,
+                block1_instrs_used,
+                BLOCK1_INSTR_BUDGET,
+            );
             if code_section == "seg_l1_block0_swco" {
                 block0_instrs_used = block0_instrs_used.saturating_add(cf.instrs.len());
+            }
+            if code_section == "seg_l1_block1_swco"
+                && !(root_too_large_for_block0 && cf.name == "func_1")
+            {
+                block1_instrs_used = block1_instrs_used.saturating_add(cf.instrs.len());
             }
             if current_code_section != Some(code_section) {
                 let _ = writeln!(out, ".SECTION/SW {code_section};");
@@ -691,6 +710,16 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
 /// iteration.
 const BLOCK0_INSTR_BUDGET: usize = 22_000;
 
+/// Cap on cumulative `cf.instrs.len()` routed to `seg_l1_block1_swco`
+/// for very large csmith roots. `func_1` itself is reserved up front
+/// because it is the large root that forced block1 routing; excess
+/// signed 8/16-bit safe helpers can execute from the default block2
+/// code segment without changing semantics. This preserves the
+/// checksum-critical large-root placement while avoiding the
+/// `block1_sw_code` overflow seen after bitfield RMW expansion made
+/// `cctest_csmith_9405adb0` slightly larger.
+const BLOCK1_INSTR_BUDGET: usize = 33_400;
+
 /// Apply the block0 cumulative-size cap to a routing decision. When
 /// the root is too large for block0, selcc otherwise spills every
 /// "large csmith helper" body to `seg_l1_block0_swco`; for drafts
@@ -721,6 +750,29 @@ fn apply_block0_budget_cap(
         return initial_section;
     }
     if block0_instrs_used.saturating_add(instrs) > budget {
+        split_runtime_code_section(name).unwrap_or("seg_swco")
+    } else {
+        initial_section
+    }
+}
+
+fn apply_block1_budget_cap(
+    initial_section: &'static str,
+    is_static: bool,
+    name: &str,
+    instrs: usize,
+    root_too_large_for_block0: bool,
+    block1_instrs_used: usize,
+    budget: usize,
+) -> &'static str {
+    if initial_section != "seg_l1_block1_swco"
+        || !root_too_large_for_block0
+        || !is_static
+        || !is_csmith_small_safe_helper(name)
+    {
+        return initial_section;
+    }
+    if block1_instrs_used.saturating_add(instrs) > budget {
         split_runtime_code_section(name).unwrap_or("seg_swco")
     } else {
         initial_section
@@ -1177,12 +1229,14 @@ fn eval_subword_const_int(
                  sub-word struct fields in global initializers must be constant integers"
             ),
         }),
-        _ => eval_const_expr(value, tctx).map(|n| n as u32).map_err(|_| Error::Compile {
-            msg: format!(
-                "field {field}: non-constant-int initializer at sub-word offset; \
+        _ => eval_const_expr(value, tctx)
+            .map(|n| n as u32)
+            .map_err(|_| Error::Compile {
+                msg: format!(
+                    "field {field}: non-constant-int initializer at sub-word offset; \
                  sub-word struct fields in global initializers must be constant integers"
-            ),
-        }),
+                ),
+            }),
     }
 }
 
@@ -1192,7 +1246,17 @@ fn eval_subword_const_int(
 /// bit_width))` for `Type::Bitfield` fields and `None` for regular
 /// fields.  See the construction loop in `build_init_words` for the
 /// invariant that `bit_pos_in_word + bit_width <= 32`.
-type StructFieldEntry<'a> = (String, usize, u32, &'a crate::types::Type, Option<(u32, u32)>);
+type StructFieldEntry<'a> = (
+    String,
+    usize,
+    u32,
+    &'a crate::types::Type,
+    Option<(u32, u32)>,
+);
+
+fn is_anonymous_bitfield_entry(entry: &StructFieldEntry<'_>) -> bool {
+    entry.0.starts_with("__anon") && entry.4.is_some()
+}
 
 /// Evaluate a const-initializer expression to a flat list of 32-bit words.
 ///
@@ -1354,7 +1418,10 @@ fn build_init_words(
             let shares_word_with_later_subfield =
                 |widx: usize, my_idx: usize, fmap: &[StructFieldEntry<'_>]| -> bool {
                     fmap.iter().enumerate().any(|(j, (_, w, bin, _, bf))| {
-                        j != my_idx && *w == widx && (*bin != 0 || bf.is_some())
+                        j != my_idx
+                            && *w == widx
+                            && !is_anonymous_bitfield_entry(&fmap[j])
+                            && (*bin != 0 || bf.is_some())
                     })
                 };
 
@@ -1458,6 +1525,11 @@ fn build_init_words(
                     other => {
                         // Positional. Place at field/element cursor.
                         if !field_map.is_empty() {
+                            while field_cursor < field_map.len()
+                                && is_anonymous_bitfield_entry(&field_map[field_cursor])
+                            {
+                                field_cursor += 1;
+                            }
                             if field_cursor >= field_map.len() {
                                 return Err(Error::Compile {
                                     msg: "too many positional initializers for struct".to_string(),
@@ -1524,7 +1596,8 @@ fn build_init_words(
                                         }
                                     };
                                 } else {
-                                    let sub = build_init_words(other, fsize, tctx, Some(fty), ictx)?;
+                                    let sub =
+                                        build_init_words(other, fsize, tctx, Some(fty), ictx)?;
                                     for (k, w) in sub.into_iter().enumerate() {
                                         ensure(&mut v, woff + k);
                                         v[woff + k] = w;
@@ -4030,8 +4103,8 @@ mod tests {
                    struct S g = { 0x12, 0x34, 0x55667788 };
                    int main(void) { return g.a + g.b + g.w; }";
         let unit = parse::parse(src).expect("parse sub-word struct global");
-        let m = emit_module(&unit, 8)
-            .expect("emit_module Ok for sub-word struct field global init");
+        let m =
+            emit_module(&unit, 8).expect("emit_module Ok for sub-word struct field global init");
         assert!(
             m.text.contains(".VAR g. = 0x00003412;"),
             "expected packed first word .VAR g. = 0x00003412 in asm, got:\n{}",
@@ -4059,8 +4132,8 @@ mod tests {
                    struct S g = { 0x123, 0x2A, 0x55667788 };
                    int main(void) { return g.w; }";
         let unit = parse::parse(src).expect("parse bitfield struct global");
-        let m = emit_module(&unit, 8)
-            .expect("emit_module Ok for bitfield struct field global init");
+        let m =
+            emit_module(&unit, 8).expect("emit_module Ok for bitfield struct field global init");
         assert!(
             m.text.contains(".VAR g. = 0x0000A923,") || m.text.contains(".VAR g. = 0x0000A923;"),
             "expected packed first word 0x0000A923 in asm, got:\n{}",
@@ -4070,6 +4143,95 @@ mod tests {
             m.text.contains("0x55667788"),
             "expected second word 0x55667788 in asm, got:\n{}",
             m.text
+        );
+    }
+
+    #[test]
+    fn anonymous_bitfield_does_not_consume_global_init() {
+        let src = "struct S {
+                       unsigned f0 : 21;
+                       unsigned f1 : 22;
+                       unsigned : 0;
+                       unsigned f2 : 12;
+                       signed f3 : 11;
+                       const unsigned f4 : 22;
+                   };
+                   struct S g = { 1415, 171, 39, 21, 543 };
+                   int main(void) { return g.f2 + g.f3 + g.f4; }";
+        let unit = parse::parse(src).expect("parse anonymous bitfield struct global");
+        let m = emit_module(&unit, 8)
+            .expect("emit_module Ok for anonymous bitfield struct global init");
+        assert!(
+            m.text.contains("0x00015027"),
+            "expected f2=39 and f3=21 packed into word 2, got:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains("0x0000021F"),
+            "expected f4=543 in word 3, got:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
+    fn zero_width_bitfield_does_not_pack_following_global_aggregate() {
+        let src = "struct Inner { unsigned long long x; };
+                   struct Outer {
+                       unsigned char a;
+                       signed char b;
+                       unsigned f : 10;
+                       unsigned short c;
+                       unsigned : 0;
+                       struct Inner inner;
+                   };
+                   struct Outer g = { 0xB7, 0x26, 18, 4, { 0xD8D34108FA7AD11EULL } };
+                   int main(void) { return g.inner.x != 0; }";
+        let unit = parse::parse(src).expect("parse zero-width bitfield aggregate global");
+        let m =
+            emit_module(&unit, 8).expect("emit_module Ok for aggregate after zero-width bitfield");
+        assert!(
+            m.text.contains("0xFA7AD11E") && m.text.contains("0xD8D34108"),
+            "expected following aggregate to emit as full words, got:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
+    fn zero_width_bitfield_after_short_keeps_global_aggregate_word_aligned() {
+        let src = "typedef unsigned char uint8_t;
+                   typedef signed char int8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned long long uint64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct S2 { uint64_t f0; };
+                   #pragma pack(pop)
+                   struct S3 {
+                       uint8_t f0;
+                       int8_t f1;
+                       unsigned f2 : 10;
+                       uint16_t f3;
+                       unsigned : 0;
+                       struct S2 f4;
+                   };
+                   struct S3 g = {0xB7, 0x26, 18, 4, {0xD8D34108FA7AD11EULL}};
+                   int main(void) { return g.f4.f0 != 0; }";
+        let asm = crate::compile_to_asm(
+            src,
+            "zero_width_bitfield_after_short.c",
+            &crate::cli::Options {
+                char_size: 8,
+                ..Default::default()
+            },
+        )
+        .expect("compile csmith-style aggregate after zero-width bitfield");
+        assert!(
+            asm.contains(".VAR g. = 0x000026B7;")
+                && asm.contains(".VAR = 0x00040012;")
+                && asm.contains(".VAR = 0xFA7AD11E;")
+                && asm.contains(".VAR = 0xD8D34108;"),
+            "expected following aggregate to emit as full words, got:\n{}",
+            asm
         );
     }
 
@@ -4139,8 +4301,7 @@ mod tests {
             Err(e) => {
                 let msg = format!("{e}");
                 assert!(
-                    msg.contains("crosses a 32-bit word boundary")
-                        || msg.contains("cross-word"),
+                    msg.contains("crosses a 32-bit word boundary") || msg.contains("cross-word"),
                     "expected cross-word bitfield rejection error, got: {msg}"
                 );
             }
@@ -4163,16 +4324,8 @@ mod tests {
              static union U h = { .f1 = -1 };
              int main(void) { return g.f1 + h.f1; }",
         );
-        assert!(
-            m.text.contains(".VAR g. = 0xD48D0EE8;"),
-            "asm:\n{}",
-            m.text
-        );
-        assert!(
-            m.text.contains(".VAR h. = 0xFFFFFFFF;"),
-            "asm:\n{}",
-            m.text
-        );
+        assert!(m.text.contains(".VAR g. = 0xD48D0EE8;"), "asm:\n{}", m.text);
+        assert!(m.text.contains(".VAR h. = 0xFFFFFFFF;"), "asm:\n{}", m.text);
     }
 
     #[test]
@@ -4350,6 +4503,58 @@ mod tests {
         // `udivmod32` is not "large csmith generated", so the cap
         // never applies; it stays where the prior decision put it.
         assert_eq!(s4, "seg_l1_block0_swco");
+    }
+
+    #[test]
+    fn block1_small_helper_overflow_falls_back_to_seg_swco() {
+        // With a large root reserved in block1, excess signed 8/16-bit
+        // csmith safe helpers should spill to block2. The root itself
+        // and checksum helpers stay on their existing routes.
+        let s1 = apply_block1_budget_cap(
+            "seg_l1_block1_swco",
+            true,
+            "safe_lshift_func_int16_t_s_s",
+            500,
+            true,
+            BLOCK1_INSTR_BUDGET - 1_000,
+            BLOCK1_INSTR_BUDGET,
+        );
+        assert_eq!(s1, "seg_l1_block1_swco");
+
+        let s2 = apply_block1_budget_cap(
+            "seg_l1_block1_swco",
+            true,
+            "safe_lshift_func_int16_t_s_s",
+            500,
+            true,
+            BLOCK1_INSTR_BUDGET - 100,
+            BLOCK1_INSTR_BUDGET,
+        );
+        assert_eq!(s2, "seg_swco");
+
+        for name in ["func_1", "crc32_byte", "transparent_crc"] {
+            let s = apply_block1_budget_cap(
+                "seg_l1_block1_swco",
+                true,
+                name,
+                10_000,
+                true,
+                BLOCK1_INSTR_BUDGET,
+                BLOCK1_INSTR_BUDGET,
+            );
+            assert_eq!(s, "seg_l1_block1_swco");
+        }
+
+        let s3 = apply_block1_budget_cap(
+            "seg_l1_block1_swco",
+            true,
+            "safe_lshift_func_int16_t_s_s",
+            10_000,
+            false,
+            BLOCK1_INSTR_BUDGET,
+            BLOCK1_INSTR_BUDGET,
+        );
+        assert_eq!(s3, "seg_l1_block1_swco");
     }
 
     #[test]

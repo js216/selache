@@ -235,16 +235,34 @@ __divrem_u64.:
 
 .u64_big_divisor:
       // divisor >= 2**63: quotient is 0 or 1. AC from the SBC below
-      // tells us whether dividend >= divisor.
-      R4 = R12 - R14;
-      R8 = R13 - R15 + CI - 1;
+      // is not reliable when the low-word subtract is exactly equal on
+      // this target, so compare the high words first and only use AC for
+      // the equal-high low-word comparison.
       R0 = R12;                        // default remainder = dividend
       R1 = R13;
-      IF AC R0 = R4;
-      IF AC R1 = R8;
-      R12 = 0;                         // default quotient = 0
+      R13 = PASS R13;
+      IF GE JUMP .u64_big_zero;
+      COMP(R13, R15);
+      IF LT JUMP .u64_big_zero;
+      IF EQ JUMP .u64_big_high_eq;
+      R4 = R12 - R14;
+      R8 = R13 - R15 + CI - 1;
+      JUMP .u64_big_commit;
+.u64_big_high_eq:
+      R4 = R12 - R14;
+      IF NOT AC JUMP .u64_big_zero;
+      R8 = 0;
+.u64_big_commit:
+      R0 = R4;
+      R1 = R8;
+      R12 = 0;
       R13 = 0;
-      IF AC R12 = BSET R12 BY 0;
+      R12 = BSET R12 BY 0;
+      JUMP .u64_big_done;
+.u64_big_zero:
+      R12 = 0;
+      R13 = 0;
+.u64_big_done:
       R14 = R0;
       R15 = R1;
       R2 = DM(M6, I7);
@@ -321,15 +339,31 @@ __divrem_s64.:
       JUMP .s64_fixup_signs;
 
 .s64_big_divisor:
-      R4 = R12 - R14;
-      R8 = R13 - R15 + CI - 1;
       R0 = R12;
       R1 = R13;
-      IF AC R0 = R4;
-      IF AC R1 = R8;
+      R13 = PASS R13;
+      IF GE JUMP .s64_big_zero;
+      COMP(R13, R15);
+      IF LT JUMP .s64_big_zero;
+      IF EQ JUMP .s64_big_high_eq;
+      R4 = R12 - R14;
+      R8 = R13 - R15 + CI - 1;
+      JUMP .s64_big_commit;
+.s64_big_high_eq:
+      R4 = R12 - R14;
+      IF NOT AC JUMP .s64_big_zero;
+      R8 = 0;
+.s64_big_commit:
+      R0 = R4;
+      R1 = R8;
       R12 = 0;
       R13 = 0;
-      IF AC R12 = BSET R12 BY 0;
+      R12 = BSET R12 BY 0;
+      JUMP .s64_big_done;
+.s64_big_zero:
+      R12 = 0;
+      R13 = 0;
+.s64_big_done:
       R14 = R0;
       R15 = R1;
       // fall through

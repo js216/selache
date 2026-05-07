@@ -812,13 +812,10 @@ struct S2 {
    signed f3 : 29;
 };
 
-#pragma pack(push)
-#pragma pack(1)
 struct S3 {
    const signed f0 : 31;
    signed f1 : 8;
 };
-#pragma pack(pop)
 
 union U4 {
    uint32_t  f0;

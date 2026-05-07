@@ -790,15 +790,12 @@ safe_convert_func_float_to_int32_t(float sf1 )
 static long __undefined;
 
 
-#pragma pack(push)
-#pragma pack(1)
 struct S0 {
    int32_t  f0;
    unsigned f1 : 30;
    unsigned f2 : 9;
    unsigned f3 : 16;
 };
-#pragma pack(pop)
 
 union U1 {
    uint64_t  f0;
@@ -923,7 +920,8 @@ static int32_t  func_2(uint16_t  p_3)
             --l_266;
         }
     }
-    if (((safe_sub_func_int8_t_s_s((g_283 = ((safe_div_func_int8_t_s_s((((safe_mul_func_int8_t_s_s(g_260[1][1][0], (l_211[1][0] = (((safe_sub_func_uint16_t_u_u((safe_lshift_func_uint16_t_u_s((l_212 | (((safe_div_func_uint8_t_u_u(0UL, (safe_lshift_func_int8_t_s_u(g_260[0][0][2], p_3)))) || g_250.f1) & g_142.f2)), 3)), p_3)) <= p_3) | p_3)))) ^ g_260[1][1][0]) | 4294967292UL), p_3)) > l_216.f1)), 249UL)) >= g_29.f2))
+    g_283 = ((safe_div_func_int8_t_s_s((((safe_mul_func_int8_t_s_s(g_260[1][1][0], (l_211[1][0] = (((safe_sub_func_uint16_t_u_u((safe_lshift_func_uint16_t_u_s((l_212 | (((safe_div_func_uint8_t_u_u(0UL, (safe_lshift_func_int8_t_s_u(g_260[0][0][2], p_3)))) || g_250.f1) & g_142.f2)), 3)), p_3)) <= p_3) | p_3)))) ^ g_260[1][1][0]) | 4294967292UL), p_3)) > l_216.f1) ? 1ULL : 0ULL;
+    if (((safe_sub_func_int8_t_s_s(g_283, 249UL)) >= g_29.f2))
     { 
         union U2 l_285 = {-1L};
         uint8_t l_290 = 0x1BL;

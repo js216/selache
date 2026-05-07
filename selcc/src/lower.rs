@@ -1212,7 +1212,7 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
             ctx.emit(IrOp::Ret(val));
         }
         Stmt::Expr(expr) => {
-            lower_expr(ctx, expr)?;
+            lower_discarded_expr(ctx, expr)?;
         }
         Stmt::VarDecl {
             name,
@@ -1537,6 +1537,15 @@ fn lower_return_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         return Ok(coerce_vreg(ctx, tmp, &ret_ty));
     }
     Ok(coerce_vreg(ctx, val, &ret_ty))
+}
+
+fn lower_discarded_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<()> {
+    if expr_type(expr, ctx).is_some_and(|ty| is_struct_type(&ty, ctx)) {
+        lower_struct_expr_addr(ctx, expr)?;
+    } else {
+        lower_expr(ctx, expr)?;
+    }
+    Ok(())
 }
 
 /// Check whether a block of statements contains any VLA declarations.
@@ -2463,19 +2472,21 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
             // Apply integer promotions, then usual arithmetic conversions.
             let lt = expr_type(lhs, ctx).map(|t| resolve_type(&t, ctx).integer_promoted());
             let rt = expr_type(rhs, ctx).map(|t| resolve_type(&t, ctx).integer_promoted());
+            if matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Gt
+                    | BinaryOp::Le
+                    | BinaryOp::Ge
+            ) {
+                return Some(Type::Int);
+            }
             // Complex operations: if either operand is complex, result is complex.
             match (&lt, &rt) {
                 (Some(Type::Complex(e)), _) | (_, Some(Type::Complex(e))) => {
-                    match op {
-                        // Comparisons produce int, not complex.
-                        BinaryOp::Eq
-                        | BinaryOp::Ne
-                        | BinaryOp::Lt
-                        | BinaryOp::Gt
-                        | BinaryOp::Le
-                        | BinaryOp::Ge => Some(Type::Int),
-                        _ => Some(Type::Complex(e.clone())),
-                    }
+                    Some(Type::Complex(e.clone()))
                 }
                 (Some(t), _) if t.is_float() => lt,
                 (_, Some(t)) if t.is_float() => rt,
@@ -2810,7 +2821,7 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         // Comma operator: &(a, b) — evaluate a for side effects, return &b
         Expr::Comma(lhs, rhs) => {
-            lower_expr(ctx, lhs)?;
+            lower_discarded_expr(ctx, lhs)?;
             lower_lvalue_addr(ctx, rhs)
         }
         // Pre/post-increment as lvalue (GNU extension, but common):
@@ -3429,6 +3440,13 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     let addr = lower_lvalue_addr(ctx, target)?;
                     if let Some(info) = member_bitfield_info(target, ctx) {
                         emit_bitfield_store(ctx, addr, val, &info);
+                    } else if target_ty.as_ref().is_some_and(|ty| is_byte_scalar(ty, ctx)) {
+                        emit_byte_store(ctx, addr, val);
+                    } else if target_ty
+                        .as_ref()
+                        .is_some_and(|ty| is_short_scalar(ty, ctx))
+                    {
+                        emit_short_store(ctx, addr, val);
                     } else {
                         ctx.emit(IrOp::Store(val, addr, 0));
                     }
@@ -3823,7 +3841,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::Comma(lhs, rhs) => {
             // Evaluate lhs for side effects, discard result, return rhs.
-            lower_expr(ctx, lhs)?;
+            lower_discarded_expr(ctx, lhs)?;
             lower_expr(ctx, rhs)
         }
         Expr::DesignatedInit { value, .. } | Expr::ArrayDesignator { value, .. } => {
@@ -5379,8 +5397,11 @@ fn lower_compound_assign(
         }
         Expr::Deref(_) | Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
             let addr = lower_lvalue_addr(ctx, target)?;
+            let bitfield = member_bitfield_info(target, ctx);
             let lhs = if let Some(ref ty) = target_ty {
-                if is_byte_scalar(ty, ctx) {
+                if let Some(ref info) = bitfield {
+                    emit_bitfield_load(ctx, addr, info)
+                } else if is_byte_scalar(ty, ctx) {
                     emit_byte_load(ctx, addr, !ty_is_unsigned(ty, ctx))
                 } else if is_short_scalar(ty, ctx) {
                     emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
@@ -5407,6 +5428,10 @@ fn lower_compound_assign(
             let mut result = emit_compound_op(ctx, op, lhs, rhs, is_unsigned)?;
             if let Some(ref ty) = target_ty {
                 result = coerce_vreg(ctx, result, ty);
+            }
+            if let Some(ref info) = bitfield {
+                emit_bitfield_store(ctx, addr, result, info);
+                return Ok(result);
             }
             if let Some(ref ty) = target_ty {
                 if is_byte_scalar(ty, ctx) {
@@ -5841,11 +5866,14 @@ fn count_flat_items_for(ty: &Type, items: &[Expr], ctx: &mut LowerCtx) -> usize 
             Type::Struct { .. } => {
                 if let Some(fields) = resolve_struct_fields(&resolved, ctx) {
                     let fields: Vec<_> = fields.to_vec();
-                    fields
-                        .iter()
-                        .map(|(_, ft)| leaves(ft, ctx))
-                        .sum::<usize>()
-                        .max(1)
+                    let mut n = 0usize;
+                    for field in &fields {
+                        if is_anonymous_bitfield_field(field, ctx) {
+                            continue;
+                        }
+                        n = n.saturating_add(leaves(&field.1, ctx));
+                    }
+                    n.max(1)
                 } else {
                     1
                 }
@@ -6104,13 +6132,13 @@ fn lower_struct_init(
 ) -> Result<()> {
     let mut cursor: usize = 0;
     for item in items {
-        let (fidx, inner) = match item {
+        let (mut fidx, inner, positional) = match item {
             Expr::DesignatedInit { field, value } => {
                 let idx = fields
                     .iter()
                     .position(|(n, _)| n == field)
                     .unwrap_or(cursor);
-                (idx, value.as_ref())
+                (idx, value.as_ref(), false)
             }
             Expr::ArrayDesignator { .. } => {
                 // An array designator inside a struct init list is
@@ -6120,14 +6148,20 @@ fn lower_struct_init(
                 cursor = cursor.saturating_add(1);
                 continue;
             }
-            other => (cursor, other),
+            other => (cursor, other, true),
         };
+        if positional {
+            while fidx < fields.len() && is_anonymous_bitfield_field(&fields[fidx], ctx) {
+                fidx += 1;
+            }
+        }
         if fidx >= fields.len() {
             cursor = fidx + 1;
             continue;
         }
         let (fname, fty) = &fields[fidx];
-        let Some((byte_off, _, _)) = crate::types::struct_field_layout_ctx(fields, fname, ctx)
+        let Some((byte_off, bit_off, bit_width)) =
+            crate::types::struct_field_layout_ctx(fields, fname, ctx)
         else {
             cursor = fidx + 1;
             continue;
@@ -6199,6 +6233,52 @@ fn lower_struct_init(
             }
         }
         let val = lower_expr(ctx, inner)?;
+        let val = if ty_is_long_long(fty, ctx) && !ctx.is_64bit_vreg(val) {
+            widen_to_64(ctx, val, inner)
+        } else {
+            val
+        };
+        let resolved_fty = resolve_type(fty, ctx);
+        if let Type::Bitfield(_, _) = resolved_fty.unqualified() {
+            let bit_off = bit_off.unwrap_or(0);
+            let width = bit_width.unwrap_or(32) as u32;
+            let bit_pos = (byte_off % 4) * 8 + bit_off;
+            if bit_pos + width > 32 {
+                return Err(Error::NotImplemented(format!(
+                    "bitfield initializer for field {fname} crosses a 32-bit storage word"
+                )));
+            }
+            let field_mask = if width >= 32 {
+                u32::MAX as i64
+            } else {
+                ((1u32 << width) - 1) as i64
+            };
+            let mask_v = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(mask_v, field_mask));
+            let val_bits = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitAnd(val_bits, val, mask_v));
+            let placed = if bit_pos == 0 {
+                val_bits
+            } else {
+                let sh = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(sh, bit_pos as i64));
+                let out = ctx.alloc_vreg();
+                ctx.emit(IrOp::Shl(out, val_bits, sh));
+                out
+            };
+            let old = ctx.alloc_vreg();
+            ctx.emit(IrOp::Load(old, 0, elem_slot as i32));
+            let shifted_mask = (field_mask as u64).wrapping_shl(bit_pos) as i64;
+            let clear_v = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(clear_v, !shifted_mask));
+            let cleared = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitAnd(cleared, old, clear_v));
+            let merged = ctx.alloc_vreg();
+            ctx.emit(IrOp::BitOr(merged, cleared, placed));
+            ctx.emit(IrOp::Store(merged, 0, elem_slot as i32));
+            cursor = fidx + 1;
+            continue;
+        }
         let fbytes = crate::types::size_bytes_ctx(fty, ctx);
         if fbytes == 1 {
             // Char-width field: merge into the containing word via
@@ -6230,12 +6310,23 @@ fn lower_struct_init(
             ctx.emit(IrOp::BitOr(merged, cleared, placed));
             ctx.emit(IrOp::Store(merged, 0, elem_slot as i32));
         } else {
-            // Wider (word-aligned) field: plain word store.
+            // Wider (word-aligned) field: store the whole scalar. 64-bit
+            // fields occupy two aggregate words in increasing byte-offset
+            // order; direct frame Store64 uses scalar-local layout, so write
+            // the two aggregate words explicitly here.
             ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+            if ty_is_long_long(fty, ctx) && word_off + 1 < num_words {
+                ctx.emit(IrOp::Store(val + 1, 0, (elem_slot - 1) as i32));
+            }
         }
         cursor = fidx + 1;
     }
     Ok(())
+}
+
+fn is_anonymous_bitfield_field((name, ty): &(String, Type), ctx: &LowerCtx) -> bool {
+    name.starts_with("__anon")
+        && matches!(resolve_type(ty, ctx).unqualified(), Type::Bitfield(_, _))
 }
 
 /// Apply a single chained designator expression (`[i].field = v`,
@@ -6351,7 +6442,15 @@ fn lower_designator_or_scalar(
         _ => {
             let inner = strip_designator(value);
             let val = lower_expr(ctx, inner)?;
+            let val = if ty_is_long_long(target_ty, ctx) && !ctx.is_64bit_vreg(val) {
+                widen_to_64(ctx, val, inner)
+            } else {
+                val
+            };
             ctx.emit(IrOp::Store(val, 0, leaf_slot as i32));
+            if ty_is_long_long(target_ty, ctx) && inner_words > 1 {
+                ctx.emit(IrOp::Store(val + 1, 0, (leaf_slot - 1) as i32));
+            }
             Ok(())
         }
     }
@@ -6735,6 +6834,19 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         // address rather than the truncated `lower_expr` rvalue.
         Expr::Cast(_, inner) if matches!(inner.as_ref(), Expr::InitList(_)) => {
             lower_lvalue_addr(ctx, expr)
+        }
+        Expr::Comma(lhs, rhs) => {
+            lower_discarded_expr(ctx, lhs)?;
+            if expr_type(rhs, ctx).is_some_and(|ty| is_struct_type(&ty, ctx)) {
+                lower_struct_expr_addr(ctx, rhs)
+            } else {
+                let val = lower_expr(ctx, rhs)?;
+                let slot = ctx.alloc_stack_slot();
+                ctx.emit(IrOp::Store(val, 0, slot as i32));
+                let addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(addr, slot as i32));
+                Ok(addr)
+            }
         }
         // Call returning a struct by value. The ordinary `lower_expr`
         // path collapses the returned aggregate to a single VReg
@@ -7716,6 +7828,134 @@ mod tests {
     }
 
     #[test]
+    fn lower_bitfield_compound_assign_preserves_storage_word() {
+        let src = "struct s { unsigned a : 3; unsigned b : 5; }; int f(struct s v) { return (v.b &= 3U); }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitOr(..))),
+            "expected bitfield compound store to merge with neighbouring bits: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_short_member_assignment_preserves_storage_word() {
+        let src = "struct s { short a; short b; };
+                   int f(void) { struct s v = { 0x1122, 0x3344 }; v.b = 0x55; return v.a; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitOr(..))),
+            "expected short member assignment to merge with neighbouring halfword: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_struct_local_bitfield_init_packs_fields() {
+        let src = "struct s { unsigned a : 3; unsigned b : 5; }; int f(void) { struct s v = { 1U, 2U }; return v.b; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitOr(..))),
+            "expected local bitfield initializer to pack shared storage: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_anonymous_bitfield_does_not_consume_init() {
+        let src = "struct s { unsigned a : 3; unsigned : 0; unsigned b : 5; unsigned c : 5; };
+                   int f(void) { struct s v = { 1U, 2U, 3U }; return 0; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 5))),
+            "expected c initializer to shift by b's 5-bit width: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_discarded_struct_return_uses_struct_abi() {
+        let src = "struct s { int a; int b; int c; };
+                   struct s g(void) { struct s x = { 1, 2, 3 }; return x; }
+                   int f(void) { (g(), 1); return 0; }";
+        let unit = parse::parse(src).unwrap();
+        let known = HashSet::from(["g".to_string(), "f".to_string()]);
+        let returns = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect::<HashMap<_, _>>();
+        let params = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect::<HashMap<_, Vec<Type>>>();
+        let lower_unit = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+        };
+        let f = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let ops = lower_function_with_known(
+            f,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &lower_unit,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::CallStruct { name, .. } if name == "g")),
+            "discarded struct-return call must still use struct ABI: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::Call(_, name, _) if name == "g")),
+            "discarded struct-return call must not use scalar ABI: {ops:?}"
+        );
+    }
+
+    #[test]
     fn lower_union_narrow_member_uses_narrow_load() {
         let src = "union u { int f0; signed char f1; short f2; }; int f(void) { union u g = { 0xD48D0EE8L }; return g.f1 + g.f2; }";
         let unit = parse::parse(src).unwrap();
@@ -8321,6 +8561,23 @@ mod tests {
     #[test]
     fn lower_uint32_vs_int64_compare_is_signed() {
         let src = "typedef unsigned int uint32_t; typedef long long int64_t; int f(uint32_t a, int64_t b) { return a > b; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::UCmp64(..))));
+    }
+
+    #[test]
+    fn lower_comparison_result_vs_int64_is_signed() {
+        let src = "typedef unsigned int uint32_t; typedef long long int64_t; struct S { int64_t x; }; int f(uint32_t a, struct S s) { return (a == 1U) <= s.x; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(
             &unit.functions[0],

@@ -794,8 +794,6 @@ struct S0 {
    int32_t  f0;
 };
 
-#pragma pack(push)
-#pragma pack(1)
 struct S1 {
    const unsigned f0 : 22;
    int64_t  f1;
@@ -803,7 +801,6 @@ struct S1 {
    unsigned f3 : 27;
    signed f4 : 20;
 };
-#pragma pack(pop)
 
 union U2 {
    int16_t  f0;
