@@ -355,9 +355,10 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             .or_else(|| nonroot_funcs.first().copied())
             .map(|cf| cf.name.as_str());
         let spill_small_helpers_to_block0 = root_is_small && spill_nonroot_func.is_none();
+        let mut block0_instrs_used: usize = 0;
         let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
-            let code_section = if should_emit_in_block0_code(
+            let initial_section = if should_emit_in_block0_code(
                 cf.is_static,
                 &cf.name,
                 root_too_large_for_block0,
@@ -378,6 +379,18 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             } else {
                 split_runtime_code_section(&cf.name).unwrap_or("seg_swco")
             };
+            let code_section = apply_block0_budget_cap(
+                initial_section,
+                cf.is_static,
+                &cf.name,
+                cf.instrs.len(),
+                root_too_large_for_block0,
+                block0_instrs_used,
+                BLOCK0_INSTR_BUDGET,
+            );
+            if code_section == "seg_l1_block0_swco" {
+                block0_instrs_used = block0_instrs_used.saturating_add(cf.instrs.len());
+            }
             if current_code_section != Some(code_section) {
                 let _ = writeln!(out, ".SECTION/SW {code_section};");
                 current_code_section = Some(code_section);
@@ -660,6 +673,58 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
 
     Ok(AsmModule { text: out })
+}
+
+/// Cap on cumulative `cf.instrs.len()` routed to `seg_l1_block0_swco`
+/// during a single `emit_module` run, used to avoid the seld layout
+/// overflow seen on large csmith roots (e.g. `cctest_csmith_9405adb0`
+/// hit 132064 bytes against the 130064-byte `block0_sw_code` budget
+/// in `mem_l1_block0`). The seld budget is in bytes (block0 spans
+/// 0x002403f0..=0x0026ffff = 195600 B; minus the 64 KB stack
+/// reserve = 130064 B). Each IR-level `MachInstr` averages ~5 bytes
+/// after selas encoding (a mix of 48-bit instructions, 24-bit short
+/// forms, and selas-inserted alignment fill), so 130064 B / 5 ≈ 26000
+/// IR instrs. We cap at 22_000 to leave headroom for `main` /
+/// `test_main` (which are not subject to the cap because they pin to
+/// the entry section) and for the alignment fill seld places at
+/// section boundaries. Could be derived from LDF parsing in a future
+/// iteration.
+const BLOCK0_INSTR_BUDGET: usize = 22_000;
+
+/// Apply the block0 cumulative-size cap to a routing decision. When
+/// the root is too large for block0, selcc otherwise spills every
+/// "large csmith helper" body to `seg_l1_block0_swco`; for drafts
+/// with many such helpers, the cumulative size can exceed seld's
+/// `block0_sw_code` budget. Redirect overflow large helpers to the
+/// default `seg_swco` (which seld places in `block2_sw_code`). Entry
+/// symbols (`main`, `test_main`) and the small-helper / `func_1`
+/// spill paths stay in block0 unconditionally; only the
+/// `root_too_large_for_block0` large-helper spills are candidates for
+/// redirection.
+fn apply_block0_budget_cap(
+    initial_section: &'static str,
+    is_static: bool,
+    name: &str,
+    instrs: usize,
+    root_too_large_for_block0: bool,
+    block0_instrs_used: usize,
+    budget: usize,
+) -> &'static str {
+    if initial_section != "seg_l1_block0_swco"
+        || !root_too_large_for_block0
+        || !is_static
+        || name == "main"
+        || name == "test_main"
+        || name == "func_1"
+        || !is_large_csmith_generated_body(name)
+    {
+        return initial_section;
+    }
+    if block0_instrs_used.saturating_add(instrs) > budget {
+        split_runtime_code_section(name).unwrap_or("seg_swco")
+    } else {
+        initial_section
+    }
 }
 
 fn should_emit_in_block0_code(
@@ -4199,6 +4264,92 @@ mod tests {
             "test_main and main should be in the reopened block0 section:\n{}",
             m.text
         );
+    }
+
+    #[test]
+    fn block0_helper_spill_overflow_falls_back_to_seg_swco() {
+        // Pure-function check on the budget cap: when the root is too
+        // large for block0 and cumulative block0 spills already exceed
+        // the budget, large csmith helpers must fall back to the
+        // default `seg_swco` segment (block2_sw_code) instead of
+        // continuing to pile into `seg_l1_block0_swco`.
+        //
+        // First helper just under the budget: lands in block0.
+        let s1 = apply_block0_budget_cap(
+            "seg_l1_block0_swco",
+            true,
+            "func_2",
+            5_000,
+            true,
+            BLOCK0_INSTR_BUDGET / 2,
+            BLOCK0_INSTR_BUDGET,
+        );
+        assert_eq!(
+            s1, "seg_l1_block0_swco",
+            "helper that fits in the block0 budget must stay in block0"
+        );
+        // Same helper after enough cumulative use to push over: spills.
+        let s2 = apply_block0_budget_cap(
+            "seg_l1_block0_swco",
+            true,
+            "func_2",
+            5_000,
+            true,
+            BLOCK0_INSTR_BUDGET - 100,
+            BLOCK0_INSTR_BUDGET,
+        );
+        assert_eq!(
+            s2, "seg_swco",
+            "helper that would push past the block0 budget must spill to seg_swco"
+        );
+        // Entry symbols and func_1 are never redirected, even when
+        // cumulative use is far past the budget — they remain pinned
+        // to the entry / root sections regardless.
+        for entry in ["main", "test_main", "func_1"] {
+            let s = apply_block0_budget_cap(
+                "seg_l1_block0_swco",
+                entry != "main" && entry != "test_main",
+                entry,
+                10_000,
+                true,
+                BLOCK0_INSTR_BUDGET * 10,
+                BLOCK0_INSTR_BUDGET,
+            );
+            assert_eq!(
+                s, "seg_l1_block0_swco",
+                "{entry} must never be redirected by the block0 budget cap"
+            );
+        }
+        // Small-root spills (root_too_large_for_block0 == false) are
+        // unaffected by the cap; they keep their existing routing.
+        let s3 = apply_block0_budget_cap(
+            "seg_l1_block0_swco",
+            true,
+            "func_2",
+            10_000,
+            false,
+            BLOCK0_INSTR_BUDGET * 10,
+            BLOCK0_INSTR_BUDGET,
+        );
+        assert_eq!(
+            s3, "seg_l1_block0_swco",
+            "small-root helper spill must be unaffected by the block0 budget cap"
+        );
+        // Runtime helpers with their own dedicated section are still
+        // routed to that section (split_runtime_code_section result),
+        // not the generic seg_swco fallback.
+        let s4 = apply_block0_budget_cap(
+            "seg_l1_block0_swco",
+            true,
+            "udivmod32",
+            10_000,
+            true,
+            BLOCK0_INSTR_BUDGET,
+            BLOCK0_INSTR_BUDGET,
+        );
+        // `udivmod32` is not "large csmith generated", so the cap
+        // never applies; it stays where the prior decision put it.
+        assert_eq!(s4, "seg_l1_block0_swco");
     }
 
     #[test]
