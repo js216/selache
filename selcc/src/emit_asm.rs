@@ -330,16 +330,50 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         out.push('\n');
     }
 
-    // Code sections: generated csmith support helpers and entry points live in
-    // block0, the generated csmith root body lives in block1, and ordinary code
-    // stays in block2. Moving only `func_1` relieves block2 for large csmith
-    // cases without overfilling block1 with every generated helper body.
+    // Code sections: generated csmith code is split across block0 and block1
+    // based on the compiled root-body size. Small roots leave room for helper
+    // and one useful non-root spill in block0; very large roots move to block1 and
+    // push the larger helper/non-root bodies into block0. Ordinary code stays
+    // in block2. Large draft cases can otherwise exhaust one L1 block before
+    // the runtime/archive code is placed.
     if !compiled.is_empty() {
+        let root_instrs = compiled
+            .iter()
+            .find(|cf| cf.is_static && cf.name == "func_1")
+            .map(|cf| cf.instrs.len())
+            .unwrap_or(0);
+        let root_too_large_for_block0 = root_instrs > 24_000;
+        let root_is_small = root_instrs <= 10_000;
+        let nonroot_funcs: Vec<&CompiledFunction> = compiled
+            .iter()
+            .filter(|cf| cf.is_static && cf.name != "func_1" && cf.name.starts_with("func_"))
+            .collect();
+        let spill_nonroot_func = nonroot_funcs
+            .iter()
+            .copied()
+            .find(|cf| cf.instrs.len() > 5_000)
+            .or_else(|| nonroot_funcs.first().copied())
+            .map(|cf| cf.name.as_str());
+        let spill_small_helpers_to_block0 = root_is_small && spill_nonroot_func.is_none();
         let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
-            let code_section = if should_emit_in_block0_code(cf.is_static, &cf.name) {
+            let code_section = if should_emit_in_block0_code(
+                cf.is_static,
+                &cf.name,
+                root_too_large_for_block0,
+                root_is_small,
+                spill_nonroot_func,
+                spill_small_helpers_to_block0,
+            ) {
                 "seg_l1_block0_swco"
-            } else if should_emit_in_block1_code(cf.is_static, &cf.name) {
+            } else if should_emit_in_block1_code(
+                cf.is_static,
+                &cf.name,
+                root_too_large_for_block0,
+                root_is_small,
+                spill_nonroot_func,
+                spill_small_helpers_to_block0,
+            ) {
                 "seg_l1_block1_swco"
             } else {
                 split_runtime_code_section(&cf.name).unwrap_or("seg_swco")
@@ -628,18 +662,69 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     Ok(AsmModule { text: out })
 }
 
-fn should_emit_in_block0_code(is_static: bool, name: &str) -> bool {
+fn should_emit_in_block0_code(
+    is_static: bool,
+    name: &str,
+    root_too_large_for_block0: bool,
+    root_is_small: bool,
+    spill_nonroot_func: Option<&str>,
+    spill_small_helpers_to_block0: bool,
+) -> bool {
     name == "main"
         || name == "test_main"
         || (is_static
-            && (matches!(
-                name,
-                "crc32_gentab" | "crc32_byte" | "platform_main_begin" | "transparent_crc"
-            ) || name.starts_with("safe_")))
+            && if root_too_large_for_block0 {
+                name != "func_1" && is_large_csmith_generated_body(name)
+            } else {
+                name == "func_1"
+                    || (root_is_small
+                        && ((spill_small_helpers_to_block0
+                            && (matches!(
+                                name,
+                                "crc32_gentab" | "crc32_byte" | "transparent_crc"
+                            ) || is_csmith_small_safe_helper(name)))
+                            || (name != "func_1"
+                                && name.starts_with("func_")
+                                && spill_nonroot_func == Some(name))))
+            })
 }
 
-fn should_emit_in_block1_code(is_static: bool, name: &str) -> bool {
-    is_static && name == "func_1"
+fn should_emit_in_block1_code(
+    is_static: bool,
+    name: &str,
+    root_too_large_for_block0: bool,
+    root_is_small: bool,
+    spill_nonroot_func: Option<&str>,
+    spill_small_helpers_to_block0: bool,
+) -> bool {
+    is_static
+        && is_csmith_generated_body(name)
+        && !should_emit_in_block0_code(
+            is_static,
+            name,
+            root_too_large_for_block0,
+            root_is_small,
+            spill_nonroot_func,
+            spill_small_helpers_to_block0,
+        )
+}
+
+fn is_csmith_small_safe_helper(name: &str) -> bool {
+    name.starts_with("safe_") && (name.contains("_int8_t_") || name.contains("_int16_t_"))
+}
+
+fn is_csmith_generated_body(name: &str) -> bool {
+    matches!(
+        name,
+        "crc32_gentab" | "crc32_byte" | "platform_main_begin" | "transparent_crc"
+    ) || name.starts_with("safe_")
+        || name.starts_with("func_")
+}
+
+fn is_large_csmith_generated_body(name: &str) -> bool {
+    is_csmith_generated_body(name)
+        && !matches!(name, "crc32_gentab" | "crc32_byte" | "transparent_crc")
+        && !is_csmith_small_safe_helper(name)
 }
 
 fn split_runtime_code_section(name: &str) -> Option<&'static str> {
@@ -1047,6 +1132,7 @@ fn build_init_words(
             // element of the element type. For anything else, fall
             // back to flat word slots.
             let stripped = ty.map(|t| strip_type(t, tctx));
+            let is_union = matches!(stripped, Some(Type::Union { .. }));
             let struct_fields = stripped.and_then(|t| match t {
                 Type::Struct { .. } | Type::Union { .. } => resolve_struct_fields(t, tctx),
                 _ => None,
@@ -1060,12 +1146,17 @@ fn build_init_words(
             let mut field_map: Vec<(String, usize, &Type)> = Vec::new();
             if let Some(fields) = struct_fields {
                 for (fname, fty) in fields {
-                    let (byte_off, _, _) = crate::types::struct_field_layout_ctx(
-                        fields, fname, tctx,
-                    )
-                    .ok_or_else(|| Error::Compile {
-                        msg: format!("internal: field {fname} not found in own struct"),
-                    })?;
+                    let byte_off = if is_union {
+                        0
+                    } else {
+                        let (byte_off, _, _) = crate::types::struct_field_layout_ctx(
+                            fields, fname, tctx,
+                        )
+                        .ok_or_else(|| Error::Compile {
+                            msg: format!("internal: field {fname} not found in own struct"),
+                        })?;
+                        byte_off
+                    };
                     if byte_off % 4 != 0 {
                         return Err(Error::Compile {
                             msg: format!(
@@ -1098,7 +1189,8 @@ fn build_init_words(
                                 ),
                             })?;
                         // Recursively build the value's words and place
-                        // them at the field's word offset.
+                        // them at the field's word offset. Union fields
+                        // all overlay at word zero.
                         let fsize = crate::types::size_bytes_ctx(fty, tctx);
                         let sub = build_init_words(value, fsize, tctx, Some(fty), ictx)?;
                         for (k, w) in sub.into_iter().enumerate() {
@@ -1138,6 +1230,9 @@ fn build_init_words(
                                 v[woff + k] = w;
                             }
                             field_cursor += 1;
+                            if is_union {
+                                field_cursor = field_map.len();
+                            }
                         } else if let Some(elem) = array_elem {
                             let elem_size = crate::types::size_bytes_ctx(elem, tctx);
                             let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
@@ -3594,21 +3689,43 @@ mod tests {
     }
 
     #[test]
-    fn static_safe_helpers_emit_to_block0_code_section() {
+    fn global_union_initializer_overlays_first_member() {
         let m = compile(
-        "static void crc32_byte(unsigned char b) { (void)b; }
+            "union U { int f0; signed char f1; short f2; };
+             static union U g = { 0xD48D0EE8L };
+             static union U h = { .f1 = -1 };
+             int main(void) { return g.f1 + h.f1; }",
+        );
+        assert!(
+            m.text.contains(".VAR g. = 0xD48D0EE8;"),
+            "asm:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains(".VAR h. = 0xFFFFFFFF;"),
+            "asm:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
+    fn csmith_generated_code_splits_across_l1_sections() {
+        let m = compile(
+            "static void crc32_byte(unsigned char b) { (void)b; }
              static void transparent_crc(unsigned long long v, const char *n, int f) { (void)v; (void)n; (void)f; }
+             static int safe_add_func_int8_t_s_s(int a, int b) { return a + b; }
              static int safe_helper(void) { return 3; }
              static int func_1(void) { return 5; }
              static int func_2(void) { return 6; }
+             static int func_3(void) { return 7; }
              static int helper(void) { return 4; }
-             int test_main(void) { crc32_byte(1); transparent_crc(1, 0, 0); return safe_helper() + func_1() + func_2() + helper(); }
+             int test_main(void) { crc32_byte(1); transparent_crc(1, 0, 0); return safe_add_func_int8_t_s_s(1, 2) + safe_helper() + func_1() + func_2() + func_3() + helper(); }
              int main(void) { return test_main(); }",
         );
-        let block0 = m
+        let block1 = m
             .text
-            .find(".SECTION/SW seg_l1_block0_swco;")
-            .expect("missing block0 support-helper section");
+            .find(".SECTION/SW seg_l1_block1_swco;")
+            .expect("missing block1 generated-helper section");
         let crc32_byte = m.text.find("crc32_byte.:").expect("missing crc32 label");
         let transparent_crc = m
             .text
@@ -3618,15 +3735,23 @@ mod tests {
             .text
             .find("safe_helper.:")
             .expect("missing safe_helper label");
-        let block1 = m
+        let safe_int8 = m
             .text
-            .find(".SECTION/SW seg_l1_block1_swco;")
-            .expect("missing block1 generated-body section");
+            .find("safe_add_func_int8_t_s_s.:")
+            .expect("missing int8 safe helper label");
         let func_1 = m.text.find("func_1.:").expect("missing func_1 label");
         let func_2 = m.text.find("func_2.:").expect("missing func_2 label");
-        let helper_section = m
-            .text
+        let func_3 = m.text.find("func_3.:").expect("missing func_3 label");
+        let root_section = m.text[..func_1]
+            .rfind(".SECTION/SW seg_l1_block0_swco;")
+            .expect("missing root code section");
+        let block1_after_root = m.text[func_1..]
+            .find(".SECTION/SW seg_l1_block1_swco;")
+            .map(|off| func_1 + off)
+            .expect("missing reopened block1 section");
+        let helper_section = m.text[func_3..]
             .find(".SECTION/SW seg_swco;")
+            .map(|off| func_3 + off)
             .expect("missing helper code section");
         let helper = m.text.find("\nhelper.:").expect("missing helper label");
         let main = m.text.find(".GLOBAL main.;").expect("missing main global");
@@ -3638,28 +3763,28 @@ mod tests {
             .rfind(".SECTION/SW seg_l1_block0_swco;")
             .expect("missing reopened block0 entry section");
         assert!(
-            block0 < crc32_byte,
-            "crc32 support should be in block0 section:\n{}",
+            block1 < crc32_byte && crc32_byte < transparent_crc && transparent_crc < safe_int8,
+            "crc32/int8 support should stay in block1 when a non-root body spills:\n{}",
             m.text
         );
         assert!(
-            block0 < transparent_crc && transparent_crc < helper_section,
-            "transparent_crc should be in block0 section:\n{}",
+            safe_int8 < safe_helper && safe_helper < root_section,
+            "safe_helper should be in block1 section:\n{}",
             m.text
         );
         assert!(
-            block0 < safe_helper,
-            "safe_helper should be in block0 section:\n{}",
+            root_section < func_2 && func_2 < block1_after_root,
+            "useful generated non-root body should spill into block0 for small roots:\n{}",
             m.text
         );
         assert!(
-            block1 < func_1 && func_1 < helper_section,
-            "generated func_1 body should be split into block1:\n{}",
+            block1_after_root < func_3 && func_3 < helper_section,
+            "remaining generated non-root body should stay in block1:\n{}",
             m.text
         );
         assert!(
-            helper_section < func_2,
-            "generated helper func_* bodies should remain in main code section:\n{}",
+            root_section < func_1 && func_1 < block1_after_root,
+            "generated root func_1 should remain in main code section:\n{}",
             m.text
         );
         assert!(

@@ -2158,14 +2158,18 @@ fn member_bitfield_info(expr: &Expr, ctx: &LowerCtx) -> Option<BitfieldInfo> {
         Expr::Arrow(..) => strip_to_pointer(&base_ty)?.clone(),
         _ => return None,
     };
+    let fields = resolve_struct_fields(&struct_ty, ctx)?;
     if is_union_type(&struct_ty) {
-        // A bitfield that is itself the sole member of a union, or a
-        // union aliasing bit-level storage, is not exercised by the
-        // test suite; fall through to the plain path so union semantics
-        // remain unchanged for non-bitfield members.
+        let fty = union_field_type(fields, field, ctx)?;
+        if let Type::Bitfield(base, width) = &fty {
+            return Some(BitfieldInfo {
+                bit_offset: 0,
+                bit_width: *width,
+                signed: !base.is_unsigned(),
+            });
+        }
         return None;
     }
-    let fields = resolve_struct_fields(&struct_ty, ctx)?;
     let (_, bit_off, bit_width) = crate::types::struct_field_layout_ctx(fields, field, ctx)?;
     let width = bit_width?;
     let bit_offset = bit_off?;
@@ -3603,6 +3607,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             if let Some(ref mty) = member_ty {
                 if is_aggregate_type(mty, ctx) {
                     return Ok(addr);
+                }
+            }
+            if let Some(ref mty) = member_ty {
+                if is_byte_scalar(mty, ctx) {
+                    return Ok(emit_byte_load(ctx, addr, !ty_is_unsigned(mty, ctx)));
+                }
+                if is_short_scalar(mty, ctx) {
+                    return Ok(emit_short_load(ctx, addr, !ty_is_unsigned(mty, ctx)));
                 }
             }
             // A long-long member spans two words; emit Load64.
@@ -7663,6 +7675,48 @@ mod tests {
             "expected at least 2 stores for p.x and p.y assignments"
         );
         assert!(ops.iter().any(|op| matches!(op, IrOp::Add(..))));
+    }
+
+    #[test]
+    fn lower_union_bitfield_member_masks_storage_word() {
+        let src = "union u { unsigned f0; unsigned f1 : 27; }; int f(void) { union u g = { 0xffffffffU }; return g.f1; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitAnd(..))),
+            "expected union bitfield load to mask the storage word: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_union_narrow_member_uses_narrow_load() {
+        let src = "union u { int f0; signed char f1; short f2; }; int f(void) { union u g = { 0xD48D0EE8L }; return g.f1 + g.f2; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        let mask_count = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::BitAnd(..)))
+            .count();
+        assert!(
+            mask_count >= 2,
+            "expected byte and short union member loads to mask: {ops:?}"
+        );
     }
 
     #[test]
