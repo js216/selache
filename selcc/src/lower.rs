@@ -5972,7 +5972,26 @@ fn flatten_narrow_array_local(
         }
         _ => {
             // Leaf scalar: lower the value and mask to leaf width.
-            let val = lower_expr(ctx, init)?;
+            // C99 6.7.8 permits brace-elided scalar initializers wrapped
+            // in extra braces (e.g. `signed char arr[3] = { 0, {1}, 2 };`),
+            // which the parser delivers here as a single-element
+            // `InitList`.  Peel that one wrapper before lowering;
+            // multi-element or empty `InitList` at a scalar slot remains
+            // a hard error.  Mirrors the file-scope
+            // `flatten_narrow_array_init` peel.
+            let scalar = match init {
+                Expr::InitList(items) if items.len() == 1 => &items[0],
+                Expr::InitList(_) => {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "narrow array element requires a scalar initializer; \
+                             got {init:?}"
+                        ),
+                    });
+                }
+                other => other,
+            };
+            let val = lower_expr(ctx, scalar)?;
             let mask_v = ctx.alloc_vreg();
             let mask = if leaf_bytes == 1 { 0xFFi64 } else { 0xFFFFi64 };
             ctx.emit(IrOp::LoadImm(mask_v, mask));

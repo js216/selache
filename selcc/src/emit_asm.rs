@@ -867,7 +867,25 @@ fn flatten_narrow_array_init(
             // truncates to the leaf width.  Symbol-typed initializers
             // (`&array`, function names) are not legal here because a
             // narrow array element cannot hold a relocatable address.
-            let n = eval_const_expr_i64(init).ok_or_else(|| Error::Compile {
+            // C99 6.7.8 permits brace-elided scalar initializers wrapped
+            // in extra braces (e.g. `signed char arr[3] = { 0, {1}, 2 };`),
+            // which the parser delivers here as a single-element
+            // `InitList`.  Peel that one wrapper before const-evaluating;
+            // multi-element or empty `InitList` at a scalar slot remains
+            // a hard error.
+            let scalar = match init {
+                Expr::InitList(items) if items.len() == 1 => &items[0],
+                Expr::InitList(_) => {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "narrow array element requires a numeric constant initializer; \
+                             got {init:?}"
+                        ),
+                    });
+                }
+                other => other,
+            };
+            let n = eval_const_expr_i64(scalar).ok_or_else(|| Error::Compile {
                 msg: format!(
                     "narrow array element requires a numeric constant initializer; \
                      got {init:?}"
@@ -3678,6 +3696,40 @@ mod tests {
         let m = compile("int main() { return 42; }");
         assert!(m.text.contains(".GLOBAL main.;"));
         assert!(m.text.contains("main.:"));
+    }
+
+    /// C99 6.7.8 brace elision: a scalar initializer wrapped in extra
+    /// braces (`signed char arr[3] = { 0, {1}, 2 };`) is well-formed.
+    /// Both the file-scope flattener (`flatten_narrow_array_init`) and
+    /// the local-scope twin (`flatten_narrow_array_local`) must peel
+    /// the single-element `InitList` rather than reject it as a non-
+    /// constant initializer.  Regression for the csmith `g_56` trip
+    /// in selache-csmith-tests.
+    #[test]
+    fn narrow_array_brace_elided_scalar_init() {
+        let src_global = "signed char arr[3] = { 0, {1}, 2 };
+                          int main(void) { return arr[1]; }";
+        let unit = parse::parse(src_global).expect("parse global");
+        let m = emit_module(&unit, 8).expect("emit_module Ok for brace-elided scalar init");
+        // Sanity: the value 1 must land in the second byte lane of the
+        // packed word, i.e. 0x00020100 little-endian (lane0=0, lane1=1,
+        // lane2=2).
+        assert!(
+            m.text.contains("0x00020100"),
+            "expected packed word 0x00020100 in asm, got:\n{}",
+            m.text
+        );
+
+        // Local-scope twin must also accept brace-elided scalars.
+        // `emit_module` is the right hermetic entry point: lowering the
+        // local initializer flows through `flatten_narrow_array_local`.
+        let src_local = "int main(void) {
+                             signed char arr[3] = { 0, {1}, 2 };
+                             return arr[1];
+                         }";
+        let unit_l = parse::parse(src_local).expect("parse local");
+        let _m_l =
+            emit_module(&unit_l, 8).expect("emit_module Ok for local brace-elided scalar init");
     }
 
     #[test]
