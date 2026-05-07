@@ -1078,6 +1078,49 @@ fn strip_type<'a>(
     }
 }
 
+/// Evaluate a struct sub-word field's initializer as a constant integer
+/// that fits in `fsize` bytes.  Used by `build_init_words` to fold packed
+/// sub-word fields into one `InitWord::Num` per containing word.
+///
+/// String literals, `&sym` / `&sym[i]` / `&sym.f` lvalue addresses, and
+/// nested aggregate initializers (`Expr::InitList`) cannot be folded into
+/// a sub-word slot — they would need a relocation or a multi-word value
+/// that doesn't fit.  The error path here is what keeps the packed-field
+/// fix narrowly scoped to constant-int sub-word fields.
+fn eval_subword_const_int(
+    field: &str,
+    value: &Expr,
+    _fsize: u32,
+    tctx: &dyn crate::types::TypeCtx,
+) -> Result<u32> {
+    match value {
+        Expr::InitList(_) => Err(Error::Compile {
+            msg: format!(
+                "field {field}: nested aggregate initializer at sub-word offset; \
+                 sub-word struct fields in global initializers must be constant integers"
+            ),
+        }),
+        Expr::StringLit(_) => Err(Error::Compile {
+            msg: format!(
+                "field {field}: string literal at sub-word offset; \
+                 sub-word struct fields in global initializers must be constant integers"
+            ),
+        }),
+        Expr::Ident(_) | Expr::AddrOf(_) => Err(Error::Compile {
+            msg: format!(
+                "field {field}: address-of-symbol at sub-word offset; \
+                 sub-word struct fields in global initializers must be constant integers"
+            ),
+        }),
+        _ => eval_const_expr(value, tctx).map(|n| n as u32).map_err(|_| Error::Compile {
+            msg: format!(
+                "field {field}: non-constant-int initializer at sub-word offset; \
+                 sub-word struct fields in global initializers must be constant integers"
+            ),
+        }),
+    }
+}
+
 /// Evaluate a const-initializer expression to a flat list of 32-bit words.
 ///
 /// `ty`, when supplied, drives designated-initializer resolution: struct
@@ -1160,10 +1203,26 @@ fn build_init_words(
                 _ => None,
             });
 
-            // Field-name -> (word_offset, element_type) for struct dispatch.
-            let mut field_map: Vec<(String, usize, &Type)> = Vec::new();
+            // Field-name -> (word_offset, byte_in_word, element_type) for
+            // struct dispatch.  `byte_in_word == 0` is the historical
+            // word-aligned path; non-zero (or word-aligned but sharing a
+            // word with later sub-word fields) drives the packed path
+            // that ORs sub-word constant-int field values into a single
+            // `InitWord::Num`.  Bitfields are detected up-front and
+            // rejected (the deferred-bitfield boundary lives here so a
+            // future iteration can lift it without touching the packed
+            // path).
+            let mut field_map: Vec<(String, usize, u32, &Type)> = Vec::new();
             if let Some(fields) = struct_fields {
                 for (fname, fty) in fields {
+                    if matches!(strip_type(fty, tctx), Type::Bitfield(_, _)) {
+                        return Err(Error::Compile {
+                            msg: format!(
+                                "field {fname} is a bitfield; bitfields in struct global \
+                             initializers are not supported"
+                            ),
+                        });
+                    }
                     let byte_off = if is_union {
                         0
                     } else {
@@ -1175,17 +1234,36 @@ fn build_init_words(
                         })?;
                         byte_off
                     };
-                    if byte_off % 4 != 0 {
-                        return Err(Error::Compile {
-                            msg: format!(
-                                "field {fname} at byte offset {byte_off} is not word-aligned; \
-                             sub-word struct fields in global initializers are not supported"
-                            ),
-                        });
-                    }
-                    field_map.push((fname.clone(), (byte_off / 4) as usize, fty));
+                    field_map.push((
+                        fname.clone(),
+                        (byte_off / 4) as usize,
+                        byte_off % 4,
+                        fty,
+                    ));
                 }
             }
+
+            // Place a single field's initializer value into the output
+            // word vector.  Word-aligned fields whose size is a multiple
+            // of 4 (or fields that don't share their word with a later
+            // sub-word sibling) take the historical recursive path.  Any
+            // field whose value lands inside a partial word — either
+            // because `byte_in_word != 0` or because a later sub-word
+            // sibling shares the same word — must be a constant-int
+            // expression that fits in `fsize` bytes.  The value is
+            // masked to `fsize * 8` bits, shifted left by `byte_in_word
+            // * 8` (little-endian byte order, matching
+            // `flatten_narrow_array_init`), and OR'd into the existing
+            // `InitWord::Num` slot.  Sub-word non-constant-int values
+            // (string literals, `&sym`, nested aggregates) and any
+            // collision with a previously-emitted `InitWord::Sym` keep
+            // the existing rejection error so the fix stays auditable.
+            let shares_word_with_later_subfield =
+                |widx: usize, my_idx: usize, fmap: &[(String, usize, u32, &Type)]| -> bool {
+                    fmap.iter().enumerate().any(|(j, (_, w, bin, _))| {
+                        j != my_idx && *w == widx && *bin != 0
+                    })
+                };
 
             // Cursor in struct-field index (when struct), array element
             // index (when array), or word index (flat fallback).
@@ -1195,11 +1273,11 @@ fn build_init_words(
                 match item {
                     Expr::DesignatedInit { field, value } => {
                         // Struct field designator. Locate the field by name.
-                        let (fidx, woff, fty) = field_map
+                        let (fidx, woff, bin, fty) = field_map
                             .iter()
                             .enumerate()
-                            .find(|(_, (n, _, _))| n == field)
-                            .map(|(i, (_, w, t))| (i, *w, *t))
+                            .find(|(_, (n, _, _, _))| n == field)
+                            .map(|(i, (_, w, b, t))| (i, *w, *b, *t))
                             .ok_or_else(|| Error::Compile {
                                 msg: format!(
                                     "designated initializer .{field} has no matching struct field \
@@ -1208,12 +1286,41 @@ fn build_init_words(
                             })?;
                         // Recursively build the value's words and place
                         // them at the field's word offset. Union fields
-                        // all overlay at word zero.
+                        // all overlay at word zero. Sub-word fields take
+                        // the packed path (mask + shift + OR into the
+                        // containing word).
                         let fsize = crate::types::size_bytes_ctx(fty, tctx);
-                        let sub = build_init_words(value, fsize, tctx, Some(fty), ictx)?;
-                        for (k, w) in sub.into_iter().enumerate() {
-                            ensure(&mut v, woff + k);
-                            v[woff + k] = w;
+                        let packed = bin != 0
+                            || (!is_union
+                                && shares_word_with_later_subfield(woff, fidx, &field_map));
+                        if packed {
+                            let n = eval_subword_const_int(field, value, fsize, tctx)?;
+                            let mask: u32 = if fsize >= 4 {
+                                0xFFFF_FFFF
+                            } else {
+                                (1u32 << (fsize * 8)) - 1
+                            };
+                            let packed_val = (n & mask) << (bin * 8);
+                            ensure(&mut v, woff);
+                            v[woff] = match &v[woff] {
+                                InitWord::Num(prev) => InitWord::Num(prev | packed_val),
+                                InitWord::Sym(_) => {
+                                    return Err(Error::Compile {
+                                        msg: format!(
+                                            "field {field} sub-word initializer collides with a \
+                                         symbolic word initializer at the same word offset; \
+                                         sub-word struct fields in global initializers are not \
+                                         supported in this configuration"
+                                        ),
+                                    });
+                                }
+                            };
+                        } else {
+                            let sub = build_init_words(value, fsize, tctx, Some(fty), ictx)?;
+                            for (k, w) in sub.into_iter().enumerate() {
+                                ensure(&mut v, woff + k);
+                                v[woff + k] = w;
+                            }
                         }
                         field_cursor = fidx + 1;
                     }
@@ -1239,13 +1346,47 @@ fn build_init_words(
                                     msg: "too many positional initializers for struct".to_string(),
                                 });
                             }
-                            let (_, woff, fty) = &field_map[field_cursor];
-                            let fsize = crate::types::size_bytes_ctx(fty, tctx);
-                            let sub = build_init_words(other, fsize, tctx, Some(*fty), ictx)?;
+                            let (fname, woff, bin, fty) = &field_map[field_cursor];
+                            let fname = fname.clone();
                             let woff = *woff;
-                            for (k, w) in sub.into_iter().enumerate() {
-                                ensure(&mut v, woff + k);
-                                v[woff + k] = w;
+                            let bin = *bin;
+                            let fty = *fty;
+                            let fsize = crate::types::size_bytes_ctx(fty, tctx);
+                            let packed = bin != 0
+                                || (!is_union
+                                    && shares_word_with_later_subfield(
+                                        woff,
+                                        field_cursor,
+                                        &field_map,
+                                    ));
+                            if packed {
+                                let n = eval_subword_const_int(&fname, other, fsize, tctx)?;
+                                let mask: u32 = if fsize >= 4 {
+                                    0xFFFF_FFFF
+                                } else {
+                                    (1u32 << (fsize * 8)) - 1
+                                };
+                                let packed_val = (n & mask) << (bin * 8);
+                                ensure(&mut v, woff);
+                                v[woff] = match &v[woff] {
+                                    InitWord::Num(prev) => InitWord::Num(prev | packed_val),
+                                    InitWord::Sym(_) => {
+                                        return Err(Error::Compile {
+                                            msg: format!(
+                                                "field {fname} sub-word initializer collides with \
+                                             a symbolic word initializer at the same word offset; \
+                                             sub-word struct fields in global initializers are not \
+                                             supported in this configuration"
+                                            ),
+                                        });
+                                    }
+                                };
+                            } else {
+                                let sub = build_init_words(other, fsize, tctx, Some(fty), ictx)?;
+                                for (k, w) in sub.into_iter().enumerate() {
+                                    ensure(&mut v, woff + k);
+                                    v[woff + k] = w;
+                                }
                             }
                             field_cursor += 1;
                             if is_union {
@@ -3730,6 +3871,90 @@ mod tests {
         let unit_l = parse::parse(src_local).expect("parse local");
         let _m_l =
             emit_module(&unit_l, 8).expect("emit_module Ok for local brace-elided scalar init");
+    }
+
+    /// Sub-word struct fields packed into one 32-bit word.  The struct
+    /// branch of `build_init_words` must pack constant-int sub-word
+    /// fields (`int8_t a; int8_t b;`) into the containing word's
+    /// `InitWord::Num` value — `a=0x12` at byte 0, `b=0x34` at byte 1
+    /// fold to `0x00003412` little-endian.  A trailing word-aligned
+    /// `int w` keeps its own per-word emission.  The bare positional
+    /// initializer `{ 0x12, 0x34, 0x55667788 }` exercises the path that
+    /// previously erroneously rejected `byte_off % 4 != 0`.
+    #[test]
+    fn sub_word_struct_field_global_init() {
+        let src = "struct S { signed char a; signed char b; int w; };
+                   struct S g = { 0x12, 0x34, 0x55667788 };
+                   int main(void) { return g.a + g.b + g.w; }";
+        let unit = parse::parse(src).expect("parse sub-word struct global");
+        let m = emit_module(&unit, 8)
+            .expect("emit_module Ok for sub-word struct field global init");
+        assert!(
+            m.text.contains(".VAR g. = 0x00003412;"),
+            "expected packed first word .VAR g. = 0x00003412 in asm, got:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains("0x55667788"),
+            "expected second word 0x55667788 in asm, got:\n{}",
+            m.text
+        );
+    }
+
+    /// The deferred-bitfield boundary: bitfield struct fields must keep
+    /// rejecting at file-scope global initializer time.  Lifting this
+    /// is a separate, bigger change — the rejection here pins the
+    /// scope of the sub-word packing fix.  `emit_module` swallows
+    /// per-global init errors and falls back to zero-init (see the
+    /// `eprintln!` arm in the global init loop), so we exercise the
+    /// rejection by driving `build_init_words` directly and checking
+    /// its `Result` for the bitfield error message.
+    #[test]
+    fn bitfield_in_struct_global_init_still_rejected() {
+        let src = "struct S { unsigned x : 10; unsigned y : 6; };
+                   struct S g = { 1, 2 };
+                   int main(void) { return 0; }";
+        let unit = parse::parse(src).expect("parse bitfield struct global");
+        let unit_tctx = UnitTypeCtx {
+            struct_defs: &unit.struct_defs,
+            typedefs: &unit.typedefs,
+        };
+        let global = unit
+            .globals
+            .iter()
+            .find(|g| g.name == "g")
+            .expect("global g present");
+        let init = global.init.as_ref().expect("global g has init");
+        let global_types: HashMap<String, crate::types::Type> = unit
+            .globals
+            .iter()
+            .map(|g| (g.name.clone(), g.ty.clone()))
+            .collect();
+        let mut extra: Vec<DataEntry> = Vec::new();
+        let mut counter: u32 = 0;
+        let mut interior: Vec<InteriorReq> = Vec::new();
+        let mut ictx = InitCtx {
+            extra_data: &mut extra,
+            complit_counter: &mut counter,
+            global_types: &global_types,
+            interior_reqs: &mut interior,
+        };
+        match build_init_words(
+            init,
+            crate::types::size_bytes_ctx(&global.ty, &unit_tctx),
+            &unit_tctx,
+            Some(&global.ty),
+            &mut ictx,
+        ) {
+            Ok(_) => panic!("bitfield init must still reject"),
+            Err(e) => {
+                let msg = format!("{e}");
+                assert!(
+                    msg.contains("bitfield") || msg.contains("not word-aligned"),
+                    "expected bitfield rejection error, got: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
