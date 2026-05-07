@@ -61,6 +61,23 @@ CSMITH_FLAGS = [
     "--max-union-fields", "4",
 ]
 
+# Harder profile for the next draft lane. This keeps volatile accesses
+# disabled, but lets csmith use pointers and expands the generated
+# control-flow, expression, array, and aggregate sizes.
+CSMITH_HARD_FLAGS = [
+    "--concise",
+    "--no-volatiles",
+    "--no-volatile-pointers",
+    "--max-funcs", "8",
+    "--max-block-size", "5",
+    "--max-block-depth", "4",
+    "--max-expr-complexity", "8",
+    "--max-array-dim", "3",
+    "--max-array-len-per-dim", "7",
+    "--max-struct-fields", "8",
+    "--max-union-fields", "5",
+]
+
 # A self-contained replacement for csmith.h: just the CRC32 hash, the
 # `transparent_crc` accumulator over uint64_t values, and no-op
 # platform stubs. csmith's generated main() calls these by name; we
@@ -322,6 +339,9 @@ def main():
     ap.add_argument("--keep-csmith", action="store_true",
                     help="keep the raw csmith output alongside the "
                          "transformed case (for debugging)")
+    ap.add_argument("--profile", choices=("aggregate", "hard"),
+                    default="aggregate",
+                    help="csmith option profile to use")
     args = ap.parse_args()
 
     DRAFT_DIR.mkdir(parents=True, exist_ok=True)
@@ -341,8 +361,9 @@ def main():
         stem = args.name if args.name else f"{seed:08x}"
         with tempfile.TemporaryDirectory(prefix="csmith_gen_") as tmp:
             raw_path = pathlib.Path(tmp) / "csmith.c"
-            run(["csmith", "-s", str(seed), "-o", str(raw_path),
-                 *CSMITH_FLAGS])
+            flags = CSMITH_HARD_FLAGS if args.profile == "hard" else \
+                CSMITH_FLAGS
+            run(["csmith", "-s", str(seed), "-o", str(raw_path), *flags])
             raw = raw_path.read_text()
             if args.keep_csmith:
                 (DRAFT_DIR / f"cctest_csmith_{stem}.csmith.c").write_text(raw)
