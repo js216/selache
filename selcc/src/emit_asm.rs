@@ -342,12 +342,11 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             .find(|cf| cf.is_static && cf.name == "func_1")
             .map(|cf| cf.instrs.len())
             .unwrap_or(0);
-        let root_too_large_for_block0 = root_instrs > 24_000;
-        let root_is_small = root_instrs <= 10_000;
         let nonroot_funcs: Vec<&CompiledFunction> = compiled
             .iter()
             .filter(|cf| cf.is_static && cf.name != "func_1" && cf.name.starts_with("func_"))
             .collect();
+        let root_is_small = root_instrs <= 10_000;
         let spill_nonroot_func = nonroot_funcs
             .iter()
             .copied()
@@ -355,12 +354,24 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             .or_else(|| nonroot_funcs.first().copied())
             .map(|cf| cf.name.as_str());
         let spill_small_helpers_to_block0 = root_is_small && spill_nonroot_func.is_none();
-        let mut block0_instrs_used: usize = 0;
+        let block0_entry_instrs_reserved: usize = compiled
+            .iter()
+            .filter(|cf| matches!(cf.name.as_str(), "main" | "test_main"))
+            .map(|cf| cf.instrs.len())
+            .sum();
+        let root_too_large_for_block0 = root_instrs > 24_000
+            || root_and_entry_exceed_block0_budget(
+                root_instrs,
+                block0_entry_instrs_reserved,
+                BLOCK0_INSTR_BUDGET,
+            );
+        let mut block0_instrs_used: usize = block0_entry_instrs_reserved;
         let mut block1_instrs_used: usize = if root_too_large_for_block0 {
             root_instrs
         } else {
             0
         };
+        let mut block2_instrs_used: usize = 0;
         let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
             let initial_section = if should_emit_in_block0_code(
@@ -402,6 +413,14 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 block1_instrs_used,
                 BLOCK1_INSTR_BUDGET,
             );
+            let code_section = apply_block2_budget_cap(
+                code_section,
+                cf.is_static,
+                &cf.name,
+                cf.instrs.len(),
+                block2_instrs_used,
+                BLOCK2_INSTR_BUDGET,
+            );
             if code_section == "seg_l1_block0_swco" {
                 block0_instrs_used = block0_instrs_used.saturating_add(cf.instrs.len());
             }
@@ -410,11 +429,21 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             {
                 block1_instrs_used = block1_instrs_used.saturating_add(cf.instrs.len());
             }
+            if code_section == "seg_swco" {
+                block2_instrs_used = block2_instrs_used.saturating_add(cf.instrs.len());
+            }
+            let sym = with_abi_suffix(&cf.name);
+            let body_sym = if code_section == "seg_l2_swco" {
+                let body_sym = l2_body_symbol(&cf.name);
+                emit_l2_entry_thunk(&mut out, &mut current_code_section, &sym, &body_sym);
+                body_sym
+            } else {
+                sym.clone()
+            };
             if current_code_section != Some(code_section) {
                 let _ = writeln!(out, ".SECTION/SW {code_section};");
                 current_code_section = Some(code_section);
             }
-            let sym = with_abi_suffix(&cf.name);
             if cf.is_weak {
                 let _ = writeln!(out, ".WEAK {sym};");
             } else if !cf.is_static {
@@ -425,7 +454,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 // collide at link time.
                 let _ = writeln!(out, ".GLOBAL {sym};");
             }
-            let _ = writeln!(out, "{sym}:");
+            let _ = writeln!(out, "{body_sym}:");
             for (body_idx, mi) in cf.instrs.iter().enumerate() {
                 if let Some(lbls) = cf.label_insertions.get(&body_idx) {
                     for lbl in lbls {
@@ -595,9 +624,16 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             }
         }
     }
-    if !data_entries.is_empty() {
-        out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
-        for e in &data_entries {
+    for section in ["seg_dmda", "seg_l2"] {
+        let section_entries: Vec<&DataEntry> = data_entries
+            .iter()
+            .filter(|e| data_section_for_entry(e) == section)
+            .collect();
+        if section_entries.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, ".SECTION/DOUBLE32 {section};");
+        for e in section_entries {
             let sym = with_abi_suffix(&e.name);
             if !e.is_static {
                 let _ = writeln!(out, ".GLOBAL {sym};");
@@ -636,15 +672,24 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             ));
         }
     }
-    if !bss_entries.is_empty() {
-        out.push_str(".SECTION/DOUBLE32 seg_dmda;\n");
-        for (name, sz, is_static) in &bss_entries {
+    for section in ["seg_dmda", "seg_l2"] {
+        let section_entries: Vec<&(String, u32, bool)> = bss_entries
+            .iter()
+            .filter(|(_, sz, is_static)| {
+                data_section_for_static_words(*is_static, data_words(*sz)) == section
+            })
+            .collect();
+        if section_entries.is_empty() {
+            continue;
+        }
+        let _ = writeln!(out, ".SECTION/DOUBLE32 {section};");
+        for (name, sz, is_static) in section_entries {
             let sym = with_abi_suffix(name);
             if !is_static {
                 let _ = writeln!(out, ".GLOBAL {sym};");
             }
-            let words = sz.div_ceil(4).max(1);
-            let zero = vec![InitWord::Num(0); words as usize];
+            let words = data_words(*sz);
+            let zero = vec![InitWord::Num(0); words];
             emit_var_bytes(&mut out, &sym, &zero, &[]);
         }
         out.push_str(".ENDSEG;\n\n");
@@ -703,22 +748,43 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
 /// reserve = 130064 B). Each IR-level `MachInstr` averages ~5 bytes
 /// after selas encoding (a mix of 48-bit instructions, 24-bit short
 /// forms, and selas-inserted alignment fill), so 130064 B / 5 ≈ 26000
-/// IR instrs. We cap at 22_000 to leave headroom for `main` /
-/// `test_main` (which are not subject to the cap because they pin to
-/// the entry section) and for the alignment fill seld places at
-/// section boundaries. Could be derived from LDF parsing in a future
-/// iteration.
+/// IR instrs. We cap at 22_000 after pre-reserving `main` / `test_main`
+/// because those entry bodies pin to block0 and are usually emitted
+/// after helper-routing decisions. This leaves room for encoding
+/// expansion and for the alignment fill seld places at section
+/// boundaries. Could be derived from LDF parsing in a future iteration.
 const BLOCK0_INSTR_BUDGET: usize = 22_000;
 
-/// Cap on cumulative `cf.instrs.len()` routed to `seg_l1_block1_swco`
-/// for very large csmith roots. `func_1` itself is reserved up front
-/// because it is the large root that forced block1 routing; excess
-/// signed 8/16-bit safe helpers can execute from the default block2
-/// code segment without changing semantics. This preserves the
-/// checksum-critical large-root placement while avoiding the
-/// `block1_sw_code` overflow seen after bitfield RMW expansion made
-/// `cctest_csmith_9405adb0` slightly larger.
+/// Cap on cumulative `cf.instrs.len()` routed to `seg_l1_block1_swco`.
+/// `func_1` is reserved up front when it is the large root that forced
+/// block1 routing. Excess generated csmith helpers/bodies, including
+/// checksum support helpers when the root already consumes the budget,
+/// can execute from the default block2 code segment without changing
+/// semantics. This avoids `block1_sw_code` overflows in both large-root
+/// cases and medium-root drafts where `func_1` fits in block0 but every
+/// other generated body would otherwise accumulate in block1.
 const BLOCK1_INSTR_BUDGET: usize = 33_400;
+/// Very large roots need additional slack because block1 also carries
+/// linker fill/alignment and IR instruction count underestimates final
+/// encoded SW bytes for dense generated expressions.
+const BLOCK1_ROOT_HEADROOM: usize = 2_000;
+
+/// Cap on cumulative `cf.instrs.len()` routed to the default
+/// `seg_swco` block2 code section. Archive/runtime inputs also land in
+/// `block2_sw_code`, so generated csmith bodies need a conservative cap
+/// below the raw 128 KiB L1 span. Bodies above this threshold cannot be
+/// moved wholesale into block0 or block1 without recreating those
+/// overflows, so selcc emits their implementation in L2 and keeps a
+/// tiny same-name L1 thunk for direct CJUMP callers.
+const BLOCK2_INSTR_BUDGET: usize = 18_000;
+
+fn root_and_entry_exceed_block0_budget(
+    root_instrs: usize,
+    entry_instrs: usize,
+    budget: usize,
+) -> bool {
+    root_instrs.saturating_add(entry_instrs) > budget
+}
 
 /// Apply the block0 cumulative-size cap to a routing decision. When
 /// the root is too large for block0, selcc otherwise spills every
@@ -727,20 +793,19 @@ const BLOCK1_INSTR_BUDGET: usize = 33_400;
 /// `block0_sw_code` budget. Redirect overflow large helpers to the
 /// default `seg_swco` (which seld places in `block2_sw_code`). Entry
 /// symbols (`main`, `test_main`) and the small-helper / `func_1`
-/// spill paths stay in block0 unconditionally; only the
-/// `root_too_large_for_block0` large-helper spills are candidates for
-/// redirection.
+/// spill paths stay in block0 unconditionally; generated large-body
+/// spills are candidates for redirection for both large-root and
+/// small-root placement.
 fn apply_block0_budget_cap(
     initial_section: &'static str,
     is_static: bool,
     name: &str,
     instrs: usize,
-    root_too_large_for_block0: bool,
+    _root_too_large_for_block0: bool,
     block0_instrs_used: usize,
     budget: usize,
 ) -> &'static str {
     if initial_section != "seg_l1_block0_swco"
-        || !root_too_large_for_block0
         || !is_static
         || name == "main"
         || name == "test_main"
@@ -761,19 +826,41 @@ fn apply_block1_budget_cap(
     is_static: bool,
     name: &str,
     instrs: usize,
-    root_too_large_for_block0: bool,
+    _root_too_large_for_block0: bool,
     block1_instrs_used: usize,
     budget: usize,
 ) -> &'static str {
-    if initial_section != "seg_l1_block1_swco"
-        || !root_too_large_for_block0
-        || !is_static
-        || !is_csmith_small_safe_helper(name)
-    {
+    if initial_section != "seg_l1_block1_swco" || !is_static {
         return initial_section;
     }
-    if block1_instrs_used.saturating_add(instrs) > budget {
+    if name == "func_1" {
+        if instrs > budget.saturating_sub(BLOCK1_ROOT_HEADROOM) {
+            "seg_l2_swco"
+        } else {
+            initial_section
+        }
+    } else if !is_block1_budget_spillable(name) {
+        initial_section
+    } else if block1_instrs_used.saturating_add(instrs) > budget {
         split_runtime_code_section(name).unwrap_or("seg_swco")
+    } else {
+        initial_section
+    }
+}
+
+fn apply_block2_budget_cap(
+    initial_section: &'static str,
+    is_static: bool,
+    name: &str,
+    instrs: usize,
+    block2_instrs_used: usize,
+    budget: usize,
+) -> &'static str {
+    if initial_section != "seg_swco" || !is_static || !is_block2_l2_spillable(name) {
+        return initial_section;
+    }
+    if block2_instrs_used.saturating_add(instrs) > budget {
+        "seg_l2_swco"
     } else {
         initial_section
     }
@@ -830,6 +917,14 @@ fn is_csmith_small_safe_helper(name: &str) -> bool {
     name.starts_with("safe_") && (name.contains("_int8_t_") || name.contains("_int16_t_"))
 }
 
+fn is_block1_budget_spillable(name: &str) -> bool {
+    is_csmith_generated_body(name) && name != "platform_main_begin"
+}
+
+fn is_block2_l2_spillable(name: &str) -> bool {
+    name.starts_with("func_") || name.starts_with("safe_")
+}
+
 fn is_csmith_generated_body(name: &str) -> bool {
     matches!(
         name,
@@ -856,6 +951,25 @@ fn split_runtime_code_section(name: &str) -> Option<&'static str> {
         "___div64" | "___mod64" => Some("seg_l1_block1_swco"),
         _ => None,
     }
+}
+
+fn l2_body_symbol(name: &str) -> String {
+    format!(".L_sel_l2_{name}")
+}
+
+fn emit_l2_entry_thunk(
+    out: &mut String,
+    current_code_section: &mut Option<&'static str>,
+    public_sym: &str,
+    body_sym: &str,
+) {
+    if *current_code_section != Some("seg_l1_block0_swco") {
+        let _ = writeln!(out, ".SECTION/SW seg_l1_block0_swco;");
+        *current_code_section = Some("seg_l1_block0_swco");
+    }
+    let _ = writeln!(out, "{public_sym}:");
+    let _ = writeln!(out, "    I12 = {body_sym};");
+    let _ = writeln!(out, "    JUMP (M13,I12);");
 }
 
 /// Pack a byte sequence into 32-bit words in little-endian order.
@@ -1118,6 +1232,24 @@ struct DataEntry {
     /// 6.2.2p3 internal linkage). Such symbols are emitted without
     /// `.GLOBAL` so they stay private to the translation unit.
     is_static: bool,
+}
+
+const L2_STATIC_DATA_WORD_THRESHOLD: usize = 64;
+
+fn data_words(size_bytes: u32) -> usize {
+    size_bytes.div_ceil(4).max(1) as usize
+}
+
+fn data_section_for_entry(entry: &DataEntry) -> &'static str {
+    data_section_for_static_words(entry.is_static, entry.values.len())
+}
+
+fn data_section_for_static_words(is_static: bool, words: usize) -> &'static str {
+    if is_static && words >= L2_STATIC_DATA_WORD_THRESHOLD {
+        "seg_l2"
+    } else {
+        "seg_dmda"
+    }
 }
 
 /// Walk a global initializer expression, recording every function-name
@@ -3182,6 +3314,23 @@ fn emit_adjusted_access(
             },
             reloc,
         });
+    } else if compute.is_none()
+        && !access.pm
+        && cond == target::COND_TRUE
+        && dreg < 0x10
+        && reloc.is_none()
+    {
+        out.push(MachInstr {
+            instr: Instruction::UregMemAccess {
+                pm: false,
+                i_reg: access.i_reg,
+                write: access.write,
+                lw: false,
+                ureg: dreg,
+                offset: new_offset,
+            },
+            reloc: None,
+        });
     } else {
         // Large-offset frame access: temporarily modify I6, emit the
         // memory access at offset 0, then un-modify. Both modifies
@@ -3933,7 +4082,9 @@ mod tests {
             },
             MachInstr {
                 instr: Instruction::ComputeLoadStore {
-                    compute: None,
+                    compute: Some(selinstr::encode::ComputeOp::Alu(
+                        selinstr::encode::AluOp::Pass { rn: 4, rx: 5 },
+                    )),
                     access: encode::MemAccess {
                         pm: false,
                         write: true,
@@ -3962,6 +4113,14 @@ mod tests {
                 i_reg: target::FRAME_PTR,
                 value: -267,
                 width: MemWidth::Nw,
+                ..
+            })
+        ));
+        assert!(matches!(
+            adjusted.get(1).map(|mi| mi.instr),
+            Some(Instruction::ComputeLoadStore {
+                compute: Some(_),
+                offset: 0,
                 ..
             })
         ));
@@ -4473,8 +4632,9 @@ mod tests {
                 "{entry} must never be redirected by the block0 budget cap"
             );
         }
-        // Small-root spills (root_too_large_for_block0 == false) are
-        // unaffected by the cap; they keep their existing routing.
+        // Small-root large-body spills also obey the cap; this catches
+        // drafts where the root is small but the chosen non-root body
+        // plus the pinned entry code still overfills block0.
         let s3 = apply_block0_budget_cap(
             "seg_l1_block0_swco",
             true,
@@ -4485,8 +4645,21 @@ mod tests {
             BLOCK0_INSTR_BUDGET,
         );
         assert_eq!(
-            s3, "seg_l1_block0_swco",
-            "small-root helper spill must be unaffected by the block0 budget cap"
+            s3, "seg_swco",
+            "small-root large body spill must obey the block0 budget cap"
+        );
+        let s3_fit = apply_block0_budget_cap(
+            "seg_l1_block0_swco",
+            true,
+            "func_2",
+            1_000,
+            false,
+            BLOCK0_INSTR_BUDGET - 2_000,
+            BLOCK0_INSTR_BUDGET,
+        );
+        assert_eq!(
+            s3_fit, "seg_l1_block0_swco",
+            "small-root large body spill that fits must remain in block0"
         );
         // Runtime helpers with their own dedicated section are still
         // routed to that section (split_runtime_code_section result),
@@ -4506,10 +4679,24 @@ mod tests {
     }
 
     #[test]
-    fn block1_small_helper_overflow_falls_back_to_seg_swco() {
-        // With a large root reserved in block1, excess signed 8/16-bit
-        // csmith safe helpers should spill to block2. The root itself
-        // and checksum helpers stay on their existing routes.
+    fn block0_root_moves_when_entry_code_fills_budget() {
+        assert!(!root_and_entry_exceed_block0_budget(
+            8_000,
+            8_000,
+            BLOCK0_INSTR_BUDGET
+        ));
+        assert!(root_and_entry_exceed_block0_budget(
+            12_000,
+            12_000,
+            BLOCK0_INSTR_BUDGET
+        ));
+    }
+
+    #[test]
+    fn block1_generated_body_overflow_falls_back_to_seg_swco() {
+        // Excess generated csmith bodies should spill to block2 once
+        // block1 is full. A moderate root still stays put, but an
+        // oversized root uses the same L2 thunk path as other bodies.
         let s1 = apply_block1_budget_cap(
             "seg_l1_block1_swco",
             true,
@@ -4532,7 +4719,7 @@ mod tests {
         );
         assert_eq!(s2, "seg_swco");
 
-        for name in ["func_1", "crc32_byte", "transparent_crc"] {
+        for name in ["func_1", "platform_main_begin"] {
             let s = apply_block1_budget_cap(
                 "seg_l1_block1_swco",
                 true,
@@ -4545,6 +4732,36 @@ mod tests {
             assert_eq!(s, "seg_l1_block1_swco");
         }
 
+        let huge_root = apply_block1_budget_cap(
+            "seg_l1_block1_swco",
+            true,
+            "func_1",
+            BLOCK1_INSTR_BUDGET - BLOCK1_ROOT_HEADROOM + 1,
+            true,
+            BLOCK1_INSTR_BUDGET,
+            BLOCK1_INSTR_BUDGET,
+        );
+        assert_eq!(
+            huge_root, "seg_l2_swco",
+            "root that leaves no encoded-size headroom should use an L2 thunk"
+        );
+
+        for name in ["crc32_gentab", "crc32_byte", "transparent_crc"] {
+            let s = apply_block1_budget_cap(
+                "seg_l1_block1_swco",
+                true,
+                name,
+                500,
+                true,
+                BLOCK1_INSTR_BUDGET,
+                BLOCK1_INSTR_BUDGET,
+            );
+            assert_eq!(
+                s, "seg_swco",
+                "{name} should spill when the root already fills block1"
+            );
+        }
+
         let s3 = apply_block1_budget_cap(
             "seg_l1_block1_swco",
             true,
@@ -4554,7 +4771,106 @@ mod tests {
             BLOCK1_INSTR_BUDGET,
             BLOCK1_INSTR_BUDGET,
         );
-        assert_eq!(s3, "seg_l1_block1_swco");
+        assert_eq!(s3, "seg_swco");
+
+        let s4 = apply_block1_budget_cap(
+            "seg_l1_block1_swco",
+            true,
+            "func_18",
+            5_000,
+            false,
+            BLOCK1_INSTR_BUDGET - 100,
+            BLOCK1_INSTR_BUDGET,
+        );
+        assert_eq!(s4, "seg_swco");
+    }
+
+    #[test]
+    fn block2_generated_body_overflow_uses_l2_thunk() {
+        let s1 = apply_block2_budget_cap(
+            "seg_swco",
+            true,
+            "func_4",
+            2_000,
+            BLOCK2_INSTR_BUDGET - 3_000,
+            BLOCK2_INSTR_BUDGET,
+        );
+        assert_eq!(s1, "seg_swco");
+
+        let s2 = apply_block2_budget_cap(
+            "seg_swco",
+            true,
+            "func_4",
+            5_000,
+            BLOCK2_INSTR_BUDGET - 100,
+            BLOCK2_INSTR_BUDGET,
+        );
+        assert_eq!(s2, "seg_l2_swco");
+
+        let s3 = apply_block2_budget_cap(
+            "seg_swco",
+            true,
+            "helper",
+            5_000,
+            BLOCK2_INSTR_BUDGET,
+            BLOCK2_INSTR_BUDGET,
+        );
+        assert_eq!(s3, "seg_swco");
+
+        let mut out = String::new();
+        let mut current = Some("seg_l1_block1_swco");
+        emit_l2_entry_thunk(&mut out, &mut current, "func_4.", ".L_sel_l2_func_4");
+        assert_eq!(current, Some("seg_l1_block0_swco"));
+        assert_eq!(
+            out,
+            concat!(
+                ".SECTION/SW seg_l1_block0_swco;\n",
+                "func_4.:\n",
+                "    I12 = .L_sel_l2_func_4;\n",
+                "    JUMP (M13,I12);\n"
+            )
+        );
+    }
+
+    #[test]
+    fn large_plain_frame_access_uses_long_offset_form() {
+        let access = selinstr::encode::MemAccess {
+            pm: false,
+            write: false,
+            i_reg: target::FRAME_PTR,
+        };
+        let mut out = Vec::new();
+        emit_adjusted_access(&mut out, None, access, 3, -96, target::COND_TRUE, None);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0].instr,
+            Instruction::UregMemAccess {
+                pm: false,
+                i_reg: target::FRAME_PTR,
+                write: false,
+                lw: false,
+                ureg: 3,
+                offset: -96,
+            }
+        ));
+
+        let mut computed = Vec::new();
+        emit_adjusted_access(
+            &mut computed,
+            Some(selinstr::encode::ComputeOp::Alu(
+                selinstr::encode::AluOp::Pass { rn: 1, rx: 2 },
+            )),
+            access,
+            3,
+            -96,
+            target::COND_TRUE,
+            None,
+        );
+        assert_eq!(
+            computed.len(),
+            3,
+            "computed memory ops still need the modify/access/restore form"
+        );
     }
 
     #[test]
@@ -4591,6 +4907,33 @@ mod tests {
         let m = compile("int x = 10;\nint f() { return x; }");
         assert!(m.text.contains(".SECTION/DOUBLE32 seg_dmda;"));
         assert!(m.text.contains(".VAR x. = 0x0000000A;"));
+    }
+
+    #[test]
+    fn large_static_data_routes_to_l2() {
+        let m = compile("static int big[64] = {1};\nint f() { return big[0]; }");
+        let l2 = m
+            .text
+            .find(".SECTION/DOUBLE32 seg_l2;")
+            .expect("missing L2 data section");
+        let big = m.text.find(".VAR big. = 0x00000001;").expect("missing big");
+        assert!(l2 < big, "large static data should be in L2:\n{}", m.text);
+
+        let small = compile("static int small[2] = {1, 2};\nint f() { return small[0]; }");
+        let dmda = small
+            .text
+            .find(".SECTION/DOUBLE32 seg_dmda;")
+            .expect("missing L1 data section");
+        let small_sym = small
+            .text
+            .find(".VAR small. = 0x00000001;")
+            .expect("missing small");
+        assert!(
+            dmda < small_sym,
+            "small static data should stay in L1:\n{}",
+            small.text
+        );
+        assert!(!small.text.contains(".SECTION/DOUBLE32 seg_l2;"));
     }
 
     // ----------------------------------------------------------------

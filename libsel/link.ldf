@@ -67,6 +67,12 @@ PROCESSOR p0
          INPUT_SECTIONS( $OBJECTS(seg_dmda) )
       } > mem_l1_block1
 
+      block1_bss NO_INIT BW
+      {
+         INPUT_SECTION_ALIGN(4)
+         INPUT_SECTIONS( $OBJECTS(seg_l1_bss) )
+      } > mem_l1_block1
+
       // Large DMA buffers land in L2 SRAM, which is always
       // visible on the system fabric and needs no L1 MP alias
       // translation. Split into two sections:
