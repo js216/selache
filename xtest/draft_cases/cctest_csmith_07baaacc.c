@@ -800,8 +800,6 @@ struct S0 {
    int64_t  f6;
 };
 
-#pragma pack(push)
-#pragma pack(1)
 struct S1 {
    signed f0 : 10;
    signed : 0;
@@ -811,14 +809,10 @@ struct S1 {
    const signed f4 : 24;
    const unsigned f5 : 4;
 };
-#pragma pack(pop)
 
-#pragma pack(push)
-#pragma pack(1)
 struct S2 {
    unsigned f0 : 11;
 };
-#pragma pack(pop)
 
 struct S3 {
    signed f0 : 11;
@@ -828,8 +822,6 @@ struct S3 {
    unsigned f4 : 13;
 };
 
-#pragma pack(push)
-#pragma pack(1)
 struct S4 {
    const int32_t  f0;
    signed f1 : 1;
@@ -837,10 +829,7 @@ struct S4 {
    const int32_t  f3;
    uint32_t  f4;
 };
-#pragma pack(pop)
 
-#pragma pack(push)
-#pragma pack(1)
 struct S5 {
    const uint32_t  f0;
    int16_t  f1;
@@ -850,15 +839,11 @@ struct S5 {
    const uint32_t  f5;
    const unsigned f6 : 14;
 };
-#pragma pack(pop)
 
-#pragma pack(push)
-#pragma pack(1)
 struct S6 {
    unsigned f0 : 15;
    signed f1 : 9;
 };
-#pragma pack(pop)
 
 union U7 {
    int8_t * f0;
