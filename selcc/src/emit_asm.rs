@@ -1332,23 +1332,45 @@ fn strip_type<'a>(
 /// sub-word fields into one `InitWord::Num` per containing word.
 ///
 /// String literals, `&sym` / `&sym[i]` / `&sym.f` lvalue addresses, and
-/// nested aggregate initializers (`Expr::InitList`) cannot be folded into
-/// a sub-word slot — they would need a relocation or a multi-word value
-/// that doesn't fit.  The error path here is what keeps the packed-field
-/// fix narrowly scoped to constant-int sub-word fields.
+/// nested aggregate initializers (`Expr::InitList`) for fields wider
+/// than a word, fields with non-int leaves, or fields whose leaves
+/// include addresses or strings cannot be folded into a sub-word slot —
+/// they would need a relocation or a multi-word value that doesn't fit.
+/// The error paths here keep the packed-field fix narrowly scoped.
+///
+/// Nested aggregate sub-word fields whose total size is `<= 4` bytes and
+/// whose leaves are 1- or 2-byte constant ints (no nested-nested
+/// aggregates, no bitfields, no string literals, no `&sym`) are folded
+/// by walking the aggregate layout and OR-ing each leaf into the
+/// returned word at its containing-word-relative byte offset.
 fn eval_subword_const_int(
     field: &str,
     value: &Expr,
-    _fsize: u32,
+    fsize: u32,
+    fty: Option<&crate::types::Type>,
     tctx: &dyn crate::types::TypeCtx,
 ) -> Result<u32> {
     match value {
-        Expr::InitList(_) => Err(Error::Compile {
-            msg: format!(
-                "field {field}: nested aggregate initializer at sub-word offset; \
-                 sub-word struct fields in global initializers must be constant integers"
-            ),
-        }),
+        Expr::InitList(_) => {
+            if fsize > 4 {
+                return Err(Error::Compile {
+                    msg: format!(
+                        "field {field}: nested aggregate initializer at sub-word offset \
+                         exceeds 4 bytes; sub-word struct fields in global initializers \
+                         must fit in one word"
+                    ),
+                });
+            }
+            let ty = fty.ok_or_else(|| Error::Compile {
+                msg: format!(
+                    "field {field}: nested aggregate initializer at sub-word offset \
+                     without field type info"
+                ),
+            })?;
+            let mut acc: u32 = 0;
+            flatten_subword_aggregate_const_int(field, value, ty, 0, &mut acc, tctx)?;
+            Ok(acc)
+        }
         Expr::StringLit(_) => Err(Error::Compile {
             msg: format!(
                 "field {field}: string literal at sub-word offset; \
@@ -1369,6 +1391,209 @@ fn eval_subword_const_int(
                  sub-word struct fields in global initializers must be constant integers"
                 ),
             }),
+    }
+}
+
+/// Walk a nested aggregate initializer (struct / union / array of small
+/// constant-int leaves) at sub-word offset `byte_off` within the
+/// containing 32-bit word and OR each leaf's value into `acc` at the
+/// leaf's byte position.  Auditable scope:
+/// - Inner aggregate must fit in <= 4 bytes total (the caller checks the
+///   top-level size; recursive calls walk inside that budget).
+/// - Leaves must be 1- or 2-byte constant ints (`int8_t`, `uint8_t`,
+///   `int16_t`, `uint16_t`).  Bitfields, nested-nested aggregates,
+///   string literals, and `&sym` keep a hard error so the fix stays
+///   narrow and the precedent constant-int sub-word fix's audit shape
+///   is preserved.
+fn flatten_subword_aggregate_const_int(
+    field: &str,
+    init: &Expr,
+    ty: &crate::types::Type,
+    byte_off: u32,
+    acc: &mut u32,
+    tctx: &dyn crate::types::TypeCtx,
+) -> Result<()> {
+    use crate::types::Type;
+    let stripped = strip_type(ty, tctx);
+    match stripped {
+        Type::Struct { .. } | Type::Union { .. } => {
+            let fields = resolve_struct_fields(stripped, tctx).ok_or_else(|| Error::Compile {
+                msg: format!(
+                    "field {field}: nested aggregate initializer at sub-word offset \
+                     references unresolved tag"
+                ),
+            })?;
+            let is_union = matches!(stripped, Type::Union { .. });
+            let items: &[Expr] = match init {
+                Expr::InitList(items) => items.as_slice(),
+                _ => {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "field {field}: expected aggregate initializer for \
+                             nested struct/union at sub-word offset"
+                        ),
+                    });
+                }
+            };
+            let mut cursor: usize = 0;
+            for item in items {
+                let (fidx, inner) = match item {
+                    Expr::DesignatedInit {
+                        field: dfname,
+                        value,
+                    } => {
+                        let i = fields
+                            .iter()
+                            .position(|(n, _)| n == dfname)
+                            .ok_or_else(|| Error::Compile {
+                                msg: format!(
+                                    "field {field}: designated initializer .{dfname} \
+                                     does not match any field of the nested aggregate"
+                                ),
+                            })?;
+                        (i, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                if fidx >= fields.len() {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "field {field}: too many positional initializers for \
+                             nested aggregate at sub-word offset"
+                        ),
+                    });
+                }
+                let (sub_name, sub_ty) = &fields[fidx];
+                if matches!(sub_ty, Type::Bitfield(_, _)) {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "field {field}: nested aggregate at sub-word offset contains \
+                             a bitfield ({sub_name}); not supported in this configuration"
+                        ),
+                    });
+                }
+                let sub_off = if is_union {
+                    byte_off
+                } else {
+                    let (off, _, _) =
+                        crate::types::struct_field_layout_ctx(fields, sub_name, tctx)
+                            .ok_or_else(|| Error::Compile {
+                                msg: format!(
+                                    "field {field}: internal: sub-field {sub_name} \
+                                     not found in nested aggregate"
+                                ),
+                            })?;
+                    byte_off + off
+                };
+                flatten_subword_aggregate_const_int(field, inner, sub_ty, sub_off, acc, tctx)?;
+                cursor = fidx + 1;
+                if is_union {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        Type::Array(elem, Some(n)) => {
+            let elem_bytes = crate::types::size_bytes_ctx(elem, tctx);
+            let items: &[Expr] = match init {
+                Expr::InitList(items) => items.as_slice(),
+                _ => {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "field {field}: expected array initializer for nested \
+                             array at sub-word offset"
+                        ),
+                    });
+                }
+            };
+            let mut cursor: u32 = 0;
+            for item in items {
+                let (idx, inner) = match item {
+                    Expr::ArrayDesignator { index, value } => {
+                        let i = eval_const_expr(index, tctx)? as u32;
+                        (i, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                if (idx as usize) >= *n {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "field {field}: array index {idx} out of bounds in nested \
+                             array at sub-word offset"
+                        ),
+                    });
+                }
+                let inner_off = byte_off + idx * elem_bytes;
+                flatten_subword_aggregate_const_int(field, inner, elem, inner_off, acc, tctx)?;
+                cursor = idx + 1;
+            }
+            Ok(())
+        }
+        _ => {
+            // Leaf scalar.  Must be a 1- or 2-byte constant int.
+            let lsize = crate::types::size_bytes_ctx(stripped, tctx);
+            if lsize == 0 || lsize > 2 {
+                return Err(Error::Compile {
+                    msg: format!(
+                        "field {field}: nested aggregate at sub-word offset has a leaf \
+                         of size {lsize}; only 1- or 2-byte constant-int leaves are \
+                         supported in this configuration"
+                    ),
+                });
+            }
+            // Peel one extra brace pair around a scalar (C99 6.7.8).
+            let scalar = match init {
+                Expr::InitList(items) if items.len() == 1 => &items[0],
+                Expr::InitList(_) => {
+                    return Err(Error::Compile {
+                        msg: format!(
+                            "field {field}: nested aggregate leaf at sub-word offset \
+                             expects a single constant-int initializer"
+                        ),
+                    });
+                }
+                other => other,
+            };
+            match scalar {
+                Expr::StringLit(_) => Err(Error::Compile {
+                    msg: format!(
+                        "field {field}: string literal inside nested aggregate at \
+                         sub-word offset; not supported"
+                    ),
+                }),
+                Expr::Ident(_) | Expr::AddrOf(_) => Err(Error::Compile {
+                    msg: format!(
+                        "field {field}: address-of-symbol inside nested aggregate at \
+                         sub-word offset; not supported"
+                    ),
+                }),
+                Expr::InitList(_) => Err(Error::Compile {
+                    msg: format!(
+                        "field {field}: nested-nested aggregate inside sub-word \
+                         aggregate; not supported in this configuration"
+                    ),
+                }),
+                _ => {
+                    let n = eval_const_expr_i64(scalar).ok_or_else(|| Error::Compile {
+                        msg: format!(
+                            "field {field}: nested aggregate leaf at sub-word offset is \
+                             not a compile-time constant integer"
+                        ),
+                    })? as u32;
+                    let mask: u32 = if lsize == 1 { 0xFF } else { 0xFFFF };
+                    if byte_off >= 4 {
+                        return Err(Error::Compile {
+                            msg: format!(
+                                "field {field}: nested aggregate leaf at byte offset \
+                                 {byte_off} would overflow the containing word"
+                            ),
+                        });
+                    }
+                    *acc |= (n & mask) << (byte_off * 8);
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -1582,7 +1807,7 @@ fn build_init_words(
                         // bitfields take the packed path (mask + shift +
                         // OR into the containing word).
                         if let Some((bit_pos_in_word, bit_width)) = bf_info {
-                            let n = eval_subword_const_int(field, value, 4, tctx)?;
+                            let n = eval_subword_const_int(field, value, 4, Some(fty), tctx)?;
                             let mask: u32 = if bit_width >= 32 {
                                 0xFFFF_FFFF
                             } else {
@@ -1609,7 +1834,7 @@ fn build_init_words(
                                 || (!is_union
                                     && shares_word_with_later_subfield(woff, fidx, &field_map));
                             if packed {
-                                let n = eval_subword_const_int(field, value, fsize, tctx)?;
+                                let n = eval_subword_const_int(field, value, fsize, Some(fty), tctx)?;
                                 let mask: u32 = if fsize >= 4 {
                                     0xFFFF_FFFF
                                 } else {
@@ -1674,7 +1899,7 @@ fn build_init_words(
                             let fty = *fty;
                             let bf_info = *bf_info;
                             if let Some((bit_pos_in_word, bit_width)) = bf_info {
-                                let n = eval_subword_const_int(&fname, other, 4, tctx)?;
+                                let n = eval_subword_const_int(&fname, other, 4, Some(fty), tctx)?;
                                 let mask: u32 = if bit_width >= 32 {
                                     0xFFFF_FFFF
                                 } else {
@@ -1705,7 +1930,7 @@ fn build_init_words(
                                             &field_map,
                                         ));
                                 if packed {
-                                    let n = eval_subword_const_int(&fname, other, fsize, tctx)?;
+                                    let n = eval_subword_const_int(&fname, other, fsize, Some(fty), tctx)?;
                                     let mask: u32 = if fsize >= 4 {
                                         0xFFFF_FFFF
                                     } else {
@@ -4301,6 +4526,41 @@ mod tests {
         assert!(
             m.text.contains("0x55667788"),
             "expected second word 0x55667788 in asm, got:\n{}",
+            m.text
+        );
+    }
+
+    /// Nested-aggregate sub-word struct field global init.  Extends
+    /// the precedent constant-int sub-word fix so that a struct field
+    /// whose type is itself a small (<= 4 bytes) aggregate of int8/16
+    /// leaves and whose initializer is a brace-enclosed `Expr::InitList`
+    /// is folded into the containing 32-bit word's `InitWord::Num`
+    /// rather than rejected.  For
+    ///
+    ///     struct Inner { signed char a; signed char b; };
+    ///     struct Outer { signed char pad; struct Inner inner;
+    ///                    signed char tail; };
+    ///     struct Outer g = { 0x12, { 0x34, 0x56 }, 0x78 };
+    ///
+    /// `pad` lands at byte 0, `inner.a` at byte 1, `inner.b` at byte 2,
+    /// `tail` at byte 3, so the packed first word reads
+    /// `0x78563412` little-endian.  Regression for csmith drafts
+    /// `cctest_csmith_3bc5e01c`, `cctest_csmith_63d3a9b0`, and
+    /// `cctest_csmith_9350e486`, which mix sub-word packed fields with
+    /// nested-aggregate initializers.
+    #[test]
+    fn nested_aggregate_subword_struct_field_global_init() {
+        let src = "struct Inner { signed char a; signed char b; };
+                   struct Outer { signed char pad; struct Inner inner;
+                                  signed char tail; };
+                   struct Outer g = { 0x12, { 0x34, 0x56 }, 0x78 };
+                   int main(void) { return g.pad + g.inner.a + g.inner.b + g.tail; }";
+        let unit = parse::parse(src).expect("parse nested-aggregate sub-word struct global");
+        let m = emit_module(&unit, 8)
+            .expect("emit_module Ok for nested-aggregate sub-word struct field global init");
+        assert!(
+            m.text.contains("0x78563412"),
+            "expected packed first word 0x78563412 in asm, got:\n{}",
             m.text
         );
     }
