@@ -242,3 +242,33 @@ $(BUILD)/drafts/sel/%.ldr: draft_cases/%.c $(SEL_ARCHIVE) $(SELCC) $(SELAS) $(SE
 	    rm -f $(BUILD)/drafts/sel/$*.0x*.ldr; \
 	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr; \
 	    printf 'sel (draft) %s built expect=%s\n' "$*" "$$hex"
+
+# Focused legacy targets may still ask for build/drafts/<toolchain>
+# artifacts after a draft has been promoted into cases/. Keep the
+# drafts sweep tied only to DRAFT_NAMES above; this fallback is for
+# direct targets.
+$(BUILD)/drafts/$(subst x,ces,cx)/%.ldr: cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/$(subst x,ces,cx)
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/$(subst x,ces,cx)/$*.doj $< > /dev/null
+	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \
+	    -T $(LIBSEL_LDF) -o $(BUILD)/drafts/$(subst x,ces,cx)/$*.dxe \
+	    $(BUILD)/drafts/$(subst x,ces,cx)/$*.doj $(CCES_ARCHIVE) > /dev/null
+	$(Q)$(ELFLOADER) -proc ADSP-21569 -b UARTHOST -f ASCII -Width 8 \
+	    $(BUILD)/drafts/$(subst x,ces,cx)/$*.dxe -o $@ > /dev/null
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    hex=$$(printf '0x%x' $$(($$expect))); \
+	    rm -f $(BUILD)/drafts/$(subst x,ces,cx)/$*.0x*.ldr; \
+	    cp $@ $(BUILD)/drafts/$(subst x,ces,cx)/$*.$$hex.ldr; \
+	    printf '$(subst x,ces,cx) (legacy) %s built expect=%s\n' "$*" "$$hex"
+
+$(BUILD)/drafts/sel/%.ldr: cases/%.c $(SEL_ARCHIVE) $(SELCC) $(SELAS) $(SELD) $(SELLOAD) | $(BUILD)/drafts/sel
+	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(BUILD)/drafts/sel/$*.s $< > /dev/null
+	$(Q)$(SELAS) $(SELAS_FLAGS) -o $(BUILD)/drafts/sel/$*.doj $(BUILD)/drafts/sel/$*.s > /dev/null
+	$(Q)$(SELD) -proc ADSP-21569 -T $(LIBSEL_LDF) -o $(BUILD)/drafts/sel/$*.dxe \
+	    $(BUILD)/drafts/sel/$*.doj $(SEL_ARCHIVE) > /dev/null
+	$(Q)$(SELLOAD) -proc ADSP-21569 -b UARTHOST -f ascii -Width 8 \
+	    -o $@ $(BUILD)/drafts/sel/$*.dxe > /dev/null
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    hex=$$(printf '0x%x' $$(($$expect))); \
+	    rm -f $(BUILD)/drafts/sel/$*.0x*.ldr; \
+	    cp $@ $(BUILD)/drafts/sel/$*.$$hex.ldr; \
+	    printf 'sel (legacy) %s built expect=%s\n' "$*" "$$hex"
