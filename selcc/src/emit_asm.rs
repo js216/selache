@@ -601,8 +601,11 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
     }
     // Plant any synthetic interior labels requested by file-scope
     // `&array[N]` / `&obj.field` initialisers. Each request adds an
-    // alias symbol at the named word offset of the target entry; the
+    // alias symbol at the named offset of the target entry; the
     // emitter resolves multiple symbols on the same word via `.SET`.
+    // Word-aligned interior labels (`byte_in_word == 0`) own a slot via
+    // `.VAR`; sub-word interior labels are aliased to the containing
+    // word's slot owner via `.SET label = owner + byte_in_word;`.
     for req in &interior_reqs {
         if let Some(entry) = data_entries
             .iter_mut()
@@ -618,9 +621,13 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
             if !entry
                 .interior
                 .iter()
-                .any(|(o, l)| *o == req.word_offset && l == &req.label)
+                .any(|(o, b, l)| *o == req.word_offset && *b == req.byte_in_word && l == &req.label)
             {
-                entry.interior.push((req.word_offset, req.label.clone()));
+                entry.interior.push((
+                    req.word_offset,
+                    req.byte_in_word,
+                    req.label.clone(),
+                ));
             }
         }
     }
@@ -1171,7 +1178,12 @@ fn pack_narrow_entries(
 /// produced for `&array[N]` / `&obj.field` file-scope initialisers so
 /// the linker can resolve those addresses by symbol rather than by an
 /// (unsupported) `sym + offset` relocation.
-fn emit_var_bytes(out: &mut String, sym: &str, values: &[InitWord], interior: &[(usize, String)]) {
+fn emit_var_bytes(
+    out: &mut String,
+    sym: &str,
+    values: &[InitWord],
+    interior: &[(usize, u32, String)],
+) {
     if values.is_empty() {
         let _ = writeln!(out, ".VAR {sym};");
         return;
@@ -1181,35 +1193,79 @@ fn emit_var_bytes(out: &mut String, sym: &str, values: &[InitWord], interior: &[
     // one symbol must point at the same byte offset — the primary name
     // and one or more synthetic interior labels — use `.SET` to make
     // the extras alias the slot symbol that actually lays the bytes.
+    // Sub-word interior labels (`byte_in_word > 0`) cannot own a slot
+    // either; they alias the containing word's slot owner via
+    // `.SET label = owner + byte_in_word;` so the symbol-table value
+    // lands on the requested byte boundary instead of the word
+    // boundary.
     let render_word = |out: &mut String, idx: usize, val: &InitWord| {
-        // Pick which name owns the .VAR slot for this word. Word 0 is
-        // owned by the entry's primary name; later words use the first
-        // requested interior label (if any), with any further labels
-        // aliased via `.SET`.
-        let labels_here: Vec<&String> = interior
+        // Word-aligned interior labels (byte_in_word == 0) own or alias
+        // the slot for word `idx`; sub-word interior labels in this
+        // word are aliased to whichever symbol ends up owning the slot.
+        let word_aligned: Vec<&String> = interior
             .iter()
-            .filter(|(i, _)| *i == idx)
-            .map(|(_, l)| l)
+            .filter(|(i, b, _)| *i == idx && *b == 0)
+            .map(|(_, _, l)| l)
+            .collect();
+        let sub_word: Vec<(u32, &String)> = interior
+            .iter()
+            .filter(|(i, b, _)| *i == idx && *b != 0)
+            .map(|(_, b, l)| (*b, l))
             .collect();
         let v = match val {
             InitWord::Num(n) => format!("0x{n:08X}"),
             InitWord::Sym(name) => with_abi_suffix(name),
         };
+        // Determine the slot owner so we can alias the sub-word labels
+        // against it. For word 0 the owner is the entry's primary
+        // symbol; for later words it's the first word-aligned interior
+        // label if any (the slot has no other primary name), or a bare
+        // `.VAR = ...;` slot with no owning symbol.
+        let owner: Option<String>;
         if idx == 0 {
-            // Slot owner is `sym`. Alias every interior label to it.
-            for label in &labels_here {
+            owner = Some(sym.to_string());
+            // Alias every word-aligned interior label to the primary.
+            for label in &word_aligned {
                 let _ = writeln!(out, ".SET {} = {};", with_abi_suffix(label), sym);
             }
             let _ = writeln!(out, ".VAR {sym} = {v};");
-        } else if let Some(first) = labels_here.first() {
-            // Slot owner is the first interior label; the rest alias it.
-            let owner = with_abi_suffix(first);
-            let _ = writeln!(out, ".VAR {owner} = {v};");
-            for label in &labels_here[1..] {
-                let _ = writeln!(out, ".SET {} = {};", with_abi_suffix(label), owner);
+        } else if let Some(first) = word_aligned.first() {
+            // Slot owner is the first word-aligned interior label; the
+            // rest alias it.
+            let owner_sym = with_abi_suffix(first);
+            let _ = writeln!(out, ".VAR {owner_sym} = {v};");
+            for label in &word_aligned[1..] {
+                let _ = writeln!(out, ".SET {} = {};", with_abi_suffix(label), owner_sym);
             }
+            owner = Some(owner_sym);
+        } else if !sub_word.is_empty() {
+            // No word-aligned interior label, but at least one sub-word
+            // label needs an owner to alias against. Synthesize an
+            // anonymous slot owner so the linker has a symbol-table
+            // entry whose value is the byte address of this word.
+            let synthetic = format!(".__subword_owner_{idx}");
+            let owner_sym = with_abi_suffix(&synthetic);
+            let _ = writeln!(out, ".VAR {owner_sym} = {v};");
+            owner = Some(owner_sym);
         } else {
             let _ = writeln!(out, ".VAR = {v};");
+            owner = None;
+        }
+        // Emit `.SET` aliases for every sub-word interior label in this
+        // word. Each one resolves to `owner + byte_in_word`; selas's
+        // `parse_sym_plus_offset` accepts the addend form and adds the
+        // numeric offset to the owner's symbol-table value at link
+        // time.
+        if let Some(owner_sym) = owner.as_deref() {
+            for (b, label) in &sub_word {
+                let _ = writeln!(
+                    out,
+                    ".SET {} = {} + {};",
+                    with_abi_suffix(label),
+                    owner_sym,
+                    b
+                );
+            }
         }
     };
     for (i, v) in values.iter().enumerate() {
@@ -1220,14 +1276,16 @@ fn emit_var_bytes(out: &mut String, sym: &str, values: &[InitWord], interior: &[
 struct DataEntry {
     name: String,
     values: Vec<InitWord>,
-    /// Synthetic labels that must point at interior words of this
+    /// Synthetic labels that must point at interior offsets of this
     /// entry. Produced by `&array[N]` / `&obj.field` initialisers in
     /// other globals: each request adds an extra symbol at the named
-    /// word index so the link-time `R_SHARC_ADDR32` against that
-    /// symbol resolves to the right byte offset. selas does not
-    /// support `sym + offset` relocations, so the offset is folded
-    /// into the symbol itself instead.
-    interior: Vec<(usize, String)>,
+    /// `(word_index, byte_in_word)` pair so the link-time
+    /// `R_SHARC_ADDR32` against that symbol resolves to the right byte
+    /// offset. selas does not support `sym + offset` relocations on
+    /// `.VAR` initialisers, so word-aligned interior labels become
+    /// `.VAR` slot owners and sub-word interior labels become
+    /// `.SET label = <slot_owner> + <byte_in_word>;` aliases.
+    interior: Vec<(usize, u32, String)>,
     /// True for `static`-storage-class file-scope objects (C99
     /// 6.2.2p3 internal linkage). Such symbols are emitted without
     /// `.GLOBAL` so they stay private to the translation unit.
@@ -2008,15 +2066,25 @@ fn build_init_words(
     }
 }
 
-/// A request to plant a synthetic label on an interior word of a
+/// A request to plant a synthetic label on an interior offset of a
 /// named data entry. Used to rewrite `&array[N]` / `&obj.field`
 /// file-scope initialisers as a bare symbol reference: selas does not
-/// support `sym + offset` relocations, so the offset is materialised
-/// into the symbol set instead, and the linker resolves the synthetic
-/// label to the correct interior byte offset.
+/// support `sym + offset` relocations on `.VAR` initialisers, so the
+/// offset is materialised into the symbol set instead, and the linker
+/// resolves the synthetic label to the correct interior byte offset.
+///
+/// `byte_in_word` is `0` for word-aligned interior addresses (the slot
+/// is owned by the synthetic label via a `.VAR` directive) and `1..=3`
+/// for sub-word interior addresses (the synthetic label is emitted as a
+/// `.SET label = <slot_owner> + <byte_in_word>;` alias against the
+/// owner of the containing word).  The sub-word path is what unblocks
+/// pointer initialisers like `static char *p = (char *)&g_root + 1;`,
+/// where the resulting address is not on a 32-bit word boundary and
+/// therefore cannot be planted as a fresh `.VAR` slot.
 struct InteriorReq {
     target_global: String,
     word_offset: usize,
+    byte_in_word: u32,
     label: String,
 }
 
@@ -2162,23 +2230,32 @@ fn eval_init_word(
             // offset) pair, then plant a synthetic interior label on
             // the root entry so the link-time R_SHARC_ADDR32 against
             // that label resolves to the correct interior byte offset.
+            //
+            // Word-aligned offsets get a `.VAR` slot whose owner is the
+            // synthetic label.  Sub-word offsets cannot be a fresh
+            // `.VAR` slot (every `.VAR` advances the data cursor by
+            // four bytes) and so are emitted as a `.SET label =
+            // <slot_owner> + <byte_in_word>;` alias instead, leaning on
+            // selas's `parse_sym_plus_offset` to fold the constant
+            // addend into the alias's symbol-table value.  Either way
+            // the linker sees a single `R_SHARC_ADDR32` against the
+            // synthetic label and patches the byte address into the
+            // pointer slot.
             Expr::Index(_, _) | Expr::Member(_, _) => {
                 if let Some((root, byte_off, _leaf_ty)) =
                     resolve_static_lvalue(inner, tctx, ictx.global_types)
                 {
-                    if byte_off % 4 != 0 {
-                        return Err(Error::Compile {
-                            msg: format!(
-                                "address-of `{root}` interior at byte {byte_off} is not \
-                             word-aligned; sub-word interior addresses in file-scope \
-                             initializers are not supported"
-                            ),
-                        });
-                    }
-                    let label = format!(".addrof_{}_{}", root, byte_off / 4);
+                    let word_offset = (byte_off / 4) as usize;
+                    let byte_in_word = byte_off % 4;
+                    let label = if byte_in_word == 0 {
+                        format!(".addrof_{}_{}", root, word_offset)
+                    } else {
+                        format!(".addrof_{}_b{}", root, byte_off)
+                    };
                     ictx.interior_reqs.push(InteriorReq {
                         target_global: root,
-                        word_offset: (byte_off / 4) as usize,
+                        word_offset,
+                        byte_in_word,
                         label: label.clone(),
                     });
                     return Ok(InitWord::Sym(label));
@@ -4561,6 +4638,45 @@ mod tests {
         assert!(
             m.text.contains("0x78563412"),
             "expected packed first word 0x78563412 in asm, got:\n{}",
+            m.text
+        );
+    }
+
+    /// Sub-word interior addresses in file-scope initializers.  When a
+    /// pointer global takes the address of a non-word-aligned interior
+    /// of another global (e.g. `static char *p = &g_root[1];` for a
+    /// char array), the resulting byte offset is not a multiple of
+    /// four and so cannot own a fresh `.VAR` slot in the data
+    /// section. Selcc emits the synthetic interior label as a
+    /// `.SET label = <slot_owner> + <byte_in_word>;` alias instead,
+    /// leaning on selas's `parse_sym_plus_offset` to fold the constant
+    /// addend into the alias's symbol-table value at link time. Before
+    /// this fix selcc rejected the address with a hard error and
+    /// continued compilation, leaving the pointer slot uninitialised;
+    /// csmith drafts that took the address of a sub-word interior of a
+    /// packed aggregate therefore produced wrong code.
+    #[test]
+    fn sub_word_interior_addr_global_init() {
+        let src = "static signed char g_root[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+                   static signed char *g_interior = &g_root[1];
+                   int main(void) { return *g_interior; }";
+        let unit = parse::parse(src).expect("parse sub-word interior addr global");
+        let m = emit_module(&unit, 8)
+            .expect("emit_module Ok for sub-word interior addr global init");
+        // The pointer slot resolves to the synthetic alias label that
+        // points one byte past `g_root.` (byte 1 of word 0). The
+        // emitted asm must contain the `.SET ... = <owner> + 1;`
+        // directive selas's resolver folds into the symbol-table
+        // value, and the pointer global must reference the alias by
+        // name so the linker patches the byte address into the slot.
+        assert!(
+            m.text.contains(".SET .addrof_g_root_b1. = g_root. + 1;"),
+            "expected `.SET .addrof_g_root_b1. = g_root. + 1;` alias in asm, got:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains(".VAR g_interior. = .addrof_g_root_b1.;"),
+            "expected pointer slot to reference the sub-word alias, got:\n{}",
             m.text
         );
     }

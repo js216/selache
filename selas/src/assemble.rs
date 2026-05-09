@@ -896,8 +896,14 @@ fn process_directives(line: &ParsedLine, state: &mut DirectiveState<'_>) {
 ///
 /// For each alias, look up the value: if it names an existing symbol in any
 /// section, copy that symbol's address; if it parses as a numeric literal,
-/// use that value directly.  Chains (A = B, B = C) are resolved transitively
-/// up to a bounded depth.
+/// use that value directly.  The value may also be `<sym> + <num>` or
+/// `<sym> - <num>`, in which case the alias resolves to the named symbol's
+/// address adjusted by the constant offset.  This sub-word interior form
+/// is what selcc emits when a file-scope initialiser takes the address of
+/// a byte / short interior of a packed aggregate, e.g. `(char *)&g + 1`,
+/// where the resulting address is not word-aligned and therefore cannot
+/// be planted as a fresh `.VAR` slot owner.  Chains (A = B, B = C) are
+/// resolved transitively up to a bounded depth.
 fn resolve_aliases(sections: &mut [(String, SectionData)], aliases: &HashMap<String, String>) {
     for (alias_name, raw_value) in aliases {
         // Resolve transitive chains: follow symbol names through the alias map.
@@ -909,17 +915,24 @@ fn resolve_aliases(sections: &mut [(String, SectionData)], aliases: &HashMap<Str
             }
         }
 
-        // Try to find the resolved value as an existing symbol.
+        // Decompose the (possibly sym +/- num) form into a base name and a
+        // signed addend. Bare names produce addend 0; bare numerics get
+        // an empty base and the parsed value as the addend so the numeric
+        // literal arm below picks them up unchanged.
+        let (base, addend) = parse_sym_plus_offset(&value);
+
+        // Try to find the resolved base as an existing symbol.
         let mut found = false;
         for sec in sections.iter_mut() {
             let hit = sec
                 .1
                 .symbols
                 .iter()
-                .find(|(n, _)| *n == value)
+                .find(|(n, _)| *n == base)
                 .map(|(_, off)| *off);
             if let Some(addr) = hit {
-                sec.1.symbols.push((alias_name.clone(), addr));
+                let final_addr = (addr as i64 + addend) as u32;
+                sec.1.symbols.push((alias_name.clone(), final_addr));
                 found = true;
                 break;
             }
@@ -934,6 +947,45 @@ fn resolve_aliases(sections: &mut [(String, SectionData)], aliases: &HashMap<Str
             }
         }
     }
+}
+
+/// Decompose a `.SET` value into a `(base_symbol, signed_addend)` pair.
+/// Recognises `name`, `name + N`, `name - N`, where `N` is a numeric
+/// literal (decimal, hex, or octal). A bare `name` yields `(name, 0)`.
+/// A value that does not parse as `sym +/- num` returns `(value, 0)` so
+/// the existing numeric-literal fall-back can still apply.
+fn parse_sym_plus_offset(value: &str) -> (String, i64) {
+    let v = value.trim();
+    // Walk the string and find the rightmost top-level `+` or `-` that
+    // is not part of an identifier.  Identifiers may contain `_` and
+    // `.`; numeric literals start with a digit. The simplest reliable
+    // split is to scan from the right looking for `+` or `-` preceded
+    // by whitespace or an identifier character so a leading `-` on the
+    // numeric literal does not get mistaken for a connector. Any
+    // failure to parse falls back to the bare-name path.
+    let bytes = v.as_bytes();
+    for i in (1..bytes.len()).rev() {
+        let c = bytes[i];
+        if c != b'+' && c != b'-' {
+            continue;
+        }
+        let lhs = v[..i].trim();
+        let rhs = v[i + 1..].trim();
+        if lhs.is_empty() || rhs.is_empty() {
+            continue;
+        }
+        // Numeric literal on the right and identifier on the left:
+        // accept and return the sym +/- num decomposition.
+        if let Some(num) = parse_u32_literal(rhs) {
+            let signed = if c == b'-' {
+                -(num as i64)
+            } else {
+                num as i64
+            };
+            return (lhs.to_string(), signed);
+        }
+    }
+    (v.to_string(), 0)
 }
 
 /// Serialize the accumulated sections and symbols to ELF .doj bytes.
@@ -1502,6 +1554,91 @@ mod tests {
         );
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_type, 1);
+    }
+
+    /// `.SET name = sym + N` resolves to the named symbol's address with
+    /// the constant offset added.  selcc uses this form when a file-scope
+    /// pointer initialiser takes the address of a sub-word interior of a
+    /// packed aggregate (e.g. `(char *)&g_root + 1`); the resulting
+    /// address is not word-aligned and therefore cannot be planted as a
+    /// fresh `.VAR` slot owner, so the offset is folded into a `.SET`
+    /// alias whose value is `slot_owner + remainder_bytes`.
+    #[test]
+    fn test_parse_sym_plus_offset() {
+        assert_eq!(
+            super::parse_sym_plus_offset("g."),
+            ("g.".to_string(), 0)
+        );
+        assert_eq!(
+            super::parse_sym_plus_offset("g. + 3"),
+            ("g.".to_string(), 3)
+        );
+        assert_eq!(
+            super::parse_sym_plus_offset("g. - 1"),
+            ("g.".to_string(), -1)
+        );
+        assert_eq!(
+            super::parse_sym_plus_offset("g. + 0x10"),
+            ("g.".to_string(), 0x10)
+        );
+        // Bare numeric falls back to (literal, 0) so the numeric arm of
+        // resolve_aliases handles it unchanged.
+        assert_eq!(
+            super::parse_sym_plus_offset("0x1000"),
+            ("0x1000".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn test_set_sym_plus_offset() {
+        // The alias `_byte1` resolves to `_root + 1`, so the assembled
+        // ELF carries an `_byte1` symbol one byte past `_root`.
+        let data = assemble_str(
+            ".SECTION/DOUBLE32 seg_dmda;\n\
+             .GLOBAL _root;\n\
+             .GLOBAL _byte1;\n\
+             .VAR _root = 0x11111111;\n\
+             .SET _byte1 = _root + 1;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        assert_eq!(hdr.e_type, 1);
+        // Walk the symbol table and verify both symbols exist with the
+        // expected delta. The .doj is local-symbols-then-globals so the
+        // walk covers everything emitted by `emit_elf_bytes`.
+        let sections: Vec<_> = (0..hdr.e_shnum as usize)
+            .map(|i| {
+                let off = hdr.e_shoff as usize + i * hdr.e_shentsize as usize;
+                selelf::elf::parse_section_header(&data[off..], hdr.ei_data)
+            })
+            .collect();
+        let symtab = sections
+            .iter()
+            .find(|s| s.sh_type == selelf::elf::SHT_SYMTAB)
+            .expect("missing symtab");
+        let strtab = &sections[symtab.sh_link as usize];
+        let strtab_data =
+            &data[strtab.sh_offset as usize..(strtab.sh_offset + strtab.sh_size) as usize];
+        let nsyms = symtab.sh_size as usize / symtab.sh_entsize as usize;
+        let mut root_val: Option<u32> = None;
+        let mut byte1_val: Option<u32> = None;
+        for i in 0..nsyms {
+            let off = symtab.sh_offset as usize + i * symtab.sh_entsize as usize;
+            let sym = selelf::elf::parse_symbol(&data[off..], hdr.ei_data);
+            let name = selelf::elf::read_string_at(strtab_data, sym.st_name);
+            if name == "_root" {
+                root_val = Some(sym.st_value);
+            } else if name == "_byte1" {
+                byte1_val = Some(sym.st_value);
+            }
+        }
+        let root_val = root_val.expect("_root symbol present");
+        let byte1_val = byte1_val.expect("_byte1 symbol present");
+        assert_eq!(
+            byte1_val,
+            root_val + 1,
+            "alias `_byte1` should be one byte past `_root` (got root={root_val:#x}, byte1={byte1_val:#x})",
+        );
     }
 
     #[test]
