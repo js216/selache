@@ -790,22 +790,16 @@ safe_convert_func_float_to_int32_t(float sf1 )
 static long __undefined;
 
 
-#pragma pack(push)
-#pragma pack(1)
 struct S0 {
    int32_t  f0;
 };
-#pragma pack(pop)
 
-#pragma pack(push)
-#pragma pack(1)
 struct S1 {
    signed f0 : 25;
    unsigned f1 : 23;
    signed f2 : 13;
    signed f3 : 28;
 };
-#pragma pack(pop)
 
 struct S2 {
    signed f0 : 7;
