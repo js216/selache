@@ -796,15 +796,12 @@ struct S0 {
    unsigned f2 : 2;
 };
 
-#pragma pack(push)
-#pragma pack(1)
 struct S1 {
    signed f0 : 6;
    unsigned f1 : 5;
    const unsigned f2 : 15;
    signed f3 : 8;
 };
-#pragma pack(pop)
 
 struct S2 {
    uint32_t  f0;
