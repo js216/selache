@@ -214,6 +214,7 @@ $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f5ea6f7.0x7d4b5790.ldr: $(BUILD
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_62d5d342.0x925dcb2e.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_62d5d342.ldr
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_95d42820.0x298c9077.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_95d42820.ldr
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_c19baf86.0x83abec32.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_c19baf86.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_794f577f.0xecdcfe45.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_794f577f.ldr
 $(BUILD)/drafts/sel/cctest_csmith_0f4d7af9.0xaa43ccd0.ldr: $(BUILD)/drafts/sel/cctest_csmith_0f4d7af9.ldr
 $(BUILD)/drafts/sel/cctest_csmith_38842b22.0x88090718.ldr: $(BUILD)/drafts/sel/cctest_csmith_38842b22.ldr
 $(BUILD)/drafts/sel/cctest_csmith_84e46ffd.0xae67a84.ldr: $(BUILD)/drafts/sel/cctest_csmith_84e46ffd.ldr
@@ -252,6 +253,30 @@ $(DRAFT_DIR_X)/cctest_csmith_41369044.ldr: draft_cases/cctest_csmith_41369044.c 
 	    rm -f $(DRAFT_DIR_X)/cctest_csmith_41369044.0x*.ldr; \
 	    cp $@ $(DRAFT_DIR_X)/cctest_csmith_41369044.$$hex.ldr; \
 	    printf '$(subst x,ces,cx) (draft) %s built expect=%s\n' "cctest_csmith_41369044" "$$hex"
+
+# Per-draft embedded-target loader override for cctest_csmith_794f577f:
+# the draft boots successfully (the bench logs `wrote 69632/69632`)
+# but the device produces no UART output within 2.5s under the default
+# loader fill-block compression. Running the same .dxe
+# through $(ELFLOADER) with `-NoFillBlock` (which directs the loader
+# not to compress runs of zero/repeated bytes into FILL block records)
+# produces a bench-passing .ldr (`got ecdcfe45`). The loader-side
+# override is reference-preserving by construction: the .dxe binary is
+# unchanged, only the on-the-wire encoding of zero/repeated regions
+# changes. The expected hex still comes from awk EXPECT_AWK on the
+# original draft source.
+$(DRAFT_DIR_X)/cctest_csmith_794f577f.ldr: draft_cases/cctest_csmith_794f577f.c $(CCES_ARCHIVE) | $(DRAFT_DIR_X)
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(DRAFT_DIR_X)/cctest_csmith_794f577f.doj $< > /dev/null
+	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \
+	    -T $(LIBSEL_LDF) -o $(DRAFT_DIR_X)/cctest_csmith_794f577f.dxe \
+	    $(DRAFT_DIR_X)/cctest_csmith_794f577f.doj $(CCES_ARCHIVE) > /dev/null
+	$(Q)$(ELFLOADER) -proc ADSP-21569 -b UARTHOST -f ASCII -Width 8 -NoFillBlock \
+	    $(DRAFT_DIR_X)/cctest_csmith_794f577f.dxe -o $@ > /dev/null
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    hex=$$(printf '0x%x' $$(($$expect))); \
+	    rm -f $(DRAFT_DIR_X)/cctest_csmith_794f577f.0x*.ldr; \
+	    cp $@ $(DRAFT_DIR_X)/cctest_csmith_794f577f.$$hex.ldr; \
+	    printf '$(subst x,ces,cx) (draft) %s built expect=%s\n' "cctest_csmith_794f577f" "$$hex"
 
 $(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cces
 	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/cces/$*.doj $< > /dev/null
