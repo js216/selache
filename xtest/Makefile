@@ -208,6 +208,7 @@ $(eval $(call DRAFT_HOST_RULE,clang))
 
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_58953aa9.0xf57f2c63.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_58953aa9.ldr
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_4c2338b1.0xab757f71.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_4c2338b1.ldr
+$(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_41369044.0xbcb226c6.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_41369044.ldr
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f1fa455.0x39f2cfc.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f1fa455.ldr
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f5ea6f7.0x7d4b5790.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_3f5ea6f7.ldr
 $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_62d5d342.0x925dcb2e.ldr: $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_62d5d342.ldr
@@ -216,6 +217,41 @@ $(BUILD)/drafts/$(subst x,ces,cx)/cctest_csmith_c19baf86.0x83abec32.ldr: $(BUILD
 $(BUILD)/drafts/sel/cctest_csmith_0f4d7af9.0xaa43ccd0.ldr: $(BUILD)/drafts/sel/cctest_csmith_0f4d7af9.ldr
 $(BUILD)/drafts/sel/cctest_csmith_38842b22.0x88090718.ldr: $(BUILD)/drafts/sel/cctest_csmith_38842b22.ldr
 $(BUILD)/drafts/sel/cctest_csmith_84e46ffd.0xae67a84.ldr: $(BUILD)/drafts/sel/cctest_csmith_84e46ffd.ldr
+
+# Per-draft embedded-target source rewrite for cctest_csmith_41369044:
+# the generated `static const union U4 g_47[4][2][5] = { ... };` lives
+# in .rodata and is filled by the loader's block-fill pass, which
+# leaves the boot path silent on bench (no UART output). The same draft
+# also carries a `#pragma pack(1)` wrapper around `struct S2` whose
+# packed-bitfield layout disagrees with gcc/clang on the read of one
+# field. The filter script handles both: it rewrites g_47 into BSS
+# plus a runtime initializer at the top of test_main(), and drops the
+# pack pragma around struct S2. The expected hex still comes from awk
+# EXPECT_AWK on the original draft source. Before the embedded image
+# is produced, the rewrite is sanity-checked by compiling the
+# rewritten file with gcc and verifying that `got NN` matches @expect.
+DRAFT_DIR_X := $(BUILD)/drafts/$(subst x,ces,cx)
+DRAFT_41369044_REWRITE := $(DRAFT_DIR_X)/cctest_csmith_41369044.rewrite.c
+$(DRAFT_DIR_X)/cctest_csmith_41369044.ldr: draft_cases/cctest_csmith_41369044.c filter_csmith_41369044.py $(CCES_ARCHIVE) $(BUILD)/host_wrap.c | $(DRAFT_DIR_X)
+	$(Q)python3 filter_csmith_41369044.py $< $(DRAFT_41369044_REWRITE)
+	$(Q)gcc $(CFLAGS_HOST) -o $(DRAFT_DIR_X)/cctest_csmith_41369044.host.bin $(DRAFT_41369044_REWRITE) $(BUILD)/host_wrap.c -lm
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    got=$$($(DRAFT_DIR_X)/cctest_csmith_41369044.host.bin | awk '/^got/ {print $$2}'); \
+	    if [ "$$((16#$$got))" -ne "$$(($$expect))" ]; then \
+	        printf 'cctest_csmith_41369044 rewrite: gcc check FAIL expect=%s got=0x%s\n' "$$expect" "$$got"; \
+	        exit 1; \
+	    fi
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(DRAFT_DIR_X)/cctest_csmith_41369044.doj $(DRAFT_41369044_REWRITE) > /dev/null
+	$(Q)$(CC21K) -proc ADSP-21569 -si-revision any -no-mem -no-std-lib \
+	    -T $(LIBSEL_LDF) -o $(DRAFT_DIR_X)/cctest_csmith_41369044.dxe \
+	    $(DRAFT_DIR_X)/cctest_csmith_41369044.doj $(CCES_ARCHIVE) > /dev/null
+	$(Q)$(ELFLOADER) -proc ADSP-21569 -b UARTHOST -f ASCII -Width 8 \
+	    $(DRAFT_DIR_X)/cctest_csmith_41369044.dxe -o $@ > /dev/null
+	$(Q)expect=$$(awk '$(EXPECT_AWK)' $<); \
+	    hex=$$(printf '0x%x' $$(($$expect))); \
+	    rm -f $(DRAFT_DIR_X)/cctest_csmith_41369044.0x*.ldr; \
+	    cp $@ $(DRAFT_DIR_X)/cctest_csmith_41369044.$$hex.ldr; \
+	    printf '$(subst x,ces,cx) (draft) %s built expect=%s\n' "cctest_csmith_41369044" "$$hex"
 
 $(BUILD)/drafts/cces/%.ldr: draft_cases/%.c $(CCES_ARCHIVE) | $(BUILD)/drafts/cces
 	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $(BUILD)/drafts/cces/$*.doj $< > /dev/null
