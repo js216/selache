@@ -577,6 +577,13 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
         let in_pm_nw = (0x0008_0000..0x000C_0000).contains(&shdr.sh_addr);
         let in_pm_sw = (0x0010_0000..0x0019_0000).contains(&shdr.sh_addr);
         let in_bw_l1 = (0x0024_0000..0x0032_0000).contains(&shdr.sh_addr);
+        // L2 SRAM is byte-addressed and the LDF declares mem_l2 with
+        // WIDTH(8); without this range check, sections placed in L2 by
+        // a `BW`-typed output region (e.g. `l2_data`) would fall through
+        // to the NormalWord case below and get a 40→32 bit conversion
+        // applied to data that was already 32-bit-per-word in the ELF,
+        // corrupting initialised L2 data at boot.
+        let in_bw_l2 = (0x2000_0000..0x2010_0000).contains(&shdr.sh_addr);
         let width = if is_code {
             if shdr.sh_addralign <= 1
                 || name == "ivt"
@@ -590,7 +597,7 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
             } else {
                 WordWidth::IvCode
             }
-        } else if section_is_byte_width(name) || in_bw_l1 {
+        } else if section_is_byte_width(name) || in_bw_l1 || in_bw_l2 {
             WordWidth::ByteWidth
         } else {
             WordWidth::NormalWord
@@ -1386,6 +1393,41 @@ mod tests {
         // byte_count field should reflect original unpadded size.
         let byte_count = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         assert_eq!(byte_count, 13);
+    }
+
+    /// Build a test ELF with a non-executable SHT_PROGBITS section
+    /// (i.e. a data section). Mirrors `make_test_elf` but clears the
+    /// SHF_EXECINSTR bit so width classification follows the data path.
+    fn make_test_data_elf(addr: u32, data: &[u8]) -> Vec<u8> {
+        let mut elf = make_test_elf(addr, data);
+        let shdr_off = u32::from_le_bytes(elf[32..36].try_into().unwrap()) as usize;
+        let shdr_size = 40usize;
+        let sh1 = shdr_off + shdr_size;
+        elf[sh1 + 8..sh1 + 12].copy_from_slice(&SHF_ALLOC.to_le_bytes());
+        elf
+    }
+
+    #[test]
+    fn test_l2_data_section_uses_byte_width() {
+        // Regression: data sections placed in L2 SRAM (0x20000000+) by
+        // a `BW`-typed LDF region must be treated as ByteWidth, not
+        // NormalWord. NormalWord triggers the 40→32 bit conversion in
+        // convert_nw_to_boot, which corrupts already-32-bit-per-word
+        // ELF data and produces .ldr images whose initialised L2 data
+        // does not match the source.
+        let payload: Vec<u8> = (0..16).collect();
+        let elf = make_test_data_elf(0x2000_0000, &payload);
+        let opts = default_opts();
+        let blocks = generate_boot_stream(&elf, &opts).unwrap();
+        let data_block = blocks
+            .iter()
+            .find(|b| b.target_addr == 0x2000_0000)
+            .expect("L2 data block must appear at the section's sh_addr");
+        assert_eq!(
+            data_block.data, payload,
+            "L2 data must pass through unchanged; a 40→32 conversion \
+             would reorder/drop bytes"
+        );
     }
 
     #[test]
