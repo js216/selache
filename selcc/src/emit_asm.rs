@@ -3360,6 +3360,13 @@ fn count_local_slots(instrs: &[MachInstr]) -> u32 {
                     deepest = off;
                 }
             }
+            Instruction::UregMemAccess {
+                pm, i_reg, offset, ..
+            } if i_reg == target::FRAME_PTR && !pm => {
+                if offset < deepest {
+                    deepest = offset;
+                }
+            }
             Instruction::Modify { i_reg, value, .. }
                 if i_reg == target::FRAME_PTR && value < deepest =>
             {
