@@ -34,8 +34,8 @@ DRAFT_DIR = SCRIPT_DIR / "draft_cases"
 
 # Aggregate-heavy csmith options. These drafts intentionally exercise
 # C99 aggregate features that have exposed selcc/seld implementation
-# gaps: structs, unions, bitfields, nested aggregate initializers,
-# aggregate copies, and aggregate return/argument lowering.
+# gaps: structs, unions, nested aggregate initializers, aggregate
+# copies, and aggregate return/argument lowering.
 # Safe-math wrappers stay ON (default): csmith emits
 # safe_div/safe_mod/safe_lshift/etc. calls which short-circuit
 # divisor-zero, INT_MIN/-1 division, and shift-count >= width into
@@ -46,11 +46,17 @@ DRAFT_DIR = SCRIPT_DIR / "draft_cases"
 # volatile-store paths the embedded driver model has not been
 # verified against. Pointers stay off so failures in this lane point at
 # C99 aggregate support rather than pointer aliasing.
+# --no-bitfields: packed-bitfield allocation-unit choice is
+# implementation-defined in C, and selcc (SHARC) and host gcc/clang
+# (x86 SysV) resolve it differently -- the cross-toolchain CRC
+# comparison treats those legitimate differences as failures, so we
+# stay out of that subset entirely.
 CSMITH_FLAGS = [
     "--concise",
     "--no-pointers",
     "--no-volatiles",
     "--no-volatile-pointers",
+    "--no-bitfields",
     "--max-funcs", "4",
     "--max-block-size", "3",
     "--max-block-depth", "3",
@@ -68,6 +74,7 @@ CSMITH_HARD_FLAGS = [
     "--concise",
     "--no-volatiles",
     "--no-volatile-pointers",
+    "--no-bitfields",
     "--max-funcs", "8",
     "--max-block-size", "5",
     "--max-block-depth", "4",
@@ -300,16 +307,19 @@ def has_c99_aggregate_stress(src):
     """Return True when a csmith source actually hits this lane's focus.
 
     Csmith flags make aggregate generation likely, not guaranteed.  The
-    draft corpus should not merely allow structs/unions/bitfields; each
-    accepted case should contain them so the mission keeps pressure on
-    the C99 aggregate implementation paths.
+    draft corpus should not merely allow structs/unions; each accepted
+    case should contain them so the mission keeps pressure on the C99
+    aggregate implementation paths. Bitfields are excluded from the
+    lane (--no-bitfields above) because their packing is
+    implementation-defined and selcc/host divergence is not a bug we
+    can fix.
     """
     has_struct = re.search(r"\bstruct\s+S\d+\s*\{", src) is not None
     has_union = re.search(r"\bunion\s+U\d+\s*\{", src) is not None
     has_bitfield = re.search(r":\s*\d+\s*;", src) is not None
     has_nested_init = re.search(r"=\s*\{\s*\{", src) is not None
     has_aggregate_access = re.search(r"\.(?:f\d+)\b", src) is not None
-    return (has_struct and has_union and has_bitfield and
+    return (has_struct and has_union and not has_bitfield and
             has_nested_init and has_aggregate_access)
 
 

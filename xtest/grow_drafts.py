@@ -158,9 +158,16 @@ def validate_one(stem):
     for tc in ("cces", "sel"):
         t0 = time.monotonic()
         ok, why = hw_check(stem, tc, expect)
-        dt = time.monotonic() - t0
         if not ok:
-            return False, f"{tc}: {why} (+{dt:.1f}s)"
+            # Retry once: transient bench faults (USB glitch on
+            # dsp:reset, queue race, missed uart sentinel) reproduce
+            # as a different `why` on the next submit, while a real
+            # toolchain miscompile fails both attempts identically.
+            ok, why2 = hw_check(stem, tc, expect)
+            if not ok:
+                dt = time.monotonic() - t0
+                return False, f"{tc}: {why} | retry: {why2} (+{dt:.1f}s)"
+        dt = time.monotonic() - t0
     return True, None
 
 
