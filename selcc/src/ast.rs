@@ -189,6 +189,15 @@ pub struct TranslationUnit {
     pub globals: Vec<GlobalDecl>,
     pub typedefs: Vec<(String, Type)>,
     pub struct_defs: Vec<(String, Vec<(String, Type)>)>,
+    /// Per-tag `#pragma pack(N)` member-alignment caps captured by the
+    /// parser when the struct/union was declared (`0` for natural
+    /// alignment).  Parallel to `struct_defs`: each tag with a packed
+    /// override has an entry here.  Layout queries
+    /// (`struct_field_layout_ctx` etc.) consult this through
+    /// `TypeCtx::resolve_tag_pack` so tag-only references to packed
+    /// types still see the cap.  See `selcc/src/types.rs`
+    /// `Type::Struct::packed` for the full rationale.
+    pub struct_packs: Vec<(String, u8)>,
     pub enum_constants: Vec<(String, i64)>,
     /// Names of functions known to be variadic (declared with `...`),
     /// including forward declarations of externs. Looked up by call

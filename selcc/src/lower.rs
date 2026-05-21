@@ -64,6 +64,10 @@ struct LowerCtx {
     goto_labels: HashMap<String, Label>,
     /// Struct definitions from the translation unit.
     struct_defs: Vec<(String, Vec<(String, Type)>)>,
+    /// Per-tag `#pragma pack(N)` member-alignment caps from the
+    /// translation unit. Storage sizing still uses the existing natural
+    /// window policy, but member offsets must honor the cap.
+    struct_packs: Vec<(String, u8)>,
     /// Enum constants: name -> value.
     enum_constants: HashMap<String, i64>,
     /// Typedef mappings: name -> resolved type.
@@ -72,6 +76,9 @@ struct LowerCtx {
     func_name: String,
     /// Static local variables: (mangled_name, type, init_expr).
     static_locals: Vec<StaticLocal>,
+    /// Synthetic static templates used to initialize large automatic
+    /// aggregates with constant brace lists.
+    const_template_counter: u32,
     /// Stack of saved stack pointer vregs for VLA block scopes. Each entry
     /// corresponds to a scope level that contains at least one VLA; the vreg
     /// holds the saved stack pointer to restore on scope exit.
@@ -175,10 +182,12 @@ impl LowerCtx {
             loop_stack: Vec::new(),
             goto_labels: HashMap::new(),
             struct_defs: Vec::new(),
+            struct_packs: Vec::new(),
             enum_constants: HashMap::new(),
             typedefs: Vec::new(),
             func_name: String::new(),
             static_locals: Vec::new(),
+            const_template_counter: 0,
             vla_save_stack: Vec::new(),
             vla_depth: 0,
             label_vla_depth: HashMap::new(),
@@ -307,6 +316,12 @@ impl LowerCtx {
         self.frame_size += 1;
         offset
     }
+
+    fn next_const_template_symbol(&mut self) -> String {
+        let idx = self.const_template_counter;
+        self.const_template_counter += 1;
+        format!("__selcc_init_{}_{}", self.func_name, idx)
+    }
 }
 
 impl TypeCtx for LowerCtx {
@@ -325,6 +340,14 @@ impl TypeCtx for LowerCtx {
             }
         }
         None
+    }
+
+    fn resolve_tag_pack(&self, name: &str) -> u8 {
+        self.struct_packs
+            .iter()
+            .rev()
+            .find_map(|(tag, pack)| (tag == name).then_some(*pack))
+            .unwrap_or(0)
     }
 }
 
@@ -666,6 +689,7 @@ pub fn lower_function(
         known_functions: &known,
         function_return_types: &returns,
         function_param_types: &params,
+        struct_packs: &[],
     };
     lower_function_with_known(
         func,
@@ -686,6 +710,7 @@ pub struct LowerUnitCtx<'a> {
     pub known_functions: &'a HashSet<String>,
     pub function_return_types: &'a HashMap<String, Type>,
     pub function_param_types: &'a HashMap<String, Vec<Type>>,
+    pub struct_packs: &'a [(String, u8)],
 }
 
 /// Lower a single function with a set of known function names for
@@ -702,6 +727,7 @@ pub fn lower_function_with_known(
     let mut ctx = LowerCtx::new();
     ctx.globals = global_types.clone();
     ctx.struct_defs = struct_defs.to_vec();
+    ctx.struct_packs = unit.struct_packs.to_vec();
     ctx.typedefs = typedefs.to_vec();
     ctx.func_name = func.name.clone();
     ctx.return_type = func.return_type.clone();
@@ -1334,7 +1360,24 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     // Non-aggregate scalar initializers (including the
                     // degenerate `int x = {5};` form) keep the single
                     // slot at `slot_offset`.
-                    lower_aggregate_init(ctx, items, ty, slot_offset, num_words, is_aggregate)?;
+                    if let Some(template_ty) =
+                        const_aggregate_template_type(ctx, items, ty, num_words, is_aggregate)
+                    {
+                        let symbol = ctx.next_const_template_symbol();
+                        ctx.globals.insert(symbol.clone(), template_ty.clone());
+                        ctx.static_locals.push(StaticLocal {
+                            symbol: symbol.clone(),
+                            ty: template_ty,
+                            init: Some(Expr::InitList(items.clone())),
+                        });
+                        let src_addr = ctx.alloc_vreg_ptr();
+                        ctx.emit(IrOp::LoadGlobal(src_addr, symbol));
+                        let dst_addr = ctx.alloc_vreg_ptr();
+                        ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+                        emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                    } else {
+                        lower_aggregate_init(ctx, items, ty, slot_offset, num_words, is_aggregate)?;
+                    }
                 } else if let Some(init_expr) = init {
                     // `char s[] = "hello"` and friends: expand the
                     // string literal into per-element stores.  Without
@@ -1368,7 +1411,7 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                                 let val = ctx.alloc_vreg();
                                 ctx.emit(IrOp::LoadImm(val, w as i64));
                                 let elem_slot = slot_offset + num_words - 1 - (wi as u32);
-                                ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+                                emit_frame_slot_store_indirect(ctx, elem_slot, val);
                             }
                             return Ok(());
                         }
@@ -1602,13 +1645,15 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
 fn struct_field_offset(
     fields: &[(String, Type)],
     field_name: &str,
+    pack: u8,
     ctx: &LowerCtx,
 ) -> Option<(u32, Type)> {
     // Direct lookup in top-level fields — delegate layout to the
     // ctx-aware routine so tag-only aggregate fields are sized
     // correctly rather than collapsing to 0 bytes.
     if fields.iter().any(|(n, _)| n == field_name) {
-        let (byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, field_name, ctx)?;
+        let (byte_off, _, _) =
+            crate::types::struct_field_layout_ctx(fields, field_name, pack, ctx)?;
         let ty = fields
             .iter()
             .find(|(n, _)| n == field_name)
@@ -1620,7 +1665,7 @@ fn struct_field_offset(
         if !name.starts_with("__anon") {
             continue;
         }
-        let (anon_byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, name, ctx)?;
+        let (anon_byte_off, _, _) = crate::types::struct_field_layout_ctx(fields, name, pack, ctx)?;
         match ty {
             Type::Union { fields: inner, .. } => {
                 if let Some(ft) = union_field_type(inner, field_name, ctx) {
@@ -1628,7 +1673,7 @@ fn struct_field_offset(
                 }
             }
             Type::Struct { fields: inner, .. } => {
-                if let Some((nested_off, ft)) = struct_field_offset(inner, field_name, ctx) {
+                if let Some((nested_off, ft)) = struct_field_offset(inner, field_name, pack, ctx) {
                     return Some((anon_byte_off + nested_off, ft));
                 }
             }
@@ -1659,7 +1704,7 @@ fn union_field_type(fields: &[(String, Type)], field_name: &str, ctx: &LowerCtx)
                 }
             }
             Type::Struct { fields: inner, .. } => {
-                if let Some((_, t)) = struct_field_offset(inner, field_name, ctx) {
+                if let Some((_, t)) = struct_field_offset(inner, field_name, 0, ctx) {
                     return Some(t);
                 }
             }
@@ -1717,10 +1762,12 @@ fn collect_type_defs(ty: &Type, defs: &mut Vec<(String, Vec<(String, Type)>)>) {
         Type::Struct {
             name: Some(n),
             fields,
+            ..
         }
         | Type::Union {
             name: Some(n),
             fields,
+            ..
         } => {
             if !fields.is_empty() {
                 // Replace any existing entry (local shadows file-scope).
@@ -1854,6 +1901,26 @@ fn ty_is_long_long(ty: &Type, ctx: &LowerCtx) -> bool {
     resolve_type(ty, ctx).is_long_long()
 }
 
+fn aggregate_pack(ty: &Type, ctx: &LowerCtx) -> u8 {
+    match ty.unqualified() {
+        Type::Struct { name, packed, .. } | Type::Union { name, packed, .. } => {
+            if *packed != 0 {
+                *packed
+            } else {
+                name.as_deref()
+                    .map(|n| ctx.resolve_tag_pack(n))
+                    .unwrap_or(0)
+            }
+        }
+        Type::Typedef(name) => ctx
+            .resolve_typedef(name)
+            .map(|target| aggregate_pack(target, ctx))
+            .unwrap_or(0),
+        Type::Const(inner) | Type::Volatile(inner) => aggregate_pack(inner, ctx),
+        _ => 0,
+    }
+}
+
 /// Typedef-aware version of `Type::is_unsigned`.  `<stdint.h>` typedef
 /// names like `uint8_t` and `uint32_t` arrive at the lowering layer as
 /// `Type::Typedef("uint8_t")` and the bare `is_unsigned` method does
@@ -1864,6 +1931,208 @@ fn ty_is_long_long(ty: &Type, ctx: &LowerCtx) -> bool {
 /// store-side counterpart of cast-truncation).
 fn ty_is_unsigned(ty: &Type, ctx: &LowerCtx) -> bool {
     resolve_type(ty, ctx).is_unsigned()
+}
+
+const CONST_AGGREGATE_TEMPLATE_MIN_WORDS: u32 = 8;
+const CONST_AGGREGATE_TEMPLATE_PLAIN_MIN_WORDS: u32 = 16;
+
+fn const_aggregate_template_type(
+    ctx: &LowerCtx,
+    items: &[Expr],
+    ty: &Type,
+    num_words: u32,
+    is_aggregate: bool,
+) -> Option<Type> {
+    if !is_aggregate || num_words < CONST_AGGREGATE_TEMPLATE_MIN_WORDS {
+        return None;
+    }
+    if !items.iter().all(expr_is_static_template_safe) {
+        return None;
+    }
+
+    let template_ty = materialize_static_template_type(ty, ctx);
+    if !type_has_template_worthy_struct(&template_ty, ctx)
+        && num_words < CONST_AGGREGATE_TEMPLATE_PLAIN_MIN_WORDS
+    {
+        return None;
+    }
+    let template_words = crate::types::size_words_ctx(&template_ty, ctx).max(1);
+    (template_words == num_words).then_some(template_ty)
+}
+
+fn expr_is_static_template_safe(expr: &Expr) -> bool {
+    match expr {
+        Expr::IntLit(..) | Expr::FloatLit(_) | Expr::CharLit(_) | Expr::StringLit(_) => true,
+        Expr::Unary { operand, .. } | Expr::Cast(_, operand) => {
+            expr_is_static_template_safe(operand)
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Comma(lhs, rhs) => {
+            expr_is_static_template_safe(lhs) && expr_is_static_template_safe(rhs)
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_is_static_template_safe(cond)
+                && expr_is_static_template_safe(then_expr)
+                && expr_is_static_template_safe(else_expr)
+        }
+        Expr::Sizeof(arg) => matches!(arg.as_ref(), SizeofArg::Type(_)),
+        Expr::InitList(items) => items.iter().all(expr_is_static_template_safe),
+        Expr::DesignatedInit { value, .. } => expr_is_static_template_safe(value),
+        Expr::ArrayDesignator { index, value } => {
+            expr_is_static_template_safe(index) && expr_is_static_template_safe(value)
+        }
+        Expr::ImagLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::Ident(_)
+        | Expr::Call { .. }
+        | Expr::CallIndirect { .. }
+        | Expr::Assign { .. }
+        | Expr::Deref(_)
+        | Expr::AddrOf(_)
+        | Expr::Index(..)
+        | Expr::Member(..)
+        | Expr::Arrow(..)
+        | Expr::PreInc(_)
+        | Expr::PreDec(_)
+        | Expr::PostInc(_)
+        | Expr::PostDec(_)
+        | Expr::CompoundAssign { .. }
+        | Expr::RealPart(_)
+        | Expr::ImagPart(_) => false,
+    }
+}
+
+fn materialize_static_template_type(ty: &Type, ctx: &LowerCtx) -> Type {
+    match ty {
+        Type::Unsigned(inner) => {
+            Type::Unsigned(Box::new(materialize_static_template_type(inner, ctx)))
+        }
+        Type::Pointer(inner) => {
+            Type::Pointer(Box::new(materialize_static_template_type(inner, ctx)))
+        }
+        Type::Array(elem, n) => {
+            Type::Array(Box::new(materialize_static_template_type(elem, ctx)), *n)
+        }
+        Type::Struct {
+            name,
+            fields,
+            packed,
+        } => {
+            let resolved_fields = if fields.is_empty() {
+                name.as_deref()
+                    .and_then(|n| ctx.resolve_tag(n))
+                    .map(|f| f.to_vec())
+                    .unwrap_or_default()
+            } else {
+                fields.clone()
+            };
+            let resolved_pack = if *packed != 0 {
+                *packed
+            } else {
+                name.as_deref()
+                    .map(|n| ctx.resolve_tag_pack(n))
+                    .unwrap_or(0)
+            };
+            Type::Struct {
+                name: name.clone(),
+                fields: resolved_fields
+                    .into_iter()
+                    .map(|(n, t)| (n, materialize_static_template_type(&t, ctx)))
+                    .collect(),
+                packed: resolved_pack,
+            }
+        }
+        Type::Union {
+            name,
+            fields,
+            packed,
+        } => {
+            let resolved_fields = if fields.is_empty() {
+                name.as_deref()
+                    .and_then(|n| ctx.resolve_tag(n))
+                    .map(|f| f.to_vec())
+                    .unwrap_or_default()
+            } else {
+                fields.clone()
+            };
+            let resolved_pack = if *packed != 0 {
+                *packed
+            } else {
+                name.as_deref()
+                    .map(|n| ctx.resolve_tag_pack(n))
+                    .unwrap_or(0)
+            };
+            Type::Union {
+                name: name.clone(),
+                fields: resolved_fields
+                    .into_iter()
+                    .map(|(n, t)| (n, materialize_static_template_type(&t, ctx)))
+                    .collect(),
+                packed: resolved_pack,
+            }
+        }
+        Type::Typedef(name) => ctx
+            .resolve_typedef(name)
+            .map(|target| materialize_static_template_type(target, ctx))
+            .unwrap_or_else(|| ty.clone()),
+        Type::Volatile(inner) => {
+            Type::Volatile(Box::new(materialize_static_template_type(inner, ctx)))
+        }
+        Type::Const(inner) => Type::Const(Box::new(materialize_static_template_type(inner, ctx))),
+        Type::Bitfield(inner, width) => Type::Bitfield(
+            Box::new(materialize_static_template_type(inner, ctx)),
+            *width,
+        ),
+        Type::FunctionPtr {
+            return_type,
+            params,
+        } => Type::FunctionPtr {
+            return_type: Box::new(materialize_static_template_type(return_type, ctx)),
+            params: params
+                .iter()
+                .map(|p| materialize_static_template_type(p, ctx))
+                .collect(),
+        },
+        Type::Complex(inner) => {
+            Type::Complex(Box::new(materialize_static_template_type(inner, ctx)))
+        }
+        Type::Imaginary(inner) => {
+            Type::Imaginary(Box::new(materialize_static_template_type(inner, ctx)))
+        }
+        Type::Void
+        | Type::Char
+        | Type::Short
+        | Type::Int
+        | Type::Long
+        | Type::LongLong
+        | Type::ULongLong
+        | Type::Float
+        | Type::Double
+        | Type::Enum { .. }
+        | Type::Bool => ty.clone(),
+    }
+}
+
+fn type_has_template_worthy_struct(ty: &Type, ctx: &LowerCtx) -> bool {
+    match ty.unqualified() {
+        Type::Array(elem, _) => type_has_template_worthy_struct(elem, ctx),
+        Type::Struct { fields, packed, .. } => {
+            *packed != 0
+                || fields.iter().any(|(_, fty)| {
+                    matches!(
+                        fty.unqualified(),
+                        Type::Array(..)
+                            | Type::Struct { .. }
+                            | Type::Union { .. }
+                            | Type::Bitfield(..)
+                    ) || crate::types::size_bytes_ctx(fty, ctx) < 4
+                })
+        }
+        _ => false,
+    }
 }
 
 /// Is `ty` a 1-byte scalar (char / signed char / unsigned char / bool)?
@@ -2040,28 +2309,15 @@ fn emit_byte_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
 /// that is short-aligned, i.e. addr & 1 == 0, but may not be
 /// word-aligned).  Produces a 32-bit vreg holding the half-word at
 /// `addr`, zero-extended by default and sign-extended if `signed`.
-/// Sequence:
-///   word_addr = addr & ~3
-///   word      = load(word_addr, 0)
-///   shift     = (addr & 2) << 3
-///   half      = (word >> shift) & 0xFFFF
-///   if signed: sign-extend from bit 15
-/// Short arrays are byte-packed with two halves per 32-bit word, so
-/// `arr[1]` lands at byte offset 2 of word 0.  A plain DM read at byte
-/// address 2 spans bytes 2..5 — it would happen to load the right half
-/// when both halves of word 0 hold the same value, but in general the
-/// software shift-and-mask is what makes `short *` indexing satisfy
-/// C99 6.3.2.3 p7 once `short[N]` is byte-packed.
+///
+/// Odd packed-struct fields must use `emit_unaligned_short_load` instead.
 fn emit_short_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
-    // word_addr = addr & ~3
     let mask_word = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(mask_word, !3i64 & 0xFFFFFFFF));
     let word_addr = ctx.alloc_vreg();
     ctx.emit(IrOp::BitAnd(word_addr, addr, mask_word));
-    // word = load(word_addr, 0)
     let word = ctx.alloc_vreg();
     ctx.emit(IrOp::Load(word, word_addr, 0));
-    // half_off_bits = (addr & 2) << 3   -- 0 for low half, 16 for high half
     let two = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(two, 2));
     let two_bit = ctx.alloc_vreg();
@@ -2070,12 +2326,10 @@ fn emit_short_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
     ctx.emit(IrOp::LoadImm(three, 3));
     let shift = ctx.alloc_vreg();
     ctx.emit(IrOp::Shl(shift, two_bit, three));
-    // shifted = word >> shift  (logical, since we mask to 16 bits next)
     let neg_shift = ctx.alloc_vreg();
     ctx.emit(IrOp::Neg(neg_shift, shift));
     let shifted = ctx.alloc_vreg();
     ctx.emit(IrOp::Lshr(shifted, word, neg_shift));
-    // half = shifted & 0xFFFF
     let mask_ffff = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(mask_ffff, 0xFFFF));
     let half = ctx.alloc_vreg();
@@ -2097,9 +2351,9 @@ fn emit_short_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
 
 /// Emit a short-granularity store: write the low 16 bits of `val` to
 /// the half-word at `addr` (byte address, short-aligned), preserving
-/// the other half-word of the containing 32-bit word.  Read-modify-
-/// write sequence parallels `emit_byte_store` but with a 16-bit mask
-/// shifted by 0 or 16 depending on `(addr & 2)`.
+/// the other half-word of the containing 32-bit word.
+///
+/// Odd packed-struct fields must use `emit_unaligned_short_store` instead.
 fn emit_short_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
     let mask_word = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(mask_word, !3i64 & 0xFFFFFFFF));
@@ -2115,27 +2369,184 @@ fn emit_short_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
     ctx.emit(IrOp::LoadImm(three, 3));
     let shift = ctx.alloc_vreg();
     ctx.emit(IrOp::Shl(shift, two_bit, three));
-    // half_mask = 0xFFFF << shift
     let ffff = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(ffff, 0xFFFF));
     let half_mask = ctx.alloc_vreg();
     ctx.emit(IrOp::Shl(half_mask, ffff, shift));
-    // clear_mask = ~half_mask
     let clear_mask = ctx.alloc_vreg();
     ctx.emit(IrOp::BitNot(clear_mask, half_mask));
     let cleared = ctx.alloc_vreg();
     ctx.emit(IrOp::BitAnd(cleared, old, clear_mask));
-    // placed = (val & 0xFFFF) << shift
     let ffff2 = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(ffff2, 0xFFFF));
     let val_half = ctx.alloc_vreg();
     ctx.emit(IrOp::BitAnd(val_half, val, ffff2));
     let placed = ctx.alloc_vreg();
     ctx.emit(IrOp::Shl(placed, val_half, shift));
-    // new_word = cleared | placed
     let new_word = ctx.alloc_vreg();
     ctx.emit(IrOp::BitOr(new_word, cleared, placed));
     ctx.emit(IrOp::Store(new_word, word_addr, 0));
+}
+
+fn emit_unaligned_short_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
+    let low = emit_byte_load(ctx, addr, false);
+    let high_addr = add_byte_offset(ctx, addr, 1);
+    let high = emit_byte_load(ctx, high_addr, false);
+    let shift8 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shift8, 8));
+    let high_shifted = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(high_shifted, high, shift8));
+    let half = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitOr(half, low, high_shifted));
+    if !signed {
+        return half;
+    }
+    let shl16 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl16, 16));
+    let up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(up, half, shl16));
+    let neg16 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(neg16, -16));
+    let down = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(down, up, neg16));
+    down
+}
+
+fn emit_unaligned_short_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
+    emit_byte_store(ctx, addr, val);
+
+    let neg8 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(neg8, -8));
+    let high = ctx.alloc_vreg();
+    ctx.emit(IrOp::Lshr(high, val, neg8));
+    let high_addr = add_byte_offset(ctx, addr, 1);
+    emit_byte_store(ctx, high_addr, high);
+}
+
+fn emit_unaligned_word_load(ctx: &mut LowerCtx, addr: VReg) -> VReg {
+    let mut acc: Option<VReg> = None;
+    for byte_idx in 0..4 {
+        let byte_addr = add_byte_offset(ctx, addr, byte_idx);
+        let byte = emit_byte_load(ctx, byte_addr, false);
+        let placed = if byte_idx == 0 {
+            byte
+        } else {
+            let shift = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(shift, (byte_idx * 8) as i64));
+            let shifted = ctx.alloc_vreg();
+            ctx.emit(IrOp::Shl(shifted, byte, shift));
+            shifted
+        };
+        acc = Some(match acc {
+            Some(prev) => {
+                let merged = ctx.alloc_vreg();
+                ctx.emit(IrOp::BitOr(merged, prev, placed));
+                merged
+            }
+            None => placed,
+        });
+    }
+    acc.expect("word load always emits four byte loads")
+}
+
+fn emit_unaligned_word_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
+    for byte_idx in 0..4 {
+        let byte = if byte_idx == 0 {
+            val
+        } else {
+            let neg_shift = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(neg_shift, -((byte_idx * 8) as i64)));
+            let shifted = ctx.alloc_vreg();
+            ctx.emit(IrOp::Lshr(shifted, val, neg_shift));
+            shifted
+        };
+        let byte_addr = add_byte_offset(ctx, addr, byte_idx);
+        emit_byte_store(ctx, byte_addr, byte);
+    }
+}
+
+fn emit_unaligned_longlong_load(ctx: &mut LowerCtx, addr: VReg) -> VReg {
+    let lo = emit_unaligned_word_load(ctx, addr);
+    let hi_addr = add_byte_offset(ctx, addr, 4);
+    let hi = emit_unaligned_word_load(ctx, hi_addr);
+    let pair = ctx.alloc_vreg_pair();
+    ctx.emit(IrOp::Copy(pair, lo));
+    ctx.emit(IrOp::Copy(pair + 1, hi));
+    pair
+}
+
+fn emit_unaligned_longlong_store(ctx: &mut LowerCtx, addr: VReg, val: VReg) {
+    emit_unaligned_word_store(ctx, addr, val);
+    let hi_addr = add_byte_offset(ctx, addr, 4);
+    emit_unaligned_word_store(ctx, hi_addr, val + 1);
+}
+
+fn lvalue_static_byte_offset(expr: &Expr, ctx: &LowerCtx) -> Option<u32> {
+    match expr {
+        Expr::Ident(_) | Expr::Deref(_) => Some(0),
+        Expr::Member(base, field) => {
+            let base_ty = expr_type(base, ctx)?;
+            let base_off = lvalue_static_byte_offset(base, ctx).unwrap_or(0);
+            if is_union_type(&base_ty) {
+                return Some(base_off);
+            }
+            let fields = resolve_struct_fields(&base_ty, ctx)?;
+            let (off, _) = struct_field_offset(fields, field, aggregate_pack(&base_ty, ctx), ctx)?;
+            Some(base_off + off)
+        }
+        Expr::Arrow(base, field) => {
+            let base_ty = expr_type(base, ctx)?;
+            let base_ty = resolve_type_chain(&base_ty, ctx);
+            let pointee = strip_to_pointer(&base_ty)?;
+            if is_union_type(pointee) {
+                return Some(0);
+            }
+            let fields = resolve_struct_fields(pointee, ctx)?;
+            let (off, _) = struct_field_offset(fields, field, aggregate_pack(pointee, ctx), ctx)?;
+            Some(off)
+        }
+        _ => None,
+    }
+}
+
+fn lvalue_needs_unaligned_short_access(expr: &Expr, ctx: &LowerCtx) -> bool {
+    lvalue_static_byte_offset(expr, ctx).is_some_and(|off| off % 2 != 0)
+}
+
+fn lvalue_indexed_base_can_shift_alignment(expr: &Expr, ctx: &LowerCtx, align: u32) -> bool {
+    match expr {
+        Expr::Index(base, _) => {
+            let indexed_shift = expr_type(base, ctx)
+                .and_then(|t| pointee_type_resolved(&t, ctx).cloned())
+                .is_some_and(|elem| {
+                    !crate::types::size_bytes_ctx(&elem, ctx)
+                        .max(1)
+                        .is_multiple_of(align)
+                });
+            indexed_shift || lvalue_indexed_base_can_shift_alignment(base, ctx, align)
+        }
+        Expr::Member(base, _) => lvalue_indexed_base_can_shift_alignment(base, ctx, align),
+        Expr::Arrow(base, _) => lvalue_indexed_base_can_shift_alignment(base, ctx, align),
+        _ => false,
+    }
+}
+
+fn lvalue_short_access_may_be_unaligned(expr: &Expr, ctx: &LowerCtx) -> bool {
+    matches!(expr, Expr::Deref(_) | Expr::Index(..) | Expr::Arrow(..))
+        || lvalue_needs_unaligned_short_access(expr, ctx)
+        || lvalue_indexed_base_can_shift_alignment(expr, ctx, 2)
+}
+
+fn lvalue_needs_unaligned_word_access(expr: &Expr, ctx: &LowerCtx) -> bool {
+    lvalue_static_byte_offset(expr, ctx).is_some_and(|off| off % 4 != 0)
+        || lvalue_indexed_base_can_shift_alignment(expr, ctx, 4)
+}
+
+fn is_plain_32bit_scalar(ty: &Type, ctx: &LowerCtx) -> bool {
+    !is_aggregate_type(ty, ctx)
+        && !ty.is_float()
+        && !ty_is_long_long(ty, ctx)
+        && crate::types::size_bytes_ctx(ty, ctx) == 4
 }
 
 /// Per-field bitfield layout info for a Member/Arrow lvalue.  When the
@@ -2179,7 +2590,8 @@ fn member_bitfield_info(expr: &Expr, ctx: &LowerCtx) -> Option<BitfieldInfo> {
         }
         return None;
     }
-    let (_, bit_off, bit_width) = crate::types::struct_field_layout_ctx(fields, field, ctx)?;
+    let (_, bit_off, bit_width) =
+        crate::types::struct_field_layout_ctx(fields, field, aggregate_pack(&struct_ty, ctx), ctx)?;
     let width = bit_width?;
     let bit_offset = bit_off?;
     // Recover the underlying integer signedness from the field's
@@ -2464,7 +2876,10 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
             }
             Some(ty.clone())
         }
-        Expr::Unary { operand, .. } => {
+        Expr::Unary { op, operand } => {
+            if *op == UnaryOp::LogNot {
+                return Some(Type::Int);
+            }
             // Apply integer promotion on the operand type.
             expr_type(operand, ctx).map(|t| t.integer_promoted())
         }
@@ -2480,6 +2895,8 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
                     | BinaryOp::Gt
                     | BinaryOp::Le
                     | BinaryOp::Ge
+                    | BinaryOp::LogAnd
+                    | BinaryOp::LogOr
             ) {
                 return Some(Type::Int);
             }
@@ -2528,7 +2945,8 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
             if is_union_type(&base_ty) {
                 union_field_type(fields, field, ctx)
             } else {
-                let (_, fty) = struct_field_offset(fields, field, ctx)?;
+                let (_, fty) =
+                    struct_field_offset(fields, field, aggregate_pack(&base_ty, ctx), ctx)?;
                 Some(fty)
             }
         }
@@ -2542,7 +2960,8 @@ fn expr_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
                 if is_union_type(pointee) {
                     union_field_type(fields, field, ctx)
                 } else {
-                    let (_, fty) = struct_field_offset(fields, field, ctx)?;
+                    let (_, fty) =
+                        struct_field_offset(fields, field, aggregate_pack(pointee, ctx), ctx)?;
                     Some(fty)
                 }
             } else {
@@ -2717,9 +3136,11 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let fields = resolve_struct_fields(&base_ty, ctx).ok_or_else(|| {
                     Error::NotImplemented(format!("member access on non-struct type: {base_ty:?}"))
                 })?;
-                let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
-                    Error::NotImplemented(format!("no field '{field}' in struct"))
-                })?;
+                let (off, _) =
+                    struct_field_offset(fields, field, aggregate_pack(&base_ty, ctx), ctx)
+                        .ok_or_else(|| {
+                            Error::NotImplemented(format!("no field '{field}' in struct"))
+                        })?;
                 off
             };
             let base_addr = lower_lvalue_addr(ctx, base)?;
@@ -2760,9 +3181,11 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         "arrow access on non-struct pointee: {pointee:?}"
                     ))
                 })?;
-                let (off, _) = struct_field_offset(fields, field, ctx).ok_or_else(|| {
-                    Error::NotImplemented(format!("no field '{field}' in struct"))
-                })?;
+                let (off, _) =
+                    struct_field_offset(fields, field, aggregate_pack(&pointee, ctx), ctx)
+                        .ok_or_else(|| {
+                            Error::NotImplemented(format!("no field '{field}' in struct"))
+                        })?;
                 off
             };
             let ptr = lower_expr(ctx, base)?;
@@ -3297,10 +3720,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let target_ty = expr_type(target, ctx);
             let is_struct = target_ty.as_ref().is_some_and(|t| is_struct_type(t, ctx));
             if is_struct {
-                let num_words = target_ty.as_ref().map_or(1, |t| type_size_words(t, ctx));
+                let byte_size = target_ty
+                    .as_ref()
+                    .map_or(4, |t| crate::types::size_bytes_ctx(t, ctx));
                 let src_addr = lower_struct_expr_addr(ctx, value)?;
                 let dst_addr = lower_lvalue_addr(ctx, target)?;
-                emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                emit_struct_copy_exact(ctx, dst_addr, src_addr, byte_size);
                 let result = ctx.alloc_vreg();
                 ctx.emit(IrOp::Load(result, dst_addr, 0));
                 return Ok(result);
@@ -3363,6 +3788,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         let ptr = lower_expr(ctx, inner)?;
                         ctx.emit(IrOp::Store64(val, ptr, 0));
                     }
+                    Expr::Member(..) | Expr::Arrow(..)
+                        if lvalue_needs_unaligned_word_access(target, ctx) =>
+                    {
+                        let addr = lower_lvalue_addr(ctx, target)?;
+                        emit_unaligned_longlong_store(ctx, addr, val);
+                    }
                     _ => {
                         let addr = lower_lvalue_addr(ctx, target)?;
                         ctx.emit(IrOp::Store64(val, addr, 0));
@@ -3403,7 +3834,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             return Ok(val);
                         }
                         if is_short_scalar(pt, ctx) {
-                            emit_short_store(ctx, ptr, val);
+                            emit_unaligned_short_store(ctx, ptr, val);
                             return Ok(val);
                         }
                     }
@@ -3430,7 +3861,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             return Ok(val);
                         }
                         if is_short_scalar(et, ctx) {
-                            emit_short_store(ctx, addr, val);
+                            emit_unaligned_short_store(ctx, addr, val);
                             return Ok(val);
                         }
                     }
@@ -3446,9 +3877,20 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                         .as_ref()
                         .is_some_and(|ty| is_short_scalar(ty, ctx))
                     {
-                        emit_short_store(ctx, addr, val);
+                        if lvalue_short_access_may_be_unaligned(target, ctx) {
+                            emit_unaligned_short_store(ctx, addr, val);
+                        } else {
+                            emit_short_store(ctx, addr, val);
+                        }
                     } else {
-                        ctx.emit(IrOp::Store(val, addr, 0));
+                        if target_ty.as_ref().is_some_and(|ty| {
+                            is_plain_32bit_scalar(ty, ctx)
+                                && lvalue_needs_unaligned_word_access(target, ctx)
+                        }) {
+                            emit_unaligned_word_store(ctx, addr, val);
+                        } else {
+                            ctx.emit(IrOp::Store(val, addr, 0));
+                        }
                     }
                 }
                 _ => {
@@ -3491,7 +3933,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     // pointee signedness so an `int16_t` load surfaces
                     // negative values correctly through the int-promote.
                     let signed = !resolve_type(pt, ctx).is_unsigned();
-                    return Ok(emit_short_load(ctx, ptr, signed));
+                    return Ok(emit_unaligned_short_load(ctx, ptr, signed));
                 }
             }
             // C99 6.3.2.1p3: when the pointee is itself an aggregate
@@ -3583,7 +4025,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     // signedness so a signed `int16_t` element promotes
                     // correctly.
                     let signed = !resolve_type(et, ctx).is_unsigned();
-                    return Ok(emit_short_load(ctx, addr, signed));
+                    return Ok(emit_unaligned_short_load(ctx, addr, signed));
                 }
             }
             // A long-long element occupies two memory words; emit a
@@ -3632,15 +4074,32 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     return Ok(emit_byte_load(ctx, addr, !ty_is_unsigned(mty, ctx)));
                 }
                 if is_short_scalar(mty, ctx) {
+                    if lvalue_short_access_may_be_unaligned(expr, ctx) {
+                        return Ok(emit_unaligned_short_load(
+                            ctx,
+                            addr,
+                            !ty_is_unsigned(mty, ctx),
+                        ));
+                    }
                     return Ok(emit_short_load(ctx, addr, !ty_is_unsigned(mty, ctx)));
                 }
             }
             // A long-long member spans two words; emit Load64.
             if let Some(ref mty) = member_ty {
                 if ty_is_long_long(mty, ctx) {
-                    let dst = ctx.alloc_vreg_pair();
-                    ctx.emit(IrOp::Load64(dst, addr, 0));
-                    return Ok(dst);
+                    if lvalue_needs_unaligned_word_access(expr, ctx) {
+                        return Ok(emit_unaligned_longlong_load(ctx, addr));
+                    } else {
+                        let dst = ctx.alloc_vreg_pair();
+                        ctx.emit(IrOp::Load64(dst, addr, 0));
+                        return Ok(dst);
+                    }
+                }
+            }
+            if let Some(ref mty) = member_ty {
+                if is_plain_32bit_scalar(mty, ctx) && lvalue_needs_unaligned_word_access(expr, ctx)
+                {
+                    return Ok(emit_unaligned_word_load(ctx, addr));
                 }
             }
             // A float-typed member (including reads through a union
@@ -4970,10 +5429,23 @@ fn lower_inc_dec_64(
         }
         Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
             let addr = lower_lvalue_addr(ctx, operand)?;
-            let old_val = ctx.alloc_vreg_pair();
-            ctx.emit(IrOp::Load64(old_val, addr, 0));
+            let old_val = if matches!(operand, Expr::Member(..) | Expr::Arrow(..))
+                && lvalue_needs_unaligned_word_access(operand, ctx)
+            {
+                emit_unaligned_longlong_load(ctx, addr)
+            } else {
+                let old_val = ctx.alloc_vreg_pair();
+                ctx.emit(IrOp::Load64(old_val, addr, 0));
+                old_val
+            };
             let new_val = apply(ctx, old_val)?;
-            ctx.emit(IrOp::Store64(new_val, addr, 0));
+            if matches!(operand, Expr::Member(..) | Expr::Arrow(..))
+                && lvalue_needs_unaligned_word_access(operand, ctx)
+            {
+                emit_unaligned_longlong_store(ctx, addr, new_val);
+            } else {
+                ctx.emit(IrOp::Store64(new_val, addr, 0));
+            }
             Ok(if is_pre { new_val } else { old_val })
         }
         _ => Err(Error::NotImplemented(
@@ -5095,7 +5567,15 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                 if is_byte_scalar(ty, ctx) {
                     emit_byte_load(ctx, addr, !ty_is_unsigned(ty, ctx))
                 } else if is_short_scalar(ty, ctx) {
-                    emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                    if lvalue_short_access_may_be_unaligned(operand, ctx) {
+                        emit_unaligned_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                    } else {
+                        emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                    }
+                } else if is_plain_32bit_scalar(ty, ctx)
+                    && lvalue_needs_unaligned_word_access(operand, ctx)
+                {
+                    emit_unaligned_word_load(ctx, addr)
                 } else {
                     let old_val = ctx.alloc_vreg();
                     ctx.emit(IrOp::Load(old_val, addr, 0));
@@ -5123,7 +5603,15 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                 if is_byte_scalar(ty, ctx) {
                     emit_byte_store(ctx, addr, new_val);
                 } else if is_short_scalar(ty, ctx) {
-                    emit_short_store(ctx, addr, new_val);
+                    if lvalue_short_access_may_be_unaligned(operand, ctx) {
+                        emit_unaligned_short_store(ctx, addr, new_val);
+                    } else {
+                        emit_short_store(ctx, addr, new_val);
+                    }
+                } else if is_plain_32bit_scalar(ty, ctx)
+                    && lvalue_needs_unaligned_word_access(operand, ctx)
+                {
+                    emit_unaligned_word_store(ctx, addr, new_val);
                 } else {
                     ctx.emit(IrOp::Store(new_val, addr, 0));
                 }
@@ -5404,7 +5892,15 @@ fn lower_compound_assign(
                 } else if is_byte_scalar(ty, ctx) {
                     emit_byte_load(ctx, addr, !ty_is_unsigned(ty, ctx))
                 } else if is_short_scalar(ty, ctx) {
-                    emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                    if lvalue_short_access_may_be_unaligned(target, ctx) {
+                        emit_unaligned_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                    } else {
+                        emit_short_load(ctx, addr, !ty_is_unsigned(ty, ctx))
+                    }
+                } else if is_plain_32bit_scalar(ty, ctx)
+                    && lvalue_needs_unaligned_word_access(target, ctx)
+                {
+                    emit_unaligned_word_load(ctx, addr)
                 } else if target_is_float {
                     let lhs = ctx.alloc_vreg_float();
                     ctx.emit(IrOp::Load(lhs, addr, 0));
@@ -5439,7 +5935,16 @@ fn lower_compound_assign(
                     return Ok(result);
                 }
                 if is_short_scalar(ty, ctx) {
-                    emit_short_store(ctx, addr, result);
+                    if lvalue_short_access_may_be_unaligned(target, ctx) {
+                        emit_unaligned_short_store(ctx, addr, result);
+                    } else {
+                        emit_short_store(ctx, addr, result);
+                    }
+                    return Ok(result);
+                }
+                if is_plain_32bit_scalar(ty, ctx) && lvalue_needs_unaligned_word_access(target, ctx)
+                {
+                    emit_unaligned_word_store(ctx, addr, result);
                     return Ok(result);
                 }
             }
@@ -5553,11 +6058,22 @@ fn lower_compound_assign_64(
         }
         _ => {
             let addr = lower_lvalue_addr(ctx, target)?;
-            let lhs = ctx.alloc_vreg_pair();
-            ctx.emit(IrOp::Load64(lhs, addr, 0));
+            let use_unaligned = matches!(target, Expr::Member(..) | Expr::Arrow(..))
+                && lvalue_needs_unaligned_word_access(target, ctx);
+            let lhs = if use_unaligned {
+                emit_unaligned_longlong_load(ctx, addr)
+            } else {
+                let lhs = ctx.alloc_vreg_pair();
+                ctx.emit(IrOp::Load64(lhs, addr, 0));
+                lhs
+            };
             let rhs = load_rhs(ctx)?;
             let result = emit_compound_op_64(ctx, op, lhs, rhs, is_unsigned)?;
-            ctx.emit(IrOp::Store64(result, addr, 0));
+            if use_unaligned {
+                emit_unaligned_longlong_store(ctx, addr, result);
+            } else {
+                ctx.emit(IrOp::Store64(result, addr, 0));
+            }
             Ok(result)
         }
     }
@@ -5598,11 +6114,12 @@ fn lower_aggregate_init(
     let zero = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(zero, 0));
     for w in 0..num_words {
-        ctx.emit(IrOp::Store(zero, 0, (slot_base + w) as i32));
+        emit_frame_slot_store_indirect(ctx, slot_base + w, zero);
     }
 
     // Resolve struct-field metadata once (used for `.field = v` designators).
     let resolved_ty = resolve_type(ty, ctx);
+    let resolved_pack = aggregate_pack(&resolved_ty, ctx);
     let struct_fields: Option<Vec<(String, Type)>> =
         resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
 
@@ -5627,6 +6144,16 @@ fn lower_aggregate_init(
                 return Ok(());
             }
         }
+        if array_needs_byte_stride_flatten(&resolved_ty, ctx) {
+            let base_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(
+                base_addr,
+                (slot_base + num_words - 1) as i32,
+            ));
+            let init = Expr::InitList(items.to_vec());
+            lower_subword_aggregate_init(ctx, &init, ty, base_addr, 0)?;
+            return Ok(());
+        }
     }
 
     // Structs: use the actual field byte offsets so char / short
@@ -5638,6 +6165,7 @@ fn lower_aggregate_init(
             ctx,
             items,
             struct_fields.as_deref().unwrap(),
+            resolved_pack,
             slot_base,
             num_words,
         )?;
@@ -5689,7 +6217,9 @@ fn lower_aggregate_init(
             }
             Expr::DesignatedInit { field, value } => {
                 if let Some(fields) = struct_fields.as_deref() {
-                    if let Some((byte_off, _)) = struct_field_offset(fields, field, ctx) {
+                    if let Some((byte_off, _)) =
+                        struct_field_offset(fields, field, resolved_pack, ctx)
+                    {
                         let fidx = fields
                             .iter()
                             .position(|(n, _)| n == field)
@@ -5778,9 +6308,7 @@ fn lower_aggregate_init(
         // of the member zeroed -- exactly what csmith 4f88006f
         // exposed for `union U1 v = {{a, b, c}}` where the first
         // member is a `struct S0` with 64-bit fields.
-        if let (Some(inner_items), Type::Union { .. }) =
-            (nested_items, resolved_ty.unqualified())
-        {
+        if let (Some(inner_items), Type::Union { .. }) = (nested_items, resolved_ty.unqualified()) {
             if let Some(union_fields) = resolve_struct_fields(&resolved_ty, ctx) {
                 if let Some((_, fty)) = union_fields.first() {
                     let fty = fty.clone();
@@ -5790,6 +6318,38 @@ fn lower_aggregate_init(
                     // union's deepest slot.
                     let inner_base = slot_base + num_words - inner_words;
                     lower_aggregate_init(ctx, inner_items, &fty, inner_base, inner_words, true)?;
+                    cursor = next_cursor;
+                    i += consumed;
+                    continue;
+                }
+            }
+        }
+
+        // Scalar initializer for a union initializes the selected member
+        // (the first member for positional initializers) as if by assignment.
+        // This matters when the member is wider than the expression, e.g.
+        // `union U { long long x; } u = {-8L};`: `-8L` is a 32-bit long
+        // but must be sign-extended into the 64-bit union member.
+        if is_union_type(&resolved_ty) {
+            let target_field_ty = match item {
+                Expr::DesignatedInit { field, .. } => struct_fields
+                    .as_deref()
+                    .and_then(|fields| fields.iter().find(|(name, _)| name == field))
+                    .map(|(_, fty)| fty.clone()),
+                _ if cursor == 0 => struct_fields
+                    .as_deref()
+                    .and_then(|fields| fields.first())
+                    .map(|(_, fty)| fty.clone()),
+                _ => None,
+            };
+            if let Some(fty) = target_field_ty {
+                if !is_aggregate_type(&fty, ctx) {
+                    let val = lower_expr(ctx, inner_expr)?;
+                    let val = coerce_scalar_to_type(ctx, val, inner_expr, &fty);
+                    emit_frame_slot_store_indirect(ctx, elem_slot, val);
+                    if ctx.is_64bit_vreg(val) && word_off + 1 < num_words {
+                        emit_frame_slot_store_indirect(ctx, elem_slot - 1, val + 1);
+                    }
                     cursor = next_cursor;
                     i += consumed;
                     continue;
@@ -5866,7 +6426,7 @@ fn lower_aggregate_init(
         }
 
         let val = lower_expr(ctx, inner_expr)?;
-        ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+        emit_frame_slot_store_indirect(ctx, elem_slot, val);
         // For a 64-bit scalar init landing in a slot that has room for
         // a second word (e.g. `union U { long long a; ... } v = {x};`
         // where U is two words wide), store the high half too --
@@ -5875,12 +6435,28 @@ fn lower_aggregate_init(
         // truncated data.  Csmith case 5203b3a4 exposed this via
         // `union U1 l_184 = {0xFFA272E7E9FB3AEFLL};` inside func_10.
         if ctx.is_64bit_vreg(val) && word_off + 1 < num_words {
-            ctx.emit(IrOp::Store(val + 1, 0, (elem_slot - 1) as i32));
+            emit_frame_slot_store_indirect(ctx, elem_slot - 1, val + 1);
         }
         cursor = next_cursor;
         i += consumed;
     }
     Ok(())
+}
+
+/// Access one stack aggregate word through the same byte-addressable
+/// indirect path used by array/member lvalue reads. Direct frame-relative
+/// `Store/Load(..., base = 0, slot)` emits a different SHARC DM form and
+/// does not reliably alias Type-3 indirect accesses in `-char-size-8` mode.
+fn emit_frame_slot_store_indirect(ctx: &mut LowerCtx, slot: u32, val: VReg) {
+    let addr = ctx.alloc_vreg_ptr();
+    ctx.emit(IrOp::FrameAddr(addr, slot as i32));
+    ctx.emit(IrOp::Store(val, addr, 0));
+}
+
+fn emit_frame_slot_load_indirect(ctx: &mut LowerCtx, dst: VReg, slot: u32) {
+    let addr = ctx.alloc_vreg_ptr();
+    ctx.emit(IrOp::FrameAddr(addr, slot as i32));
+    ctx.emit(IrOp::Load(dst, addr, 0));
 }
 
 /// Count how many items from a flat init list belong to a single
@@ -5974,6 +6550,12 @@ fn narrow_array_leaf_bytes(ty: &Type, ctx: &LowerCtx) -> Option<u32> {
                 current = resolve_type(&elem, ctx);
             }
             other => {
+                if matches!(
+                    other.unqualified(),
+                    Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+                ) {
+                    return None;
+                }
                 let b = crate::types::size_bytes_ctx(&other, ctx);
                 if b == 1 || b == 2 {
                     return Some(b);
@@ -5981,6 +6563,21 @@ fn narrow_array_leaf_bytes(ty: &Type, ctx: &LowerCtx) -> Option<u32> {
                 return None;
             }
         }
+    }
+}
+
+fn array_needs_byte_stride_flatten(ty: &Type, ctx: &LowerCtx) -> bool {
+    match resolve_type(ty, ctx).unqualified().clone() {
+        Type::Array(elem, Some(_)) => {
+            let elem = resolve_type(&elem, ctx);
+            let elem_is_aggregate = matches!(
+                elem.unqualified(),
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+            );
+            (elem_is_aggregate && !crate::types::size_bytes_ctx(&elem, ctx).is_multiple_of(4))
+                || array_needs_byte_stride_flatten(&elem, ctx)
+        }
+        _ => false,
     }
 }
 
@@ -6124,7 +6721,7 @@ fn lower_narrow_array_init(
             });
         }
         if let Some(w) = word_acc {
-            ctx.emit(IrOp::Store(w, 0, slot as i32));
+            emit_frame_slot_store_indirect(ctx, slot, w);
         }
     }
     Ok(())
@@ -6154,6 +6751,159 @@ fn lower_short_array_init(
     lower_narrow_array_init(ctx, items, ty, slot_base, num_words, 2)
 }
 
+fn add_byte_offset(ctx: &mut LowerCtx, base_addr: VReg, byte_off: u32) -> VReg {
+    if byte_off == 0 {
+        return base_addr;
+    }
+    let off = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(off, byte_off as i64));
+    let addr = ctx.alloc_vreg();
+    ctx.emit(IrOp::Add(addr, base_addr, off));
+    addr
+}
+
+fn lower_subword_aggregate_init(
+    ctx: &mut LowerCtx,
+    init: &Expr,
+    ty: &Type,
+    base_addr: VReg,
+    byte_base: u32,
+) -> Result<()> {
+    let resolved = resolve_type(ty, ctx);
+    match resolved.unqualified() {
+        Type::Struct { .. } | Type::Union { .. } => {
+            let fields = resolve_struct_fields(&resolved, ctx)
+                .ok_or_else(|| Error::Compile {
+                    msg: "nested aggregate initializer references unresolved tag".to_string(),
+                })?
+                .to_vec();
+            let is_union = matches!(resolved.unqualified(), Type::Union { .. });
+            let items = match init {
+                Expr::InitList(items) => items.as_slice(),
+                Expr::Cast(_, boxed) => match boxed.as_ref() {
+                    Expr::InitList(items) => items.as_slice(),
+                    _ => {
+                        return Err(Error::Compile {
+                            msg: "nested aggregate initializer requires braces".to_string(),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(Error::Compile {
+                        msg: "nested aggregate initializer requires braces".to_string(),
+                    });
+                }
+            };
+            let mut cursor = 0usize;
+            for item in items {
+                let (fidx, inner) = match item {
+                    Expr::DesignatedInit { field, value } => {
+                        let idx = fields
+                            .iter()
+                            .position(|(n, _)| n == field)
+                            .unwrap_or(cursor);
+                        (idx, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                if fidx >= fields.len() {
+                    break;
+                }
+                let (fname, fty) = fields[fidx].clone();
+                let field_off = if is_union {
+                    0
+                } else {
+                    let pack = aggregate_pack(&resolved, ctx);
+                    crate::types::struct_field_layout_ctx(&fields, &fname, pack, ctx)
+                        .map(|(off, _, _)| off)
+                        .unwrap_or(0)
+                };
+                lower_subword_aggregate_init(ctx, inner, &fty, base_addr, byte_base + field_off)?;
+                cursor = fidx + 1;
+                if is_union {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        Type::Array(elem, Some(_)) => {
+            let items = match init {
+                Expr::InitList(items) => items.as_slice(),
+                _ => {
+                    return lower_subword_aggregate_init(ctx, init, elem, base_addr, byte_base);
+                }
+            };
+            let elem_bytes = crate::types::size_bytes_ctx(elem, ctx).max(1);
+            let mut cursor = 0u32;
+            for item in items {
+                let (idx, inner) = match item {
+                    Expr::ArrayDesignator { index, value } => {
+                        let i = match index.as_ref() {
+                            Expr::IntLit(v, _) => *v as u32,
+                            _ => cursor,
+                        };
+                        (i, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                lower_subword_aggregate_init(
+                    ctx,
+                    inner,
+                    elem,
+                    base_addr,
+                    byte_base + idx * elem_bytes,
+                )?;
+                cursor = idx + 1;
+            }
+            Ok(())
+        }
+        _ => {
+            let scalar = match init {
+                Expr::InitList(items) if items.len() == 1 => &items[0],
+                other => other,
+            };
+            let val = lower_expr(ctx, scalar)?;
+            let val = if ty_is_long_long(&resolved, ctx) && !ctx.is_64bit_vreg(val) {
+                widen_to_64(ctx, val, scalar)
+            } else {
+                val
+            };
+            let bytes = crate::types::size_bytes_ctx(&resolved, ctx);
+            let addr = add_byte_offset(ctx, base_addr, byte_base);
+            if bytes == 1 {
+                emit_byte_store(ctx, addr, val);
+            } else if bytes == 2 {
+                if !byte_base.is_multiple_of(2) {
+                    emit_unaligned_short_store(ctx, addr, val);
+                } else {
+                    emit_short_store(ctx, addr, val);
+                }
+            } else if ty_is_long_long(&resolved, ctx) {
+                if byte_base.is_multiple_of(4) {
+                    ctx.emit(IrOp::Store(val, addr, 0));
+                    let next = add_byte_offset(ctx, base_addr, byte_base + 4);
+                    ctx.emit(IrOp::Store(val + 1, next, 0));
+                } else {
+                    emit_unaligned_longlong_store(ctx, addr, val);
+                }
+            } else if bytes == 4 && !resolved.is_float() {
+                if byte_base.is_multiple_of(4) {
+                    ctx.emit(IrOp::Store(val, addr, 0));
+                } else {
+                    emit_unaligned_word_store(ctx, addr, val);
+                }
+            } else if byte_base.is_multiple_of(4) {
+                ctx.emit(IrOp::Store(val, addr, 0));
+            } else {
+                return Err(Error::NotImplemented(format!(
+                    "unaligned {bytes}-byte nested aggregate leaf initializer"
+                )));
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Initialise a struct from an aggregate init list using real field
 /// byte offsets.  Char / short fields at sub-word offsets share a
 /// 32-bit word with their neighbours via byte-extract stores so the
@@ -6165,6 +6915,7 @@ fn lower_struct_init(
     ctx: &mut LowerCtx,
     items: &[Expr],
     fields: &[(String, Type)],
+    pack: u8,
     slot_base: u32,
     num_words: u32,
 ) -> Result<()> {
@@ -6199,7 +6950,7 @@ fn lower_struct_init(
         }
         let (fname, fty) = &fields[fidx];
         let Some((byte_off, bit_off, bit_width)) =
-            crate::types::struct_field_layout_ctx(fields, fname, ctx)
+            crate::types::struct_field_layout_ctx(fields, fname, pack, ctx)
         else {
             cursor = fidx + 1;
             continue;
@@ -6237,6 +6988,16 @@ fn lower_struct_init(
             );
             if fty_is_aggregate {
                 let inner_words = crate::types::size_words_ctx(&resolved_fty, ctx).max(1);
+                if byte_off % 4 != 0 {
+                    let base_addr = ctx.alloc_vreg_ptr();
+                    ctx.emit(IrOp::FrameAddr(
+                        base_addr,
+                        (slot_base + num_words - 1) as i32,
+                    ));
+                    lower_subword_aggregate_init(ctx, inner, fty, base_addr, byte_off)?;
+                    cursor = fidx + 1;
+                    continue;
+                }
                 // Inner's deepest slot must coincide with the outer
                 // field's deepest slot (`elem_slot`).  With the inner
                 // call laying out word `i` at
@@ -6305,7 +7066,7 @@ fn lower_struct_init(
                 out
             };
             let old = ctx.alloc_vreg();
-            ctx.emit(IrOp::Load(old, 0, elem_slot as i32));
+            emit_frame_slot_load_indirect(ctx, old, elem_slot);
             let shifted_mask = (field_mask as u64).wrapping_shl(bit_pos) as i64;
             let clear_v = ctx.alloc_vreg();
             ctx.emit(IrOp::LoadImm(clear_v, !shifted_mask));
@@ -6313,12 +7074,36 @@ fn lower_struct_init(
             ctx.emit(IrOp::BitAnd(cleared, old, clear_v));
             let merged = ctx.alloc_vreg();
             ctx.emit(IrOp::BitOr(merged, cleared, placed));
-            ctx.emit(IrOp::Store(merged, 0, elem_slot as i32));
+            emit_frame_slot_store_indirect(ctx, elem_slot, merged);
             cursor = fidx + 1;
             continue;
         }
         let fbytes = crate::types::size_bytes_ctx(fty, ctx);
-        if fbytes == 1 {
+        if fbytes == 2 && !byte_off.is_multiple_of(2) {
+            let base_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(
+                base_addr,
+                (slot_base + num_words - 1) as i32,
+            ));
+            let addr = add_byte_offset(ctx, base_addr, byte_off);
+            emit_unaligned_short_store(ctx, addr, val);
+        } else if ty_is_long_long(fty, ctx) && !byte_off.is_multiple_of(4) {
+            let base_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(
+                base_addr,
+                (slot_base + num_words - 1) as i32,
+            ));
+            let addr = add_byte_offset(ctx, base_addr, byte_off);
+            emit_unaligned_longlong_store(ctx, addr, val);
+        } else if fbytes == 4 && !resolved_fty.is_float() && !byte_off.is_multiple_of(4) {
+            let base_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(
+                base_addr,
+                (slot_base + num_words - 1) as i32,
+            ));
+            let addr = add_byte_offset(ctx, base_addr, byte_off);
+            emit_unaligned_word_store(ctx, addr, val);
+        } else if fbytes == 1 {
             // Char-width field: merge into the containing word via
             // byte-extract store, preserving any neighbouring bytes
             // already present in the same word.
@@ -6339,14 +7124,14 @@ fn lower_struct_init(
             // Read-modify-write the word so earlier byte fields
             // already written to the same slot survive.
             let old = ctx.alloc_vreg();
-            ctx.emit(IrOp::Load(old, 0, elem_slot as i32));
+            emit_frame_slot_load_indirect(ctx, old, elem_slot);
             let mask_v = ctx.alloc_vreg();
             ctx.emit(IrOp::LoadImm(mask_v, !(0xFFi64 << lane) & 0xFFFFFFFF));
             let cleared = ctx.alloc_vreg();
             ctx.emit(IrOp::BitAnd(cleared, old, mask_v));
             let merged = ctx.alloc_vreg();
             ctx.emit(IrOp::BitOr(merged, cleared, placed));
-            ctx.emit(IrOp::Store(merged, 0, elem_slot as i32));
+            emit_frame_slot_store_indirect(ctx, elem_slot, merged);
         } else if fbytes == 2 {
             // 16-bit field: merge into the containing word via
             // halfword-extract store. A `short` at byte-offset 2 sits
@@ -6371,22 +7156,22 @@ fn lower_struct_init(
                 out
             };
             let old = ctx.alloc_vreg();
-            ctx.emit(IrOp::Load(old, 0, elem_slot as i32));
+            emit_frame_slot_load_indirect(ctx, old, elem_slot);
             let mask_v = ctx.alloc_vreg();
             ctx.emit(IrOp::LoadImm(mask_v, !(0xFFFFi64 << lane) & 0xFFFFFFFF));
             let cleared = ctx.alloc_vreg();
             ctx.emit(IrOp::BitAnd(cleared, old, mask_v));
             let merged = ctx.alloc_vreg();
             ctx.emit(IrOp::BitOr(merged, cleared, placed));
-            ctx.emit(IrOp::Store(merged, 0, elem_slot as i32));
+            emit_frame_slot_store_indirect(ctx, elem_slot, merged);
         } else {
             // Wider (word-aligned) field: store the whole scalar. 64-bit
             // fields occupy two aggregate words in increasing byte-offset
             // order; direct frame Store64 uses scalar-local layout, so write
             // the two aggregate words explicitly here.
-            ctx.emit(IrOp::Store(val, 0, elem_slot as i32));
+            emit_frame_slot_store_indirect(ctx, elem_slot, val);
             if ty_is_long_long(fty, ctx) && word_off + 1 < num_words {
-                ctx.emit(IrOp::Store(val + 1, 0, (elem_slot - 1) as i32));
+                emit_frame_slot_store_indirect(ctx, elem_slot - 1, val + 1);
             }
         }
         cursor = fidx + 1;
@@ -6421,33 +7206,46 @@ fn lower_designator_into(
     num_words: u32,
 ) -> Result<()> {
     let resolved_ty = resolve_type(ty, ctx);
+    let resolved_pack = aggregate_pack(&resolved_ty, ctx);
     match expr {
         Expr::ArrayDesignator { index, value } => {
             let idx = match index.as_ref() {
                 Expr::IntLit(v, _) => *v as u32,
                 _ => 0,
             };
-            let elem_words = match resolved_ty.unqualified() {
-                Type::Array(elem_ty, _) => crate::types::size_bytes_ctx(elem_ty, ctx)
-                    .div_ceil(4)
-                    .max(1),
-                _ => 1,
+            let (elem_bytes, elem_words) = match resolved_ty.unqualified() {
+                Type::Array(elem_ty, _) => (
+                    crate::types::size_bytes_ctx(elem_ty, ctx).max(1),
+                    crate::types::size_words_ctx(elem_ty, ctx).max(1),
+                ),
+                _ => (4, 1),
             };
-            let word_off = idx.saturating_mul(elem_words);
+            let byte_off = idx.saturating_mul(elem_bytes);
+            let word_off = byte_off / 4;
             if word_off >= num_words {
                 return Ok(());
             }
             let elem_slot = slot_base + num_words - 1 - word_off;
             if let Type::Array(elem_ty, _) = resolved_ty.unqualified() {
                 let inner_base = elem_slot + 1 - elem_words;
-                lower_designator_or_scalar(ctx, value, elem_ty, inner_base, elem_slot, elem_words)?;
+                lower_designator_or_scalar(
+                    ctx,
+                    value,
+                    elem_ty,
+                    inner_base,
+                    elem_slot,
+                    elem_words,
+                    byte_off % 4,
+                )?;
             }
             Ok(())
         }
         Expr::DesignatedInit { field, value } => {
             let fields = resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
             if let Some(fields) = fields {
-                if let Some((byte_off, fty)) = struct_field_offset(&fields, field, ctx) {
+                if let Some((byte_off, fty)) =
+                    struct_field_offset(&fields, field, resolved_pack, ctx)
+                {
                     let word_off = if is_union_type(&resolved_ty) {
                         0
                     } else {
@@ -6459,7 +7257,15 @@ fn lower_designator_into(
                     let elem_slot = slot_base + num_words - 1 - word_off;
                     let fty_words = crate::types::size_words_ctx(&fty, ctx).max(1);
                     let inner_base = elem_slot + 1 - fty_words;
-                    lower_designator_or_scalar(ctx, value, &fty, inner_base, elem_slot, fty_words)?;
+                    lower_designator_or_scalar(
+                        ctx,
+                        value,
+                        &fty,
+                        inner_base,
+                        elem_slot,
+                        fty_words,
+                        byte_off % 4,
+                    )?;
                 }
             }
             Ok(())
@@ -6469,7 +7275,7 @@ fn lower_designator_into(
             // level — caller checks before invoking.  Fall through to
             // scalar store at slot_base + num_words - 1 to be safe.
             let val = lower_expr(ctx, expr)?;
-            ctx.emit(IrOp::Store(val, 0, (slot_base + num_words - 1) as i32));
+            emit_frame_slot_store_indirect(ctx, slot_base + num_words - 1, val);
             Ok(())
         }
     }
@@ -6488,6 +7294,7 @@ fn lower_designator_or_scalar(
     inner_base: u32,
     leaf_slot: u32,
     inner_words: u32,
+    byte_lane: u32,
 ) -> Result<()> {
     let resolved_target = resolve_type(target_ty, ctx);
     let target_is_aggregate = matches!(
@@ -6517,9 +7324,36 @@ fn lower_designator_or_scalar(
             } else {
                 val
             };
-            ctx.emit(IrOp::Store(val, 0, leaf_slot as i32));
-            if ty_is_long_long(target_ty, ctx) && inner_words > 1 {
-                ctx.emit(IrOp::Store(val + 1, 0, (leaf_slot - 1) as i32));
+            let fbytes = crate::types::size_bytes_ctx(target_ty, ctx);
+            if fbytes == 1 {
+                let base_addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(base_addr, leaf_slot as i32));
+                let addr = add_byte_offset(ctx, base_addr, byte_lane);
+                emit_byte_store(ctx, addr, val);
+            } else if fbytes == 2 {
+                let base_addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(base_addr, leaf_slot as i32));
+                let addr = add_byte_offset(ctx, base_addr, byte_lane);
+                if byte_lane.is_multiple_of(2) {
+                    emit_short_store(ctx, addr, val);
+                } else {
+                    emit_unaligned_short_store(ctx, addr, val);
+                }
+            } else if ty_is_long_long(target_ty, ctx) && byte_lane != 0 {
+                let base_addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(base_addr, leaf_slot as i32));
+                let addr = add_byte_offset(ctx, base_addr, byte_lane);
+                emit_unaligned_longlong_store(ctx, addr, val);
+            } else if fbytes == 4 && !resolved_target.is_float() && byte_lane != 0 {
+                let base_addr = ctx.alloc_vreg_ptr();
+                ctx.emit(IrOp::FrameAddr(base_addr, leaf_slot as i32));
+                let addr = add_byte_offset(ctx, base_addr, byte_lane);
+                emit_unaligned_word_store(ctx, addr, val);
+            } else {
+                emit_frame_slot_store_indirect(ctx, leaf_slot, val);
+                if ty_is_long_long(target_ty, ctx) && inner_words > 1 {
+                    emit_frame_slot_store_indirect(ctx, leaf_slot - 1, val + 1);
+                }
             }
             Ok(())
         }
@@ -6784,16 +7618,60 @@ fn is_function_ptr_type(ty: &Type, ctx: &LowerCtx) -> bool {
 
 /// Emit a word-by-word copy from src_addr to dst_addr for `num_words` words.
 fn emit_struct_copy(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, num_words: u32) {
+    let stride = if num_words > 1 {
+        let stride = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(stride, 4));
+        Some(stride)
+    } else {
+        None
+    };
+    let mut src_word_addr = src_addr;
+    let mut dst_word_addr = dst_addr;
     for i in 0..num_words {
-        // Offsets passed to `Load`/`Store` with a non-zero base are
-        // byte offsets (the emitter routes through the byte-
-        // addressable indirect-access path). Step by `4 * i` to keep
-        // each word aligned on its 32-bit boundary instead of reading
-        // a byte from the next field's storage.
-        let byte_off = (i * 4) as i32;
+        // Keep the indirect Load/Store offset at zero. The isel path
+        // carries non-zero indirect offsets through an i8 instruction
+        // field, so byte offset 128 would otherwise wrap to -128 in
+        // large aggregate copies.
         let tmp = ctx.alloc_vreg();
-        ctx.emit(IrOp::Load(tmp, src_addr, byte_off));
-        ctx.emit(IrOp::Store(tmp, dst_addr, byte_off));
+        ctx.emit(IrOp::Load(tmp, src_word_addr, 0));
+        ctx.emit(IrOp::Store(tmp, dst_word_addr, 0));
+        if i + 1 < num_words {
+            let stride = stride.expect("stride exists for multi-word copy");
+            let next_src = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::Add(next_src, src_word_addr, stride));
+            src_word_addr = next_src;
+            let next_dst = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::Add(next_dst, dst_word_addr, stride));
+            dst_word_addr = next_dst;
+        }
+    }
+}
+
+/// Emit an exact-size aggregate assignment copy. Unlike `emit_struct_copy`,
+/// this never rounds the object size up to a full word at the destination,
+/// so assigning `struct { short x; }` into a packed array element preserves
+/// the neighboring element that shares the same 32-bit storage word.
+fn emit_struct_copy_exact(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, byte_size: u32) {
+    let mut byte_off = 0;
+    while byte_off + 4 <= byte_size {
+        let src = add_byte_offset(ctx, src_addr, byte_off);
+        let dst = add_byte_offset(ctx, dst_addr, byte_off);
+        let val = emit_unaligned_word_load(ctx, src);
+        emit_unaligned_word_store(ctx, dst, val);
+        byte_off += 4;
+    }
+    if byte_off + 2 <= byte_size {
+        let src = add_byte_offset(ctx, src_addr, byte_off);
+        let dst = add_byte_offset(ctx, dst_addr, byte_off);
+        let val = emit_unaligned_short_load(ctx, src, false);
+        emit_unaligned_short_store(ctx, dst, val);
+        byte_off += 2;
+    }
+    if byte_off < byte_size {
+        let src = add_byte_offset(ctx, src_addr, byte_off);
+        let dst = add_byte_offset(ctx, dst_addr, byte_off);
+        let val = emit_byte_load(ctx, src, false);
+        emit_byte_store(ctx, dst, val);
     }
 }
 
@@ -6807,10 +7685,12 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Assign { target, value } => {
             let target_ty = expr_type(target, ctx);
             if target_ty.as_ref().is_some_and(|t| is_struct_type(t, ctx)) {
-                let num_words = target_ty.as_ref().map_or(1, |t| type_size_words(t, ctx));
+                let byte_size = target_ty
+                    .as_ref()
+                    .map_or(4, |t| crate::types::size_bytes_ctx(t, ctx));
                 let src_addr = lower_struct_expr_addr(ctx, value)?;
                 let dst_addr = lower_lvalue_addr(ctx, target)?;
-                emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                emit_struct_copy_exact(ctx, dst_addr, src_addr, byte_size);
                 return Ok(dst_addr);
             }
 
@@ -7196,6 +8076,28 @@ fn expr_function_ptr_ret_type(expr: &Expr, ctx: &LowerCtx) -> Option<Type> {
     }
 }
 
+/// Coerce a scalar initializer/assignment value to the destination scalar type.
+/// Handles 32<->64-bit widening/truncation before delegating narrower scalar
+/// conversions to `coerce_vreg`.
+fn coerce_scalar_to_type(ctx: &mut LowerCtx, val: VReg, src_expr: &Expr, dst_ty: &Type) -> VReg {
+    let dst_is_64 = ty_is_long_long(dst_ty, ctx);
+    let val_is_64 = ctx.is_64bit_vreg(val);
+    let val = if dst_is_64 && !val_is_64 {
+        widen_to_64(ctx, val, src_expr)
+    } else if !dst_is_64 && val_is_64 {
+        let tmp = ctx.alloc_vreg();
+        ctx.emit(IrOp::LongLongToInt(tmp, val));
+        tmp
+    } else {
+        val
+    };
+    if dst_is_64 {
+        val
+    } else {
+        coerce_vreg(ctx, val, dst_ty)
+    }
+}
+
 /// Insert an implicit float-to-int or int-to-float conversion if the source
 /// vreg type does not match the destination type, and truncate to the
 /// destination width for narrow integer destinations (char, short).
@@ -7294,6 +8196,38 @@ fn lower_to_bool(ctx: &mut LowerCtx, val: VReg) -> VReg {
 mod tests {
     use super::*;
     use crate::parse;
+
+    fn lower_first_function_with_unit_packs(src: &str) -> Vec<IrOp> {
+        let processed = crate::preprocess_only(
+            src,
+            "lower-packed-short-test.c",
+            &crate::cli::Options {
+                char_size: 8,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let unit = parse::parse(&processed).unwrap();
+        let known = HashSet::new();
+        let returns = HashMap::new();
+        let params = HashMap::new();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        lower_function_with_known(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops
+    }
 
     #[test]
     fn lower_return_42() {
@@ -7983,6 +8917,26 @@ mod tests {
     }
 
     #[test]
+    fn lower_union_scalar_init_sign_extends_to_first_member() {
+        let src = "union u { long long f0; int f1; };
+                   long long f(void) { union u v = {-8L}; return v.f0; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::SExtToLongLong(..))),
+            "expected 32-bit long initializer to sign-extend into the 64-bit union member; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
     fn lower_union_init_braced_first_member_writes_all_fields() {
         // `union U { struct S { long long a; long long b; }; ... } v
         // = {{1, 2}};` -- the inner brace runs against the union's
@@ -8047,11 +9001,278 @@ mod tests {
         // OR-merges with the existing word.  Before the fix it was a
         // plain word Store, so no merging BitOr appeared in the
         // initializer sequence -- detect that here.
-        let bitors = ops.iter().filter(|op| matches!(op, IrOp::BitOr(..))).count();
+        let bitors = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::BitOr(..)))
+            .count();
         assert!(
             bitors >= 2,
             "expected the f1 short initializer to read-modify-write \
              its containing word, preserving f0; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_packed_nested_short_load_uses_byte_composition() {
+        let src = "typedef unsigned char uint8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned long long uint64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct inner { uint16_t f0; signed char f1; };
+                   #pragma pack(pop)
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct outer { uint64_t f0; uint8_t f1; struct inner f2; };
+                   #pragma pack(pop)
+                   unsigned f(struct outer *p) { return p->f2.f0; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitOr(..))),
+            "expected odd-offset short load to combine two byte loads; got ops: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 1))),
+            "expected odd-offset short load to read the second byte at addr+1; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_packed_nested_short_store_splits_into_bytes() {
+        let src = "typedef unsigned char uint8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned long long uint64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct inner { uint16_t f0; signed char f1; };
+                   #pragma pack(pop)
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct outer { uint64_t f0; uint8_t f1; struct inner f2; };
+                   #pragma pack(pop)
+                   void f(struct outer *p) { p->f2.f0 = 0x29E1U; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        let stores = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::Store(..)))
+            .count();
+        assert!(
+            stores >= 2,
+            "expected odd-offset short store to write two byte lanes; got ops: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, -8))),
+            "expected odd-offset short store to extract the high byte; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_short_pointer_to_packed_field_load_uses_byte_composition() {
+        let src = "typedef signed char int8_t;
+                   typedef int int32_t;
+                   typedef unsigned char uint8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned int uint32_t;
+                   typedef unsigned long long uint64_t;
+                   typedef long long int64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct inner { uint64_t f0; uint8_t f1; int64_t f2; const uint32_t f3; };
+                   #pragma pack(pop)
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct outer { int32_t f0; const int8_t f1; struct inner f2; uint16_t f3; };
+                   #pragma pack(pop)
+                   uint16_t f(void) { struct outer g; uint16_t *p = &g.f3; return *p; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitOr(..))),
+            "expected pointer short load to combine two byte loads; got ops: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 1))),
+            "expected pointer short load to read addr+1; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_short_pointer_to_packed_field_store_splits_into_bytes() {
+        let src = "typedef signed char int8_t;
+                   typedef int int32_t;
+                   typedef unsigned char uint8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned int uint32_t;
+                   typedef unsigned long long uint64_t;
+                   typedef long long int64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct inner { uint64_t f0; uint8_t f1; int64_t f2; const uint32_t f3; };
+                   #pragma pack(pop)
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct outer { int32_t f0; const int8_t f1; struct inner f2; uint16_t f3; };
+                   #pragma pack(pop)
+                   void f(void) { struct outer g; uint16_t *p = &g.f3; *p = 0x6a27U; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        let stores = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::Store(..)))
+            .count();
+        assert!(
+            stores >= 2,
+            "expected pointer short store to write two byte lanes; got ops: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, -8))),
+            "expected pointer short store to extract the high byte; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_short_pointer_compound_assign_splits_store() {
+        let src = "typedef signed char int8_t;
+                   typedef int int32_t;
+                   typedef unsigned char uint8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned int uint32_t;
+                   typedef unsigned long long uint64_t;
+                   typedef long long int64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct inner { uint64_t f0; uint8_t f1; int64_t f2; const uint32_t f3; };
+                   #pragma pack(pop)
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct outer { int32_t f0; const int8_t f1; struct inner f2; uint16_t f3; };
+                   #pragma pack(pop)
+                   void f(void) { struct outer g; uint16_t *p = &g.f3; *p |= 0x6a27U; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, -8))),
+            "expected compound pointer short store to split the high byte; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_short_member_after_odd_stride_array_index_uses_byte_composition() {
+        let src = "typedef unsigned char uint8_t;
+                   typedef unsigned short uint16_t;
+                   typedef unsigned long long uint64_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct packed { uint64_t f0; uint16_t f1; };
+                   #pragma pack(pop)
+                   struct outer { struct packed f0; uint8_t f1; };
+                   uint16_t f(void) { struct outer g[2]; return g[1].f0.f1; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitOr(..))),
+            "expected short member load after odd array stride to combine two byte loads; \
+             got ops: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 1))),
+            "expected short member load after odd array stride to read addr+1; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_packed_nested_word_load_uses_byte_composition() {
+        let src = "typedef unsigned char uint8_t;
+                   typedef unsigned int uint32_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct inner { uint32_t f0; };
+                   #pragma pack(pop)
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct outer { uint8_t f0; struct inner f1; };
+                   #pragma pack(pop)
+                   uint32_t f(struct outer *p) { return p->f1.f0; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        let bitors = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::BitOr(..)))
+            .count();
+        assert!(
+            bitors >= 1,
+            "expected odd-offset word load to combine split word loads; got ops: {ops:?}"
+        );
+        let loads = ops.iter().filter(|op| matches!(op, IrOp::Load(..))).count();
+        assert!(
+            loads >= 2,
+            "expected odd-offset word load to read two storage words; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_pragma_pack_top_level_word_field_uses_packed_offset() {
+        let src = "typedef unsigned short uint16_t;
+                   typedef unsigned int uint32_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct s { uint32_t f0; uint16_t f1; const uint32_t f2; uint32_t f3; };
+                   #pragma pack(pop)
+                   uint32_t f(struct s *p) { return p->f2; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        let bitors = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::BitOr(..)))
+            .count();
+        assert!(
+            bitors >= 1,
+            "expected f2 at packed byte offset 6 to use an unaligned word load; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_array_of_small_struct_is_not_narrow_scalar_array() {
+        let src = "typedef unsigned char uint8_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct s { const uint8_t f0; signed char f1; };
+                   #pragma pack(pop)
+                   int f(void) { struct s a[1] = {{{0UL, 0x5EL}}}; return a[0].f1; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::Store(..))),
+            "expected packed struct array initializer to lower as aggregate stores; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_array_of_small_union_uses_byte_stride_initializer() {
+        let src = "union u { unsigned short f0; };
+                   int f(void) {
+                       union u a[2][3][1] =
+                           {{{{0xffffU}},{{0x0db5U}},{{0xffffU}}},
+                            {{{0x0db5U}},{{0xffffU}},{{0x0db5U}}}};
+                       return 0;
+                   }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 10))),
+            "expected byte-stride aggregate initializer to place the last \
+             two-byte union at byte offset 10; got ops: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_packed_struct_array_assignment_copies_exact_bytes() {
+        let src = "typedef unsigned short uint16_t;
+                   #pragma pack(push)
+                   #pragma pack(1)
+                   struct s { uint16_t f0; };
+                   #pragma pack(pop)
+                   void f(void) { struct s a = {0x1234U}; struct s g[5]; g[3] = a; }";
+        let ops = lower_first_function_with_unit_packs(src);
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::BitNot(..))),
+            "expected packed struct assignment to use preserving stores; got ops: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, -8))),
+            "expected packed struct assignment to split and copy the high byte; got ops: {ops:?}"
         );
     }
 
@@ -8120,6 +9341,7 @@ mod tests {
             known_functions: &known,
             function_return_types: &returns,
             function_param_types: &params,
+            struct_packs: &unit.struct_packs,
         };
         let f = unit.functions.iter().find(|f| f.name == "f").unwrap();
         let ops = lower_function_with_known(
@@ -8295,6 +9517,151 @@ mod tests {
         assert!(
             store_count >= 3,
             "expected at least 3 stores for init list, got {store_count}"
+        );
+    }
+
+    #[test]
+    fn lower_stack_array_zero_init_uses_indirect_frame_stores() {
+        let src = "int f(void) { int arr[8] = {0}; return arr[1]; }";
+        let unit = parse::parse(src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        assert!(result.static_locals.is_empty());
+        assert!(
+            result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(_, base, 0) if *base != 0)),
+            "expected aggregate zero-fill through indirect frame stores: {:?}",
+            result.ops
+        );
+        assert!(
+            !result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(_, 0, off) if (0..8).contains(off))),
+            "stack aggregate init must not use frame-relative stores: {:?}",
+            result.ops
+        );
+    }
+
+    #[test]
+    fn lower_large_static_template_copy_materializes_word_addresses() {
+        let src = "int f(void) { int arr[100] = {0}; return arr[25]; }";
+        let unit = parse::parse(src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        assert_eq!(result.static_locals.len(), 1);
+        assert!(
+            !result.ops.iter().any(|op| matches!(
+                op,
+                IrOp::Load(_, base, off) | IrOp::Store(_, base, off)
+                    if *base != 0 && *off != 0
+            )),
+            "large aggregate copies must not rely on truncating indirect offsets: {:?}",
+            result.ops
+        );
+    }
+
+    #[test]
+    fn lower_stack_string_array_init_uses_indirect_frame_stores() {
+        let src = "int f(void) { char s[8] = \"abcdefg\"; return s[4]; }";
+        let unit = parse::parse(src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        assert!(
+            result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(_, base, 0) if *base != 0)),
+            "expected string array init through indirect frame stores: {:?}",
+            result.ops
+        );
+        assert!(
+            !result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(_, 0, off) if (0..2).contains(off))),
+            "string array init must not use frame-relative aggregate stores: {:?}",
+            result.ops
+        );
+    }
+
+    #[test]
+    fn lower_large_const_aggregate_init_uses_static_template_copy() {
+        let items = (0..20)
+            .map(|i| format!("{{{}, {}}}", i & 0xff, i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let src = format!(
+            "struct s {{ unsigned char a; int b; }}; int f(void) {{ struct s arr[20] = {{{items}}}; return arr[19].b; }}"
+        );
+        let unit = parse::parse(&src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        assert_eq!(result.static_locals.len(), 1);
+        let symbol = &result.static_locals[0].symbol;
+        assert!(symbol.starts_with("__selcc_init_f_"));
+        assert!(matches!(
+            &result.static_locals[0].init,
+            Some(Expr::InitList(_))
+        ));
+        assert!(
+            result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::LoadGlobal(_, s) if s == symbol)),
+            "expected large aggregate initializer to load a static template: {:?}",
+            result.ops
+        );
+    }
+
+    #[test]
+    fn lower_large_const_scalar_array_uses_static_template_copy() {
+        let items = (0..20).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let src = format!("int f(void) {{ int arr[20] = {{{items}}}; return arr[19]; }}");
+        let unit = parse::parse(&src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        assert_eq!(result.static_locals.len(), 1);
+        let symbol = &result.static_locals[0].symbol;
+        assert!(
+            result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::LoadGlobal(_, s) if s == symbol)),
+            "expected large scalar array initializer to load a static template: {:?}",
+            result.ops
         );
     }
 
@@ -8649,6 +10016,7 @@ mod tests {
             known_functions: &known,
             function_return_types: &returns,
             function_param_types: &params,
+            struct_packs: &unit.struct_packs,
         };
         let ops = lower_function_with_known(
             func,
@@ -8765,6 +10133,23 @@ mod tests {
     }
 
     #[test]
+    fn lower_uint32_vs_lognot_int64_compare_is_unsigned() {
+        let src = "typedef unsigned int uint32_t; typedef long long int64_t; int f(uint32_t a, int64_t b) { return a > !b; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::UCmp(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::Cmp(..))));
+    }
+
+    #[test]
     fn lower_comparison_result_vs_int64_is_signed() {
         let src = "typedef unsigned int uint32_t; typedef long long int64_t; struct S { int64_t x; }; int f(uint32_t a, struct S s) { return (a == 1U) <= s.x; }";
         let unit = parse::parse(src).unwrap();
@@ -8796,6 +10181,7 @@ mod tests {
             known_functions: &known,
             function_return_types: &returns,
             function_param_types: &params,
+            struct_packs: &unit.struct_packs,
         };
         let ops = lower_function_with_known(
             func,
@@ -9368,6 +10754,7 @@ mod tests {
             known_functions: &known,
             function_return_types: &returns,
             function_param_types: &params,
+            struct_packs: &unit.struct_packs,
         };
         let result = lower_function_with_known(
             &unit.functions[0],
@@ -9402,6 +10789,7 @@ mod tests {
             known_functions: &known,
             function_return_types: &returns,
             function_param_types: &params,
+            struct_packs: &unit.struct_packs,
         };
         let result = lower_function_with_known(
             &unit.functions[0],

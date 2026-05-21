@@ -1128,49 +1128,47 @@ fn cond_name_lower(code: u16) -> String {
 
 /// Group 6 system register names in the 32-bit VISA ureg encoding.
 ///
-/// The 32-bit encoding differs from the 48-bit ISA: PCSTKP is absent and
-/// registers from PCSTK onward are renumbered. PX registers use compact
-/// (gap-free) indices starting at 0xB.
+/// The 32-bit encoding differs from the 48-bit ISA: PC and the following
+/// PC-stack/loop registers are shifted, while PX registers use compact
+/// indices starting at 0xB.
 fn visa_ureg_group6(reg: u32) -> String {
     match reg {
         0x0 => "faddr".into(),
         0x1 => "daddr".into(),
-        0x2 => "pc".into(),
-        0x3 => "pcstk".into(),
-        0x4 => "pcstk".into(), // 0x64 -> pcstk
-        0x5 => "laddr".into(),
-        0x6 => "laddr".into(),    // 0x66 -> laddr
-        0x7 => "curlcntr".into(), // 0x67 -> curlcntr
+        0x3 => "pc".into(),
+        0x4 => "pcstk".into(),
+        0x5 => "pcstkp".into(),
+        0x6 => "laddr".into(),
+        0x7 => "curlcntr".into(),
         0x8 => "lcntr".into(),
-        0x9 => "emuclk".into(), // 0x69 -> emuclk (via source encoding)
+        0x9 => "emuclk".into(),
         0xA => "emuclk2".into(),
-        0xB => "px".into(), // 0x6B -> px
+        0xB => "px".into(),
         0xC => "px1".into(),
-        0xD => "px2".into(), // 0x6D -> px2
-        0xE => "px2".into(),
+        0xD => "px2".into(),
         _ => format!("ureg(0x{:02x})", 0x60 | reg),
     }
 }
 
 /// Group 7 system register names in the 32-bit VISA ureg encoding.
 ///
-/// The 32-bit encoding shifts MODE1/MODE2 up by 2 positions relative to the
-/// 48-bit ISA encoding.
+/// The 32-bit encoding uses the compact SW/VISA numbering, not the 48-bit ISA
+/// ureg values carried by parsed instructions.
 fn visa_ureg_group7(reg: u32) -> String {
     match reg {
         0x0 => "mode1".into(),
         0x1 => "mode2".into(),
         0x2 => "mode1".into(), // 0x72 -> mode1
         0x3 => "mode2".into(),
-        0x4 => "flags".into(),
-        0x5 => "astatx".into(),
-        0x6 => "astaty".into(),
-        0x7 => "stkyx".into(),
-        0x8 => "stkyy".into(),
-        0x9 => "irptl".into(),
-        0xA => "imask".into(),
-        0xB => "imaskp".into(),
-        0xC => "lrptl".into(),
+        0x4 => "mode2".into(),
+        0x5 => "flags".into(),
+        0x6 => "astatx".into(),
+        0x7 => "astaty".into(),
+        0x8 => "stkyx".into(),
+        0x9 => "stkyy".into(),
+        0xA => "irptl".into(),
+        0xB => "imask".into(),
+        0xC => "imaskp".into(),
         0xD => "mode1stk".into(), // 0x7D -> mode1stk
         _ => format!("ureg(0x{:02x})", 0x70 | reg),
     }

@@ -87,6 +87,17 @@ struct Parser<'a> {
     /// Current function name for __func__ (C99 6.4.2.2).
     current_function: String,
     pending_weak_attr: bool,
+    /// Effective `#pragma pack(N)` for the next struct/union declared
+    /// at file scope.  `0` means natural alignment; csmith inputs use
+    /// `1` exclusively today (`#pragma pack(push)` / `pack(1)` /
+    /// `pack(pop)` wrapping a single struct).  The preprocessor
+    /// surfaces pack state through a synthetic identifier line that
+    /// `try_consume_pack_marker` decodes; see
+    /// `selcc/src/preproc.rs::PRAGMA_PACK_MARKER_PREFIX`.
+    current_pack: u8,
+    /// `#pragma pack(push)` / `pack(pop)` stack of pack values.  Each
+    /// `push` records the value to restore on the next `pop`.
+    pack_stack: Vec<u8>,
 }
 
 impl<'a> Parser<'a> {
@@ -105,6 +116,8 @@ impl<'a> Parser<'a> {
             pending_block_extern_variadic_named: std::collections::HashMap::new(),
             current_function: String::new(),
             pending_weak_attr: false,
+            current_pack: 0,
+            pack_stack: Vec::new(),
         })
     }
 
@@ -622,6 +635,11 @@ impl<'a> Parser<'a> {
         let mut globals = Vec::new();
         let mut typedefs: Vec<(String, Type)> = Vec::new();
         let mut struct_defs: Vec<(String, Vec<(String, Type)>)> = Vec::new();
+        // Captured `#pragma pack(N)` cap for each tagged struct/union
+        // (parallel to `struct_defs`).  Populated in lockstep at the
+        // same push sites; consumed by emit/lower through
+        // `TypeCtx::resolve_tag_pack`.  See `Type::Struct::packed`.
+        let mut struct_packs: Vec<(String, u8)> = Vec::new();
         let enum_constants: Vec<(String, i64)> = Vec::new();
         let mut variadic_decls: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -631,6 +649,35 @@ impl<'a> Parser<'a> {
             std::collections::HashSet::new();
         while self.current != Token::Eof {
             self.pending_weak_attr = false;
+            // Consume synthetic `#pragma pack(...)` markers emitted by
+            // the preprocessor.  Each marker is `IDENT ;` so it shows
+            // up as a top-level token-stream `Ident("...")` followed by
+            // `Semicolon`.  See `selcc/src/preproc.rs` for the encoding
+            // (`__selcc_pragma_pack_push`, `__selcc_pragma_pack_pop`,
+            // `__selcc_pragma_pack_set_<N>`).  Without this the
+            // identifiers would fall through to declaration parsing
+            // and error out with a missing-type complaint.
+            if let Token::Ident(name) = &self.current {
+                if let Some(rest) = name.strip_prefix("__selcc_pragma_pack_") {
+                    let rest = rest.to_string();
+                    self.advance()?;
+                    self.expect(&Token::Semicolon)?;
+                    if rest == "push" {
+                        self.pack_stack.push(self.current_pack);
+                    } else if rest == "pop" {
+                        // `pack(pop)` without a matching `push` is a
+                        // no-op (gcc behaviour).
+                        if let Some(prev) = self.pack_stack.pop() {
+                            self.current_pack = prev;
+                        }
+                    } else if let Some(num) = rest.strip_prefix("set_") {
+                        if let Ok(n) = num.parse::<u8>() {
+                            self.current_pack = n;
+                        }
+                    }
+                    continue;
+                }
+            }
             // Handle typedef declarations.
             if self.current == Token::Typedef {
                 self.advance()?;
@@ -735,12 +782,17 @@ impl<'a> Parser<'a> {
                     Type::Struct {
                         name: Some(n),
                         fields,
+                        packed,
                     }
                     | Type::Union {
                         name: Some(n),
                         fields,
+                        packed,
                     } if !fields.is_empty() => {
                         struct_defs.push((n.clone(), fields.clone()));
+                        if *packed != 0 {
+                            struct_packs.push((n.clone(), *packed));
+                        }
                     }
                     _ => {}
                 }
@@ -1053,6 +1105,7 @@ impl<'a> Parser<'a> {
             functions,
             globals,
             typedefs,
+            struct_packs,
             struct_defs,
             enum_constants: self
                 .enum_constants
@@ -1128,10 +1181,19 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        let packed = self.current_pack;
         if is_struct {
-            Ok(Type::Struct { name, fields })
+            Ok(Type::Struct {
+                name,
+                fields,
+                packed,
+            })
         } else {
-            Ok(Type::Union { name, fields })
+            Ok(Type::Union {
+                name,
+                fields,
+                packed,
+            })
         }
     }
 
@@ -1703,10 +1765,12 @@ impl<'a> Parser<'a> {
                 Type::Struct {
                     name: Some(_),
                     fields,
+                    ..
                 }
                 | Type::Union {
                     name: Some(_),
                     fields,
+                    ..
                 } if !fields.is_empty() => {
                     let var_decl = Stmt::VarDecl {
                         name: String::new(),

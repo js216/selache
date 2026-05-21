@@ -11,6 +11,24 @@ use crate::gc::LiveSections;
 use crate::ldf_ast::{Ldf, MemorySegment, OutputSection, SectionQualifier};
 use crate::resolve::InputObject;
 
+const L2_BW_START: u32 = 0x2000_0000;
+const L2_BW_END: u32 = 0x2010_0000;
+const L2_SW_ALIAS_START: u32 = 0x00b8_0000;
+
+/// Convert a byte-addressed RAM location that holds SW/VISA code into
+/// the PM short-word address used by relocations and ELF section headers.
+///
+/// L1 SW code follows the simple `byte / 2` mapping. L2 is different on
+/// ADSP-21569: the executable 16-bit alias starts at 0x00b80000, while
+/// the byte/fabric address starts at 0x20000000.
+pub(crate) fn sw_pm_address(byte_addr: u32) -> u32 {
+    if (L2_BW_START..L2_BW_END).contains(&byte_addr) {
+        L2_SW_ALIAS_START + (byte_addr - L2_BW_START) / 2
+    } else {
+        byte_addr / 2
+    }
+}
+
 /// A section that has been placed at a final address.
 #[derive(Debug, Clone)]
 pub struct PlacedSection {
@@ -600,7 +618,7 @@ fn find_entry_address(
                         // in parcel units (PM-relative). Convert base
                         // to PM then add the parcel offset.
                         let pm_addr = match ps.qualifier {
-                            SectionQualifier::Sw => ps.address / 2 + sym.st_value,
+                            SectionQualifier::Sw => sw_pm_address(ps.address) + sym.st_value,
                             SectionQualifier::Pm => ps.address / 6 * 4 + sym.st_value,
                             _ => ps.address + sym.st_value,
                         };
@@ -689,6 +707,13 @@ mod tests {
         assert_eq!(a, 0x0090_0000);
         let b = cursor.allocate(6, 1, "second").unwrap();
         assert_eq!(b, 0x0090_0002);
+    }
+
+    #[test]
+    fn sw_pm_address_uses_adsp21569_l2_alias() {
+        assert_eq!(sw_pm_address(0x0024_03f0), 0x0012_01f8);
+        assert_eq!(sw_pm_address(0x2000_0000), 0x00b8_0000);
+        assert_eq!(sw_pm_address(0x2000_12fc), 0x00b8_097e);
     }
 
     #[test]

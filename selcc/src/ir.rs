@@ -460,6 +460,28 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
     // for every anchor, then in singles for every non-anchor id.
     let mut map: BTreeMap<VReg, VReg> = BTreeMap::new();
     let mut next: VReg = num_params;
+    // Vreg ids that, when truncated to `u16`, collide with regalloc's
+    // return-pseudo-vreg sentinels (`target::RETURN_REG_VREG` = 0xFF,
+    // `target::RETURN_REG_HI_VREG` = 0xFE). The dense numbering must
+    // skip these — otherwise a real vreg shares its id with the
+    // return-pseudo-vreg, regalloc's `spill_caller_saved` excludes it
+    // from the across-CJUMP spill set, and the value silently survives
+    // in physical R0/R1 only to be clobbered by the callee's return.
+    // Reproduces in csmith 5203b3a4 func_10 (well past 254 vregs) where
+    // a `safe_sub_func_uint64_t_u_u` return-slot address pinned to vreg
+    // 254 lives across the CJUMP in R1 and corrupts the long-long
+    // return.  Closure over the helper centralises the rule for
+    // `bump_past_reserved` below.
+    let is_reserved = |v: VReg| -> bool {
+        let truncated = v as u16;
+        truncated == crate::target::RETURN_REG_VREG
+            || truncated == crate::target::RETURN_REG_HI_VREG
+    };
+    let bump_past_reserved = |next: &mut VReg| {
+        while is_reserved(*next) {
+            *next += 1;
+        }
+    };
     // Identity-map the parameter slots that actually appear.
     for v in &used {
         if *v < num_params {
@@ -485,10 +507,17 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
     if next == 0 {
         next = 1;
     }
+    bump_past_reserved(&mut next);
     // Anchors first: two consecutive slots each. Skip anchors that
     // are already identity-mapped (parameter pair lo halves, or the
     // base==0 sentinel pin above).
     for &a in &anchors {
+        // For each anchor we need TWO consecutive slots (lo, lo+1).
+        // Bump past reserved ids so neither half lands on a sentinel.
+        // Loop until `next` and `next + 1` are both safe.
+        while is_reserved(next) || is_reserved(next + 1) {
+            next += 1;
+        }
         if map.contains_key(&a) {
             // The lo half is already pinned (parameter slot or the
             // vreg-0 sentinel). The hi half must still land at
@@ -535,6 +564,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
         if map.contains_key(&v) {
             continue;
         }
+        bump_past_reserved(&mut next);
         map.insert(v, next);
         next += 1;
     }
@@ -676,4 +706,153 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             IrOp::LongLongToInt(d, s) => IrOp::LongLongToInt(apply(*d), apply(*s)),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `renumber_vregs` must skip dense ids whose `u16` truncation
+    /// equals `RETURN_REG_VREG` (0xFF) or `RETURN_REG_HI_VREG` (0xFE).
+    /// Regalloc keys both its physical-register map and its
+    /// caller-saved spill exclusion list off these `u16` ids, so a
+    /// real vreg numerically equal to either sentinel is mis-treated
+    /// as the return-pseudo-vreg: it survives across a CJUMP in
+    /// physical R0/R1 only to be clobbered by the callee's return
+    /// value.
+    ///
+    /// Reproduces in csmith 5203b3a4 func_10 (well past 254 vregs):
+    /// the `safe_sub_func_uint64_t_u_u` return-slot address was
+    /// pinned to vreg 254 = RETURN_REG_HI_VREG, lived across the
+    /// CJUMP in R1, and corrupted g_65 / the test CRC.
+    ///
+    /// This test stitches a synthetic IR stream with enough used
+    /// single-slot vregs (plus a vreg 0 sentinel and one parameter)
+    /// to push the dense renumbering through the 254/255 window, then
+    /// verifies the renumbering map skips both reserved ids.
+    #[test]
+    fn renumber_vregs_skips_return_pseudo_vreg_ids() {
+        let mut ir: Vec<IrOp> = Vec::new();
+        // Parameter vreg (identity-mapped 0..num_params=1). Force vreg 0
+        // to appear so the sentinel pin lives in the map; vreg 1 is the
+        // real parameter slot.
+        ir.push(IrOp::Load(1, 0, 0));
+        // 300 distinct single-slot vregs, IDs 100..400 (chosen to push
+        // dense numbering through the reserved 254/255 window after the
+        // 0/1 pins consume slots 0..2).
+        for i in 100..400u32 {
+            ir.push(IrOp::LoadImm(i, i as i64));
+        }
+        let out = renumber_vregs(&ir, 1);
+
+        // Walk the renumbered ops; collect every vreg id that appears as
+        // a writer. None of them should equal 0xFE or 0xFF: the dense
+        // numbering must skip those slots.
+        let mut seen: Vec<VReg> = Vec::new();
+        for op in &out {
+            if let IrOp::LoadImm(d, _) = op {
+                seen.push(*d);
+            }
+        }
+        assert!(
+            !seen.contains(&(crate::target::RETURN_REG_VREG as VReg)),
+            "renumbered ids include RETURN_REG_VREG (0xFF); seen = {seen:?}"
+        );
+        assert!(
+            !seen.contains(&(crate::target::RETURN_REG_HI_VREG as VReg)),
+            "renumbered ids include RETURN_REG_HI_VREG (0xFE); seen = {seen:?}"
+        );
+        // The dense renumber must still cover all 300 inputs.
+        assert_eq!(seen.len(), 300);
+    }
+
+    /// 64-bit pair anchors must keep `hi == lo + 1` while still
+    /// skipping the reserved sentinel ids.  A naive "skip 254/255 in
+    /// singles only" fix lets a pair land on (lo=253, hi=254) and the
+    /// hi half collides with RETURN_REG_HI_VREG — same miscompile as
+    /// the single-vreg case, but for a 64-bit value.
+    ///
+    /// To actually exercise the pair-around-reserved-window check
+    /// (`while is_reserved(next) || is_reserved(next + 1)` in the
+    /// anchors loop), we must drive `next` to land at exactly `0xFD`
+    /// just before allocating a 64-bit anchor.  Singles run AFTER
+    /// anchors in the renumbering, so the only way to advance `next`
+    /// before a test anchor is to pre-allocate other anchors.  Each
+    /// anchor takes two slots; with `num_params = 1` and the vreg-0
+    /// sentinel pinning `map[0] = 0`, `next` starts at `1`.  126
+    /// pre-anchors then advance `next` to `1 + 126*2 = 253 = 0xFD`,
+    /// so the very next anchor would naturally land at `(lo=253,
+    /// hi=254)` — and `hi == RETURN_REG_HI_VREG (0xFE)` collides
+    /// without the fix.  Singles before the anchor would all bump
+    /// past 254/255 individually, but never line up `next` adjacent
+    /// to the reserved window for a *pair*.
+    #[test]
+    fn renumber_vregs_keeps_64bit_pair_adjacent_around_reserved_window() {
+        let mut ir: Vec<IrOp> = Vec::new();
+        // Parameter vreg (identity-mapped 0..num_params=1) and the
+        // vreg-0 sentinel pin so `next` starts at 1.
+        ir.push(IrOp::Load(1, 0, 0));
+        // 126 pre-anchors with non-overlapping IDs so each one
+        // consumes a fresh (lo, hi=lo+1) pair of dense slots, walking
+        // `next` from 1 to 1 + 126*2 = 253. Adjacent anchor IDs
+        // (100, 101, ..., 225) would *chain* through the
+        // `if map.contains_key(&a)` branch and only advance `next` by
+        // one per anchor — never landing at 253.  Spacing IDs by 4
+        // keeps every anchor's hi half (id+1) outside the next
+        // anchor's lo half (id+4).
+        for i in 0..126u32 {
+            let id = 1000 + i * 4;
+            ir.push(IrOp::LoadImm64(id, id as i64));
+        }
+        // Now insert the test 64-bit anchor.  Anchors iterate in
+        // sorted order through a BTreeSet, so picking an ID larger
+        // than every pre-anchor guarantees this one is processed last
+        // and sees `next == 253`. Without the pair-around-reserved
+        // check it would land at lo=253, hi=254 (hi collides with
+        // RETURN_REG_HI_VREG). With the check, `next` bumps to 256
+        // first so the pair lands at lo=256, hi=257.
+        ir.push(IrOp::LoadImm64(9999, 0));
+        let out = renumber_vregs(&ir, 1);
+
+        let mut saw_test_anchor = false;
+        for op in &out {
+            if let IrOp::LoadImm64(lo, _) = op {
+                let lo = *lo;
+                let hi = lo + 1;
+                assert_ne!(
+                    lo as u16,
+                    crate::target::RETURN_REG_VREG,
+                    "pair lo collides with RETURN_REG_VREG: lo={lo}"
+                );
+                assert_ne!(
+                    lo as u16,
+                    crate::target::RETURN_REG_HI_VREG,
+                    "pair lo collides with RETURN_REG_HI_VREG: lo={lo}"
+                );
+                assert_ne!(
+                    hi as u16,
+                    crate::target::RETURN_REG_VREG,
+                    "pair hi collides with RETURN_REG_VREG: hi={hi}"
+                );
+                assert_ne!(
+                    hi as u16,
+                    crate::target::RETURN_REG_HI_VREG,
+                    "pair hi collides with RETURN_REG_HI_VREG: hi={hi}"
+                );
+                if lo >= 253 {
+                    saw_test_anchor = true;
+                }
+            }
+        }
+        // Sanity: confirm the test actually drove `next` into the
+        // reserved-window territory (lo >= 253). Without this guard,
+        // a future refactor that re-orders anchors could silently
+        // demote the test to "passes for unrelated reasons".
+        assert!(
+            saw_test_anchor,
+            "expected at least one renumbered pair to land at lo >= 253; \
+             the test did not actually exercise the reserved-window \
+             pair-bump path"
+        );
+    }
 }

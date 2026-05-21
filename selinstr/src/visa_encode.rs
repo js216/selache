@@ -88,6 +88,46 @@ impl VisaEncoded {
     }
 }
 
+/// Translate a normal 48-bit ISA universal-register code into the compact
+/// SW/VISA 7-bit ureg field. The 32-bit forms use a different numbering
+/// for system registers; copying the ISA value directly makes
+/// `ASTATx` stores/restores hit `MODE2` on hardware.
+fn visa_ureg_code(ureg: u16) -> Option<u16> {
+    let mapped = match ureg {
+        // R/I/M/L/B/S registers keep their ISA numbering.
+        0x00..=0x5F => ureg,
+        // Group 6 system registers. The compact map removes/reserves
+        // several gaps and shifts PC onward by one slot.
+        0x60 => 0x60, // FADDR
+        0x61 => 0x61, // DADDR
+        0x62 => 0x63, // PC
+        0x63 => 0x64, // PCSTK
+        0x64 => 0x65, // PCSTKP
+        0x65 => 0x66, // LADDR
+        0x66 => 0x67, // CURLCNTR
+        0x67 => 0x68, // LCNTR
+        0x68 => 0x69, // EMUCLK
+        0x69 => 0x6A, // EMUCLK2
+        0x6C => 0x6B, // PX
+        0x6D => 0x6C, // PX1
+        0x6E => 0x6D, // PX2
+        // Group 7 system registers in the SW/VISA 32-bit encoding.
+        0x70 => 0x72, // MODE1
+        0x71 => 0x74, // MODE2
+        0x72 => 0x75, // FLAGS
+        0x73 => 0x76, // ASTATx
+        0x74 => 0x77, // ASTATy
+        0x75 => 0x78, // STKYx
+        0x76 => 0x79, // STKYy
+        0x78 => 0x7A, // IRPTL
+        0x79 => 0x7B, // IMASK
+        0x7A => 0x7C, // IMASKP
+        0x7D => 0x7D, // MODE1STK
+        _ => return None,
+    };
+    Some(mapped)
+}
+
 /// Attempt VISA compression of an instruction.
 ///
 /// `instr` is the high-level instruction, `isa_bytes` is the 48-bit ISA
@@ -365,10 +405,7 @@ fn try_type17b(ureg: u16, value: u32) -> Option<u32> {
     if !(-32768..=32767).contains(&v) {
         return None;
     }
-    // ureg must fit in 7 bits
-    if ureg > 127 {
-        return None;
-    }
+    let ureg = visa_ureg_code(ureg)?;
     let p1 = 0x0F80u16 | (ureg & 0x7F);
     let p2 = value as u16;
     Some((p1 as u32) << 16 | p2 as u32)
@@ -392,9 +429,7 @@ fn try_type3b(write: bool, ureg: u16, i_reg: u8, m_reg: u8, cond: u8) -> Option<
     if i_reg > 7 {
         return None;
     }
-    if ureg > 127 {
-        return None;
-    }
+    let ureg = visa_ureg_code(ureg)?;
     let m_offset = (m_reg - 4) & 3;
     let d = if write { 1u16 } else { 0 };
 
@@ -461,9 +496,7 @@ fn try_type15b(write: bool, lw: bool, i_reg: u8, ureg: u16, offset: i32) -> Opti
     if !(-64..=63).contains(&offset) {
         return None;
     }
-    if ureg > 0x7F {
-        return None;
-    }
+    let ureg = visa_ureg_code(ureg)?;
     let d = if write { 1u16 } else { 0 };
     let lw_bit = if lw { 1u16 } else { 0 };
     let raw7 = (offset as u8 as u16) & 0x7F;
@@ -506,9 +539,8 @@ fn try_type15b(write: bool, lw: bool, i_reg: u8, ureg: u16, offset: i32) -> Opti
 ///               a 48-bit Type 5a parallel compute + ureg move, which
 ///               clobbers a dreg adjacent to the move).
 fn try_type5b_move(dest: u16, src: u16) -> Option<u32> {
-    if dest > 127 || src > 127 {
-        return None;
-    }
+    let dest = visa_ureg_code(dest)?;
+    let src = visa_ureg_code(src)?;
     let src_group = (src >> 4) & 7;
     let src_idx = src & 0xF;
 
@@ -805,6 +837,50 @@ mod tests {
             }
             _ => panic!("expected 32-bit"),
         }
+    }
+
+    #[test]
+    fn system_uregs_use_swc_numbering() {
+        assert_eq!(visa_ureg_code(0x62), Some(0x63)); // PC
+        assert_eq!(visa_ureg_code(0x70), Some(0x72)); // MODE1
+        assert_eq!(visa_ureg_code(0x71), Some(0x74)); // MODE2
+        assert_eq!(visa_ureg_code(0x73), Some(0x76)); // ASTATx
+    }
+
+    #[test]
+    fn astatx_dag_move_matches_easm21k_swc() {
+        let instr = Instruction::UregDagMove {
+            pm: false,
+            write: true,
+            ureg: 0x73,
+            i_reg: 6,
+            m_reg: 5,
+            cond: 31,
+            compute: None,
+            post_modify: false,
+        };
+        let isa = encode_isa(&instr);
+        assert!(matches!(
+            visa_encode(&instr, &isa),
+            VisaEncoded::W32(0x4d7ebb3f)
+        ));
+    }
+
+    #[test]
+    fn astatx_stack_access_matches_easm21k_swc() {
+        let instr = Instruction::UregMemAccess {
+            pm: false,
+            i_reg: 6,
+            write: true,
+            lw: false,
+            ureg: 0x73,
+            offset: -1,
+        };
+        let isa = encode_isa(&instr);
+        assert!(matches!(
+            visa_encode(&instr, &isa),
+            VisaEncoded::W32(0x9d083b7f)
+        ));
     }
 
     #[test]

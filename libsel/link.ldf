@@ -34,11 +34,16 @@ PROCESSOR p0
          INPUT_SECTIONS( $OBJECTS(iv_code) )
       } > mem_iv_code
 
-      // 8 KB stack reservation. startup.s reads ldf_stack_space
+      // 96 KB stack reservation. startup.s reads ldf_stack_space
       // and ldf_stack_length out of this RESERVE to seed B7/I7/L7.
+      // Bumped from 64 KiB (iter-3 recovery): csmith cases with deep
+      // crc32 + transform pipelines (e.g. e8d32466) exhausted the 64K
+      // reserve when nested-struct outer-offset spills compounded with
+      // 1-min budget runs, then jumped into the heap region and went
+      // silent. 96K keeps the same alignment but adds margin.
       stack_reserve NO_INIT BW
       {
-         RESERVE(ldf_stack_space, ldf_stack_length = 65536, 8)
+         RESERVE(ldf_stack_space, ldf_stack_length = 98304, 8)
       } > mem_l1_block0
 
       // Cold/generated helper code can execute from block0 below the

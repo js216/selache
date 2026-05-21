@@ -500,6 +500,10 @@ struct LoadableSection {
     width: WordWidth,
     /// True if FILL compression can be applied to this section.
     compressible: bool,
+    /// L2 SRAM is usable by the application after boot, but large writes
+    /// there can disturb the boot kernel while it is still consuming the
+    /// stream. Emit L1 blocks before L2 blocks.
+    defer_until_after_l1: bool,
 }
 
 /// Collect loadable sections from an ELF executable.
@@ -576,6 +580,11 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
         // section that the linker did not annotate.
         let in_pm_nw = (0x0008_0000..0x000C_0000).contains(&shdr.sh_addr);
         let in_pm_sw = (0x0010_0000..0x0019_0000).contains(&shdr.sh_addr);
+        // SW code placed in byte-addressed L2 is reported through the
+        // core's PM short-word alias: on ADSP-21569, L2 byte address
+        // 0x2000_0000 is encoded as PM SW address 0x00b8_0000. The
+        // boot stream still has to target the byte/fabric address.
+        let in_pm_sw_l2_alias = (0x00b8_0000..0x00c0_0000).contains(&shdr.sh_addr);
         let in_bw_l1 = (0x0024_0000..0x0032_0000).contains(&shdr.sh_addr);
         // L2 SRAM is byte-addressed and the LDF declares mem_l2 with
         // WIDTH(8); without this range check, sections placed in L2 by
@@ -592,7 +601,7 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
                 || in_pm_nw
             {
                 WordWidth::IvCode
-            } else if in_pm_sw || shdr.sh_addralign >= 2 {
+            } else if in_pm_sw || in_pm_sw_l2_alias || shdr.sh_addralign >= 2 {
                 WordWidth::SwCode
             } else {
                 WordWidth::IvCode
@@ -604,8 +613,13 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
         };
 
         // Code sections with align=1 (e.g. interrupt vector tables) are
-        // not FILL-compressed.  align>=2 code and all data sections are.
-        let compressible = !matches!(width, WordWidth::IvCode);
+        // not FILL-compressed. L2 sections are also kept as explicit data:
+        // ADSP-21569 UARTHOST boot reliably accepts normal writes to L2
+        // data/SW-code addresses, but FILL commands targeting L2 data can
+        // leave later L1 block2 execution dead even though the boot transfer
+        // reports success.
+        let is_l2 = in_bw_l2 || in_pm_sw_l2_alias;
+        let compressible = !matches!(width, WordWidth::IvCode) && !is_l2;
 
         // Translate the linker's per-section sh_addr into the byte
         // address the boot ROM's DMA engine uses. The SHARC+ ADSP-21569
@@ -617,6 +631,8 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
         //   PM SW alias (0x00100000..0x0018FFFF) -- 32-bit short-word
         //     instruction slots, 2 bytes per slot. SW PM code lives
         //     here.
+        //   L2 PM SW alias (0x00B80000..0x00BFFFFF) -- 16-bit parcel
+        //     executable view over L2 byte SRAM at 0x20000000.
         //   BW L1 view  (0x00240000..0x0031FFFF) -- byte-addressed
         //     L1 SRAM, used by data and SW PM section payloads.
         //
@@ -639,6 +655,8 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
             shdr.sh_addr.saturating_mul(4) + SYS_FABRIC_OFFSET
         } else if (PM_SW_START..PM_SW_END).contains(&shdr.sh_addr) {
             shdr.sh_addr.saturating_mul(2) + SYS_FABRIC_OFFSET
+        } else if in_pm_sw_l2_alias {
+            0x2000_0000 + (shdr.sh_addr - 0x00b8_0000).saturating_mul(2)
         } else if (BW_L1_START..BW_L1_END).contains(&shdr.sh_addr) {
             shdr.sh_addr + SYS_FABRIC_OFFSET
         } else {
@@ -650,11 +668,16 @@ fn collect_sections(elf_data: &[u8], header: &elf::Elf32Header) -> Result<Vec<Lo
             raw,
             width,
             compressible,
+            defer_until_after_l1: in_bw_l2 || in_pm_sw_l2_alias,
         });
     }
 
-    sections.sort_by_key(|s| s.addr);
+    sort_loadable_sections(&mut sections);
     Ok(sections)
+}
+
+fn sort_loadable_sections(sections: &mut [LoadableSection]) {
+    sections.sort_by_key(|s| (s.defer_until_after_l1, s.addr));
 }
 
 /// Parse an ELF executable and generate the boot stream blocks.
@@ -1428,6 +1451,88 @@ mod tests {
             "L2 data must pass through unchanged; a 40→32 conversion \
              would reorder/drop bytes"
         );
+    }
+
+    #[test]
+    fn test_l2_data_section_does_not_emit_fill_blocks() {
+        // The ADSP-21569 boot kernel accepts ordinary writes to L2 SRAM,
+        // but FILL commands targeting L2 data can leave later L1 block2
+        // code unfetchable. Keep sparse L2 initializers as explicit bytes.
+        let mut payload = vec![0x11, 0x22, 0x33, 0x44];
+        payload.extend(std::iter::repeat_n(0, 64));
+        payload.extend([0x55, 0x66, 0x77, 0x88]);
+
+        let elf = make_test_data_elf(0x2000_0000, &payload);
+        let opts = default_opts();
+        let blocks = generate_boot_stream(&elf, &opts).unwrap();
+
+        assert!(
+            !blocks
+                .iter()
+                .any(|b| (0x2000_0000..0x2010_0000).contains(&b.target_addr)
+                    && b.flags & BFLAG_FILL != 0),
+            "L2 sections must not be represented by boot FILL blocks"
+        );
+
+        let data_block = blocks
+            .iter()
+            .find(|b| b.target_addr == 0x2000_0000)
+            .expect("L2 data block must appear at the section's sh_addr");
+        assert_eq!(data_block.data, payload);
+    }
+
+    #[test]
+    fn test_l2_sw_code_alias_loads_to_l2_byte_address() {
+        // SW code linked into L2 uses the core PM short-word alias
+        // (0x00B8_0000 == byte address 0x2000_0000). The boot ROM's
+        // DMA target must be the byte/fabric address, not the PM alias.
+        let payload = vec![0xAA; 16];
+        let mut elf = make_test_elf(0x00b8_0010, &payload);
+        let shdr_off = u32::from_le_bytes(elf[32..36].try_into().unwrap()) as usize;
+        let shdr_size = 40usize;
+        let sh1 = shdr_off + shdr_size;
+        elf[sh1 + 32..sh1 + 36].copy_from_slice(&4u32.to_le_bytes());
+
+        let opts = default_opts();
+        let blocks = generate_boot_stream(&elf, &opts).unwrap();
+        let data_block = blocks
+            .iter()
+            .find(|b| b.target_addr == 0x2000_0020)
+            .expect("L2 SW-code block must be loaded through the byte/fabric address");
+
+        assert!(!data_block.data.is_empty());
+    }
+
+    #[test]
+    fn test_l2_blocks_are_deferred_until_after_l1_blocks() {
+        let mut sections = vec![
+            LoadableSection {
+                addr: 0x2000_1000,
+                raw: vec![1],
+                width: WordWidth::ByteWidth,
+                compressible: true,
+                defer_until_after_l1: true,
+            },
+            LoadableSection {
+                addr: 0x2824_0000,
+                raw: vec![2],
+                width: WordWidth::SwCode,
+                compressible: true,
+                defer_until_after_l1: false,
+            },
+            LoadableSection {
+                addr: 0x2000_0000,
+                raw: vec![3],
+                width: WordWidth::ByteWidth,
+                compressible: true,
+                defer_until_after_l1: true,
+            },
+        ];
+
+        sort_loadable_sections(&mut sections);
+
+        let addrs: Vec<u32> = sections.iter().map(|s| s.addr).collect();
+        assert_eq!(addrs, vec![0x2824_0000, 0x2000_0000, 0x2000_1000]);
     }
 
     #[test]

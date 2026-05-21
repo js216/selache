@@ -1669,6 +1669,9 @@ fn encode_type15(
     let g = if pm { 1u64 } else { 0 };
     let d = if write { 1u64 } else { 0 };
     let lw_bit = if lw { 1u64 } else { 0 };
+    let ureg = type15_ureg_code(ureg).ok_or_else(|| EncodeError {
+        msg: format!("Type 15 ureg 0x{ureg:X} out of range"),
+    })?;
     let word = (0b101u64 << 45)
         | (g << 44)
         | ((i_reg as u64 & 7) << 41)
@@ -1677,6 +1680,39 @@ fn encode_type15(
         | ((ureg as u64 & 0x7F) << 32)
         | (offset as u32 as u64);
     Ok(word)
+}
+
+fn type15_ureg_code(ureg: u16) -> Option<u16> {
+    let mapped = match ureg {
+        0x00..=0x5F => ureg,
+        0x60 => 0x60, // FADDR
+        0x61 => 0x61, // DADDR
+        0x62 => 0x63, // PC
+        0x63 => 0x64, // PCSTK
+        0x64 => 0x65, // PCSTKP
+        0x65 => 0x66, // LADDR
+        0x66 => 0x67, // CURLCNTR
+        0x67 => 0x68, // LCNTR
+        0x68 => 0x69, // EMUCLK
+        0x69 => 0x6A, // EMUCLK2
+        0x6C => 0x6B, // PX
+        0x6D => 0x6C, // PX1
+        0x6E => 0x6D, // PX2
+        0x70 => 0x72, // MODE1
+        0x71 => 0x74, // MODE2
+        0x72 => 0x75, // FLAGS
+        0x73 => 0x76, // ASTATx
+        0x74 => 0x77, // ASTATy
+        0x75 => 0x78, // STKYx
+        0x76 => 0x79, // STKYy
+        0x78 => 0x7A, // IRPTL
+        0x79 => 0x7B, // IMASK
+        0x7A => 0x7C, // IMASKP
+        0x7B => 0x7D, // MODE1STK
+        0x80..=0xFF => return None,
+        _ => return None,
+    };
+    Some(mapped)
 }
 
 // ---------------------------------------------------------------------------
@@ -2860,6 +2896,22 @@ mod tests {
     }
 
     // -- Type 15: ureg <-> DM/PM with 32-bit offset --
+
+    #[test]
+    fn type15_system_ureg_uses_swc_numbering() {
+        let instr = Instruction::UregMemAccess {
+            pm: false,
+            i_reg: 6,
+            write: true,
+            lw: false,
+            ureg: 0x73,
+            offset: -0x1af,
+        };
+        let bytes = encode(&instr).expect("encode failed");
+        assert_eq!(bytes, [0xad, 0x76, 0xff, 0xff, 0xfe, 0x51]);
+        let text = roundtrip(&instr);
+        assert_eq!(text, "DM (-0x1AF,I6)=ASTATx");
+    }
 
     // -- Type 16: DM|PM(Ii,Mm) = imm32 --
 

@@ -10,7 +10,7 @@ use selelf::elf::{
 };
 
 use crate::error::Result;
-use crate::layout::{Layout, PlacedSection};
+use crate::layout::{sw_pm_address, Layout, PlacedSection};
 use crate::ldf_ast::SectionQualifier;
 use crate::resolve::{InputObject, SymbolTable};
 
@@ -152,7 +152,7 @@ pub fn generate(
                         // is in parcel units (PM-relative). Convert base
                         // to PM then add the parcel offset.
                         sym_value = if sec.is_short_word {
-                            ps.address / 2 + resolved.value
+                            sw_pm_address(ps.address) + resolved.value
                         } else {
                             ps.address + resolved.value
                         };
@@ -414,7 +414,7 @@ impl MergedSection {
     /// byte-addressed.
     fn elf_address(&self) -> u32 {
         if self.is_short_word {
-            self.address / 2
+            sw_pm_address(self.address)
         } else {
             self.address
         }

@@ -19,10 +19,25 @@ pub enum Type {
     Struct {
         name: Option<String>,
         fields: Vec<(String, Type)>,
+        /// `#pragma pack(N)` member-alignment cap captured at parse
+        /// time.  `0` means natural alignment (default).  Nonzero `N`
+        /// caps each field's effective alignment to `min(N,
+        /// natural_align)`, matching the GCC/MSVC `__attribute__((packed))`
+        /// / `#pragma pack(N)` rule.  Layout queries (`struct_size_bytes_ctx`,
+        /// `struct_field_layout_ctx`) take the pack value as an extra
+        /// parameter; for tag-only references where the field list is
+        /// not visible the value is resolved through
+        /// `TypeCtx::resolve_tag_pack`.
+        packed: u8,
     },
     Union {
         name: Option<String>,
         fields: Vec<(String, Type)>,
+        /// See `Type::Struct::packed`.  Unions normally do not need a
+        /// pack cap (each member starts at offset 0) but the field is
+        /// kept for symmetry and to propagate the cap to a nested
+        /// struct member that does not carry its own `packed` value.
+        packed: u8,
     },
     Enum {
         name: Option<String>,
@@ -57,6 +72,16 @@ pub trait TypeCtx {
         let _ = name;
         None
     }
+    /// Look up the `#pragma pack(N)` member-alignment cap for a
+    /// struct/union declared by tag.  `0` means natural alignment.
+    /// Implementations consult the translation-unit `struct_packs`
+    /// table populated by the parser; the default returns `0` so
+    /// contexts that never see a `#pragma pack` directive can ignore
+    /// this entirely.  See `Type::Struct::packed` for rationale.
+    fn resolve_tag_pack(&self, name: &str) -> u8 {
+        let _ = name;
+        0
+    }
 }
 
 /// An empty context: no tag lookups possible. Used as a degenerate
@@ -86,19 +111,43 @@ pub fn size_bytes_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
         Type::Pointer(_) => 4,
         Type::Array(elem, Some(n)) => size_bytes_ctx(elem, ctx) * (*n as u32),
         Type::Array(_, None) => 0,
-        Type::Struct { name, fields } => {
+        Type::Struct {
+            name,
+            fields,
+            packed,
+        } => {
+            // Iter-19: return the NATURAL-aligned size for packed
+            // structs.  The size produced here drives array indexing
+            // strides (`scale_index_by_elem`) and `build_init_words`
+            // `elem_size`, both of which must agree with the
+            // field-by-name access offsets that
+            // `struct_field_layout_ctx(..., pack=0, ...)` computes for
+            // top-level packed-struct globals (the "natural offsets
+            // outside any union" rule baked into
+            // `lvalue_chain_traverses_union` callers).  Returning the
+            // packed size here would mis-stride an array of packed
+            // structs: the init writes 6 words of natural-offset bytes
+            // per element while reads index `i * packed_size`, so
+            // `arr[1].fN` lands in the middle of `arr[0]`'s padding
+            // (`cctest_csmith_9910c0de`'s `g_118` regression).  The
+            // packed value is still consulted by the iter-11 / iter-17
+            // union-overlay path via `resolve_struct_pack` and
+            // `force_pack_for_struct_in_union`, which deliberately
+            // emit packed bytes into the larger natural-sized window
+            // when a chain crosses a union.
+            let _ = packed;
             if fields.is_empty() {
                 if let Some(sname) = name {
                     if let Some(def) = ctx.resolve_tag(sname) {
-                        return struct_size_bytes_ctx(def, ctx);
+                        return struct_size_bytes_ctx(def, 0, ctx);
                     }
                 }
                 0
             } else {
-                struct_size_bytes_ctx(fields, ctx)
+                struct_size_bytes_ctx(fields, 0, ctx)
             }
         }
-        Type::Union { name, fields } => {
+        Type::Union { name, fields, .. } => {
             if fields.is_empty() {
                 if let Some(uname) = name {
                     if let Some(def) = ctx.resolve_tag(uname) {
@@ -125,7 +174,7 @@ pub fn size_bytes_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
             }
             // Typedef names sometimes alias a struct tag directly.
             if let Some(def) = ctx.resolve_tag(name) {
-                return struct_size_bytes_ctx(def, ctx);
+                return struct_size_bytes_ctx(def, ctx.resolve_tag_pack(name), ctx);
             }
             4
         }
@@ -178,7 +227,7 @@ pub fn size_words_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
         }
         Type::Array(_, None) => 0,
         Type::Struct { .. } => size_bytes_ctx(ty, ctx).div_ceil(4),
-        Type::Union { name, fields } => {
+        Type::Union { name, fields, .. } => {
             if fields.is_empty() {
                 if let Some(uname) = name {
                     if let Some(def) = ctx.resolve_tag(uname) {
@@ -227,13 +276,34 @@ pub fn alignment_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
         Type::Unsigned(inner) => alignment_ctx(inner, ctx),
         Type::Pointer(_) | Type::FunctionPtr { .. } => 4,
         Type::Array(elem, _) => alignment_ctx(elem, ctx),
-        Type::Struct { name, fields } => {
+        Type::Struct {
+            name,
+            fields,
+            packed,
+        } => {
+            // For struct alignment: each field's effective alignment is
+            // `min(natural_align, pack)` when `pack > 0`.  The struct
+            // alignment is the max of the effective field alignments.
+            let pack = if *packed != 0 {
+                *packed
+            } else if let Some(n) = name {
+                ctx.resolve_tag_pack(n)
+            } else {
+                0
+            };
+            let cap = |a: u32| -> u32 {
+                if pack > 0 {
+                    a.min(pack as u32)
+                } else {
+                    a
+                }
+            };
             if fields.is_empty() {
                 if let Some(sname) = name {
                     if let Some(def) = ctx.resolve_tag(sname) {
                         return def
                             .iter()
-                            .map(|(_, t)| alignment_ctx(t, ctx))
+                            .map(|(_, t)| cap(alignment_ctx(t, ctx)))
                             .max()
                             .unwrap_or(1);
                     }
@@ -242,12 +312,12 @@ pub fn alignment_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
             } else {
                 fields
                     .iter()
-                    .map(|(_, t)| alignment_ctx(t, ctx))
+                    .map(|(_, t)| cap(alignment_ctx(t, ctx)))
                     .max()
                     .unwrap_or(1)
             }
         }
-        Type::Union { name, fields } => {
+        Type::Union { name, fields, .. } => {
             if fields.is_empty() {
                 if let Some(uname) = name {
                     if let Some(def) = ctx.resolve_tag(uname) {
@@ -292,10 +362,24 @@ pub fn alignment_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
 /// ctx-aware version of `struct_size_bytes` — the only difference is
 /// that nested field types are measured with `size_bytes_ctx` /
 /// `alignment_ctx` instead of the tag-blind methods on `Type`.
-pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u32 {
+///
+/// `pack` is the outer `#pragma pack(N)` cap (0 = natural alignment).
+/// When `pack > 0` each field's effective alignment is `min(align,
+/// pack)`.  A nested struct/union with its own non-zero `packed` value
+/// overrides the outer cap (via the recursive `size_bytes_ctx`/
+/// `alignment_ctx` calls, which destructure the inner `packed` field
+/// themselves); otherwise the outer `pack` falls through.
+pub fn struct_size_bytes_ctx(fields: &[(String, Type)], pack: u8, ctx: &dyn TypeCtx) -> u32 {
     let mut offset: u32 = 0;
     let mut bit_offset: u32 = 0;
     let mut max_align: u32 = 1;
+    let cap = |a: u32| -> u32 {
+        if pack > 0 {
+            a.min(pack as u32)
+        } else {
+            a
+        }
+    };
 
     for (_, ty) in fields {
         if let Type::Bitfield(base, width) = ty {
@@ -306,11 +390,11 @@ pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u3
                     offset += bit_offset.div_ceil(8);
                     bit_offset = 0;
                 }
-                let align = alignment_ctx(base, ctx);
+                let align = cap(alignment_ctx(base, ctx));
                 offset = align_up(offset, align);
             } else if bit_offset + w > storage_bits {
                 offset += bit_offset.div_ceil(8);
-                let align = alignment_ctx(base, ctx);
+                let align = cap(alignment_ctx(base, ctx));
                 offset = align_up(offset, align);
                 if align > max_align {
                     max_align = align;
@@ -318,7 +402,7 @@ pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u3
                 bit_offset = w;
             } else {
                 if bit_offset == 0 {
-                    let align = alignment_ctx(base, ctx);
+                    let align = cap(alignment_ctx(base, ctx));
                     offset = align_up(offset, align);
                     if align > max_align {
                         max_align = align;
@@ -331,7 +415,7 @@ pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u3
                 offset += bit_offset.div_ceil(8);
                 bit_offset = 0;
             }
-            let align = alignment_ctx(ty, ctx);
+            let align = cap(alignment_ctx(ty, ctx));
             offset = align_up(offset, align);
             if align > max_align {
                 max_align = align;
@@ -348,13 +432,27 @@ pub fn struct_size_bytes_ctx(fields: &[(String, Type)], ctx: &dyn TypeCtx) -> u3
 /// ctx-aware version of `struct_field_layout`. Uses `size_bytes_ctx` /
 /// `alignment_ctx` so tag-only aggregate fields do not collapse to size
 /// zero and mis-align every field that follows.
+///
+/// `pack` is the outer `#pragma pack(N)` cap (0 = natural alignment).
+/// When `pack > 0` each field's effective alignment is `min(align,
+/// pack)`.  When the helper recurses into an anonymous nested
+/// struct/union it uses the inner aggregate's own `packed` value if
+/// set, otherwise the outer `pack` falls through.
 pub fn struct_field_layout_ctx(
     fields: &[(String, Type)],
     target: &str,
+    pack: u8,
     ctx: &dyn TypeCtx,
 ) -> Option<(u32, Option<u32>, Option<u8>)> {
     let mut offset: u32 = 0;
     let mut bit_offset: u32 = 0;
+    let cap = |a: u32| -> u32 {
+        if pack > 0 {
+            a.min(pack as u32)
+        } else {
+            a
+        }
+    };
 
     for (name, ty) in fields {
         if let Type::Bitfield(base, width) = ty {
@@ -365,14 +463,14 @@ pub fn struct_field_layout_ctx(
                     offset += bit_offset.div_ceil(8);
                     bit_offset = 0;
                 }
-                let align = alignment_ctx(base, ctx);
+                let align = cap(alignment_ctx(base, ctx));
                 offset = align_up(offset, align);
                 if name == target {
                     return Some((offset, Some(0), Some(*width)));
                 }
             } else if bit_offset + w > storage_bits {
                 offset += bit_offset.div_ceil(8);
-                let align = alignment_ctx(base, ctx);
+                let align = cap(alignment_ctx(base, ctx));
                 offset = align_up(offset, align);
                 if name == target {
                     return Some((offset, Some(0), Some(*width)));
@@ -380,7 +478,7 @@ pub fn struct_field_layout_ctx(
                 bit_offset = w;
             } else {
                 if bit_offset == 0 {
-                    let align = alignment_ctx(base, ctx);
+                    let align = cap(alignment_ctx(base, ctx));
                     offset = align_up(offset, align);
                 }
                 if name == target {
@@ -393,23 +491,33 @@ pub fn struct_field_layout_ctx(
                 offset += bit_offset.div_ceil(8);
                 bit_offset = 0;
             }
-            let align = alignment_ctx(ty, ctx);
+            let align = cap(alignment_ctx(ty, ctx));
             offset = align_up(offset, align);
             if name == target {
                 return Some((offset, None, None));
             }
             if name.starts_with("__anon") {
                 match ty {
-                    Type::Struct { fields: inner, .. } => {
+                    Type::Struct {
+                        fields: inner,
+                        packed: inner_pack,
+                        ..
+                    } => {
+                        let inner_p = if *inner_pack != 0 { *inner_pack } else { pack };
                         if let Some((nested_off, bo, bw)) =
-                            struct_field_layout_ctx(inner, target, ctx)
+                            struct_field_layout_ctx(inner, target, inner_p, ctx)
                         {
                             return Some((offset + nested_off, bo, bw));
                         }
                     }
-                    Type::Union { fields: inner, .. } => {
+                    Type::Union {
+                        fields: inner,
+                        packed: inner_pack,
+                        ..
+                    } => {
+                        let inner_p = if *inner_pack != 0 { *inner_pack } else { pack };
                         if let Some((nested_off, bo, bw)) =
-                            struct_field_layout_ctx(inner, target, ctx)
+                            struct_field_layout_ctx(inner, target, inner_p, ctx)
                         {
                             return Some((offset + nested_off, bo, bw));
                         }
@@ -899,6 +1007,7 @@ mod tests {
         let s = Type::Struct {
             name: Some("point".into()),
             fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)],
+            packed: 0,
         };
         assert_eq!(s.size_words(), 2);
     }
@@ -1003,6 +1112,7 @@ mod tests {
                     Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 1),
                 ),
             ],
+            packed: 0,
         };
         assert_eq!(s.size_bytes(), 4);
         assert_eq!(s.size_words(), 1);
@@ -1025,6 +1135,7 @@ mod tests {
                     Type::Bitfield(Box::new(Type::Unsigned(Box::new(Type::Int))), 10),
                 ),
             ],
+            packed: 0,
         };
         assert_eq!(s.size_bytes(), 8);
     }
@@ -1060,6 +1171,7 @@ mod tests {
         let s = Type::Struct {
             name: None,
             fields: fields.clone(),
+            packed: 0,
         };
         assert_eq!(s.size_bytes(), 8);
 
@@ -1076,6 +1188,7 @@ mod tests {
         let s = Type::Struct {
             name: None,
             fields: vec![("x".into(), Type::Int), ("y".into(), Type::Char)],
+            packed: 0,
         };
         assert_eq!(s.size_bytes(), 8);
     }
@@ -1086,6 +1199,7 @@ mod tests {
         let s = Type::Struct {
             name: None,
             fields: vec![("x".into(), Type::Int), ("y".into(), Type::Int)],
+            packed: 0,
         };
         assert_eq!(s.size_bytes(), 8);
     }
@@ -1101,6 +1215,7 @@ mod tests {
                 ("b".into(), Type::Short),
                 ("c".into(), Type::Char),
             ],
+            packed: 0,
         };
         assert_eq!(s.size_bytes(), 6);
     }

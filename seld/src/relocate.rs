@@ -10,7 +10,7 @@ use selelf::elf::{
 };
 
 use crate::error::{Error, Result};
-use crate::layout::PlacedSection;
+use crate::layout::{sw_pm_address, PlacedSection};
 use crate::ldf_ast::SectionQualifier;
 use crate::resolve::{InputObject, SymbolTable};
 
@@ -496,7 +496,9 @@ pub fn apply_relocations(
 ///
 /// For SW sections: `ps.address` is a BW (byte) address; `st_value` is
 /// in parcel (16-bit PM) units, already a PM-relative offset. The final
-/// PM address is `ps.address/2 + st_value`, NOT `(ps.address + st_value)/2`.
+/// PM address is `sw_pm_address(ps.address) + st_value`, NOT
+/// `(ps.address + st_value)/2`. L2 SW code uses the ADSP-21569
+/// 0x00b80000 PM alias rather than the L1-only `byte / 2` mapping.
 fn find_symbol_address(
     object_idx: usize,
     section_idx: usize,
@@ -506,7 +508,7 @@ fn find_symbol_address(
     for ps in placed {
         if ps.object_idx == object_idx && ps.input_section_idx == section_idx {
             let addr = match ps.qualifier {
-                SectionQualifier::Sw => ps.address / 2 + st_value,
+                SectionQualifier::Sw => sw_pm_address(ps.address) + st_value,
                 _ => ps.address + st_value,
             };
             return Some(addr);

@@ -353,8 +353,12 @@ impl Preprocessor {
                 if let Some(rest) = strip_directive(directive, "pragma") {
                     // Recognize `#pragma function_name NAME`: the next
                     // function declaration in scope is renamed to NAME
-                    // at the linker-symbol level. Every other pragma
-                    // is silently ignored.
+                    // at the linker-symbol level.  Recognize
+                    // `#pragma pack(...)`: surface its effect to the
+                    // parser through a synthetic marker line that the
+                    // translation-unit loop consumes (see
+                    // `selcc/src/parse.rs::parse_translation_unit`).
+                    // Every other pragma is silently ignored.
                     let rest = rest.trim();
                     if let Some(after) = rest.strip_prefix("function_name") {
                         let name = after.trim();
@@ -364,6 +368,56 @@ impl Preprocessor {
                             // wins.
                             pending_function_name = Some(name.to_string());
                         }
+                        output.push('\n');
+                        continue;
+                    }
+                    if let Some(after) = rest.strip_prefix("pack") {
+                        // `#pragma pack(N)`, `#pragma pack()`,
+                        // `#pragma pack(push)`, `#pragma pack(push, N)`,
+                        // `#pragma pack(pop)`.  Surface the new
+                        // effective pack value to the parser as a
+                        // standalone marker statement that compiles
+                        // away.  Csmith only emits push / pack(1) /
+                        // pop, so the encoder only needs to cover the
+                        // common forms; unknown variants leave pack
+                        // state unchanged (silently ignored, matching
+                        // the prior behaviour for anything we don't
+                        // understand).
+                        let body = after.trim();
+                        // Strip surrounding parens, if any.
+                        let inner = body
+                            .strip_prefix('(')
+                            .and_then(|s| s.strip_suffix(')'))
+                            .unwrap_or(body)
+                            .trim();
+                        let marker = if inner.is_empty() {
+                            // `#pragma pack()` resets to default
+                            // (natural alignment).
+                            Some("__selcc_pragma_pack_set_0;".to_string())
+                        } else if inner == "push" {
+                            Some("__selcc_pragma_pack_push;".to_string())
+                        } else if let Some(arg) = inner.strip_prefix("push") {
+                            // `push, N`
+                            let arg = arg.trim_start_matches(',').trim();
+                            if let Ok(n) = arg.parse::<u8>() {
+                                Some(format!(
+                                    "__selcc_pragma_pack_push;__selcc_pragma_pack_set_{n};"
+                                ))
+                            } else {
+                                Some("__selcc_pragma_pack_push;".to_string())
+                            }
+                        } else if inner == "pop" {
+                            Some("__selcc_pragma_pack_pop;".to_string())
+                        } else if let Ok(n) = inner.parse::<u8>() {
+                            Some(format!("__selcc_pragma_pack_set_{n};"))
+                        } else {
+                            None
+                        };
+                        if let Some(m) = marker {
+                            output.push_str(&m);
+                        }
+                        output.push('\n');
+                        continue;
                     }
                     output.push('\n');
                     continue;

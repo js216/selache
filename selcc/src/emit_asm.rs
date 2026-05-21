@@ -44,6 +44,7 @@ pub struct AsmModule {
 /// typedefs during size queries on global/static-local types.
 struct UnitTypeCtx<'a> {
     struct_defs: &'a [(String, Vec<(String, crate::types::Type)>)],
+    struct_packs: &'a [(String, u8)],
     typedefs: &'a [(String, crate::types::Type)],
 }
 
@@ -64,12 +65,21 @@ impl<'a> crate::types::TypeCtx for UnitTypeCtx<'a> {
         }
         None
     }
+
+    fn resolve_tag_pack(&self, name: &str) -> u8 {
+        self.struct_packs
+            .iter()
+            .rev()
+            .find_map(|(tag, pack)| (tag == name).then_some(*pack))
+            .unwrap_or(0)
+    }
 }
 
 pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> {
     let mut out = String::new();
     let unit_tctx = UnitTypeCtx {
         struct_defs: &unit.struct_defs,
+        struct_packs: &unit.struct_packs,
         typedefs: &unit.typedefs,
     };
 
@@ -142,6 +152,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
 
     let unit_ctx = UnitCtx {
         struct_defs: &unit.struct_defs,
+        struct_packs: &unit.struct_packs,
         enum_constants: &unit.enum_constants,
         typedefs: &unit.typedefs,
         known_functions: &known_functions,
@@ -371,9 +382,10 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
         } else {
             0
         };
-        let mut block2_instrs_used: usize = 0;
+        let mut block2_bytes_used: usize = 0;
         let mut current_code_section: Option<&'static str> = None;
         for cf in &compiled {
+            let sw_bytes = estimated_sw_bytes(&cf.instrs, &cf.label_insertions);
             let initial_section = if should_emit_in_block0_code(
                 cf.is_static,
                 &cf.name,
@@ -417,9 +429,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 code_section,
                 cf.is_static,
                 &cf.name,
-                cf.instrs.len(),
-                block2_instrs_used,
-                BLOCK2_INSTR_BUDGET,
+                sw_bytes,
+                block2_bytes_used,
+                BLOCK2_BYTE_BUDGET,
             );
             if code_section == "seg_l1_block0_swco" {
                 block0_instrs_used = block0_instrs_used.saturating_add(cf.instrs.len());
@@ -430,7 +442,7 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 block1_instrs_used = block1_instrs_used.saturating_add(cf.instrs.len());
             }
             if code_section == "seg_swco" {
-                block2_instrs_used = block2_instrs_used.saturating_add(cf.instrs.len());
+                block2_bytes_used = block2_bytes_used.saturating_add(sw_bytes);
             }
             let sym = with_abi_suffix(&cf.name);
             let body_sym = if code_section == "seg_l2_swco" {
@@ -623,11 +635,9 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
                 .iter()
                 .any(|(o, b, l)| *o == req.word_offset && *b == req.byte_in_word && l == &req.label)
             {
-                entry.interior.push((
-                    req.word_offset,
-                    req.byte_in_word,
-                    req.label.clone(),
-                ));
+                entry
+                    .interior
+                    .push((req.word_offset, req.byte_in_word, req.label.clone()));
             }
         }
     }
@@ -755,12 +765,12 @@ pub fn emit_module(unit: &TranslationUnit, _char_size: u8) -> Result<AsmModule> 
 /// reserve = 130064 B). Each IR-level `MachInstr` averages ~5 bytes
 /// after selas encoding (a mix of 48-bit instructions, 24-bit short
 /// forms, and selas-inserted alignment fill), so 130064 B / 5 ≈ 26000
-/// IR instrs. We cap at 22_000 after pre-reserving `main` / `test_main`
-/// because those entry bodies pin to block0 and are usually emitted
-/// after helper-routing decisions. This leaves room for encoding
-/// expansion and for the alignment fill seld places at section
-/// boundaries. Could be derived from LDF parsing in a future iteration.
-const BLOCK0_INSTR_BUDGET: usize = 22_000;
+/// IR instrs. We cap at 18_000 after pre-reserving `main` / `test_main`
+/// because dense packed-field code can encode well above the historical
+/// average. This leaves room for encoding expansion and for the alignment
+/// fill seld places at section boundaries. Could be derived from LDF parsing
+/// in a future iteration.
+const BLOCK0_INSTR_BUDGET: usize = 18_000;
 
 /// Cap on cumulative `cf.instrs.len()` routed to `seg_l1_block1_swco`.
 /// `func_1` is reserved up front when it is the large root that forced
@@ -776,14 +786,13 @@ const BLOCK1_INSTR_BUDGET: usize = 33_400;
 /// encoded SW bytes for dense generated expressions.
 const BLOCK1_ROOT_HEADROOM: usize = 2_000;
 
-/// Cap on cumulative `cf.instrs.len()` routed to the default
+/// Cap on cumulative estimated encoded bytes routed to the default
 /// `seg_swco` block2 code section. Archive/runtime inputs also land in
-/// `block2_sw_code`, so generated csmith bodies need a conservative cap
-/// below the raw 128 KiB L1 span. Bodies above this threshold cannot be
-/// moved wholesale into block0 or block1 without recreating those
-/// overflows, so selcc emits their implementation in L2 and keeps a
-/// tiny same-name L1 thunk for direct CJUMP callers.
-const BLOCK2_INSTR_BUDGET: usize = 18_000;
+/// `block2_sw_code`, so generated csmith bodies need a byte budget below
+/// the raw 128 KiB L1 span. Counting IR instructions here is too coarse:
+/// relocated branches/loads and hardware-loop bodies force 48-bit ISA
+/// encodings and can expand one generated function to well over 110 KiB.
+const BLOCK2_BYTE_BUDGET: usize = 96 * 1024;
 
 fn root_and_entry_exceed_block0_budget(
     root_instrs: usize,
@@ -798,11 +807,11 @@ fn root_and_entry_exceed_block0_budget(
 /// "large csmith helper" body to `seg_l1_block0_swco`; for drafts
 /// with many such helpers, the cumulative size can exceed seld's
 /// `block0_sw_code` budget. Redirect overflow large helpers to the
-/// default `seg_swco` (which seld places in `block2_sw_code`). Entry
-/// symbols (`main`, `test_main`) and the small-helper / `func_1`
-/// spill paths stay in block0 unconditionally; generated large-body
-/// spills are candidates for redirection for both large-root and
-/// small-root placement.
+/// other L1 code block first; the block1 cap runs next and can still
+/// move them out if block1 is also full. Entry symbols (`main`,
+/// `test_main`) and the small-helper / `func_1` spill paths stay in
+/// block0 unconditionally; generated large-body spills are candidates
+/// for redirection for both large-root and small-root placement.
 fn apply_block0_budget_cap(
     initial_section: &'static str,
     is_static: bool,
@@ -822,7 +831,7 @@ fn apply_block0_budget_cap(
         return initial_section;
     }
     if block0_instrs_used.saturating_add(instrs) > budget {
-        split_runtime_code_section(name).unwrap_or("seg_swco")
+        split_runtime_code_section(name).unwrap_or("seg_l1_block1_swco")
     } else {
         initial_section
     }
@@ -859,14 +868,14 @@ fn apply_block2_budget_cap(
     initial_section: &'static str,
     is_static: bool,
     name: &str,
-    instrs: usize,
-    block2_instrs_used: usize,
+    sw_bytes: usize,
+    block2_bytes_used: usize,
     budget: usize,
 ) -> &'static str {
     if initial_section != "seg_swco" || !is_static || !is_block2_l2_spillable(name) {
         return initial_section;
     }
-    if block2_instrs_used.saturating_add(instrs) > budget {
+    if block2_bytes_used.saturating_add(sw_bytes) > budget {
         "seg_l2_swco"
     } else {
         initial_section
@@ -976,7 +985,54 @@ fn emit_l2_entry_thunk(
     }
     let _ = writeln!(out, "{public_sym}:");
     let _ = writeln!(out, "    I12 = {body_sym};");
+    // SHARC+ DAG2 needs separation between writing I12 and using it as
+    // the address-generator source of an indirect branch. Without this,
+    // the thunk can jump through the stale I12 left by an earlier return.
+    let _ = writeln!(out, "    NOP;");
+    let _ = writeln!(out, "    NOP;");
     let _ = writeln!(out, "    JUMP (M13,I12);");
+}
+
+fn estimated_sw_bytes(
+    instrs: &[MachInstr],
+    label_insertions: &HashMap<usize, Vec<String>>,
+) -> usize {
+    let mut bytes = 0usize;
+    let mut no_compress_label: Option<String> = None;
+    let mut end_label_seen = false;
+
+    for (idx, mi) in instrs.iter().enumerate() {
+        if let Some(labels) = label_insertions.get(&idx) {
+            if let Some(target) = no_compress_label.as_deref() {
+                if labels.iter().any(|label| label == target) {
+                    end_label_seen = true;
+                }
+            }
+        }
+
+        let isa_bytes = selinstr::encode::encode(&mi.instr).expect("instruction encoding failed");
+        let force_isa = no_compress_label.is_some() || mi.reloc.is_some();
+        let len = if force_isa {
+            6
+        } else {
+            selinstr::visa_encode::visa_encode(&mi.instr, &isa_bytes).len()
+        };
+        bytes = bytes.saturating_add(len);
+
+        if end_label_seen {
+            no_compress_label = None;
+            end_label_seen = false;
+        }
+
+        if let Instruction::DoLoop { .. } | Instruction::DoUntil { .. } = mi.instr {
+            if let Some(reloc) = &mi.reloc {
+                no_compress_label = Some(reloc.symbol.clone());
+                end_label_seen = false;
+            }
+        }
+    }
+
+    bytes
 }
 
 /// Pack a byte sequence into 32-bit words in little-endian order.
@@ -1023,17 +1079,45 @@ enum InitWord {
 }
 
 /// Strip Array layers off `ty` until reaching the leaf scalar type, or
-/// return None for non-arrays / unsized arrays.  Used to detect
-/// multi-dimensional narrow-element arrays that need byte-packed
-/// flattening (`int16_t m[2][3]` → leaf `int16_t`).
+/// return None for non-arrays, unsized arrays, or arrays of aggregates.
+/// Used to detect multi-dimensional narrow-element arrays that need
+/// byte-packed flattening (`int16_t m[2][3]` -> leaf `int16_t`).
 fn array_leaf_type<'a>(
     ty: &'a crate::types::Type,
     tctx: &'a dyn crate::types::TypeCtx,
 ) -> Option<&'a crate::types::Type> {
-    let stripped = strip_type(ty, tctx);
-    match stripped {
-        crate::types::Type::Array(elem, Some(_)) => array_leaf_type(elem, tctx).or(Some(elem)),
-        _ => None,
+    use crate::types::Type;
+
+    let mut current = strip_type(ty, tctx);
+    let mut saw_array = false;
+    loop {
+        match current {
+            Type::Array(elem, Some(_)) => {
+                saw_array = true;
+                current = strip_type(elem, tctx);
+            }
+            Type::Array(_, None) | Type::Struct { .. } | Type::Union { .. } => return None,
+            _ => return saw_array.then_some(current),
+        }
+    }
+}
+
+fn array_needs_byte_stride_flatten(
+    ty: &crate::types::Type,
+    tctx: &dyn crate::types::TypeCtx,
+) -> bool {
+    use crate::types::Type;
+    match strip_type(ty, tctx) {
+        Type::Array(elem, Some(_)) => {
+            let stripped_elem = strip_type(elem, tctx);
+            let elem_is_aggregate = matches!(
+                stripped_elem,
+                Type::Array(..) | Type::Struct { .. } | Type::Union { .. }
+            );
+            (elem_is_aggregate && !crate::types::size_bytes_ctx(elem, tctx).is_multiple_of(4))
+                || array_needs_byte_stride_flatten(elem, tctx)
+        }
+        _ => false,
     }
 }
 
@@ -1356,7 +1440,7 @@ fn resolve_struct_fields<'a>(
         Type::Typedef(name) => tctx
             .resolve_typedef(name)
             .and_then(|t| resolve_struct_fields(t, tctx)),
-        Type::Struct { name, fields } | Type::Union { name, fields } => {
+        Type::Struct { name, fields, .. } | Type::Union { name, fields, .. } => {
             if !fields.is_empty() {
                 Some(fields.as_slice())
             } else if let Some(n) = name {
@@ -1382,6 +1466,27 @@ fn strip_type<'a>(
             None => ty,
         },
         _ => ty,
+    }
+}
+
+fn aggregate_pack(ty: &crate::types::Type, tctx: &dyn crate::types::TypeCtx) -> u8 {
+    use crate::types::Type;
+    match ty.unqualified() {
+        Type::Struct { name, packed, .. } | Type::Union { name, packed, .. } => {
+            if *packed != 0 {
+                *packed
+            } else {
+                name.as_deref()
+                    .map(|n| tctx.resolve_tag_pack(n))
+                    .unwrap_or(0)
+            }
+        }
+        Type::Typedef(name) => tctx
+            .resolve_typedef(name)
+            .map(|target| aggregate_pack(target, tctx))
+            .unwrap_or(0),
+        Type::Const(inner) | Type::Volatile(inner) => aggregate_pack(inner, tctx),
+        _ => 0,
     }
 }
 
@@ -1533,8 +1638,9 @@ fn flatten_subword_aggregate_const_int(
                 let sub_off = if is_union {
                     byte_off
                 } else {
+                    let pack = aggregate_pack(stripped, tctx);
                     let (off, _, _) =
-                        crate::types::struct_field_layout_ctx(fields, sub_name, tctx)
+                        crate::types::struct_field_layout_ctx(fields, sub_name, pack, tctx)
                             .ok_or_else(|| Error::Compile {
                                 msg: format!(
                                     "field {field}: internal: sub-field {sub_name} \
@@ -1655,6 +1761,152 @@ fn flatten_subword_aggregate_const_int(
     }
 }
 
+fn merge_init_byte(v: &mut Vec<InitWord>, field: &str, byte_off: u32, byte: u32) -> Result<()> {
+    let word_idx = (byte_off / 4) as usize;
+    let shift = (byte_off % 4) * 8;
+    if word_idx >= v.len() {
+        v.resize(word_idx + 1, InitWord::Num(0));
+    }
+    v[word_idx] = match &v[word_idx] {
+        InitWord::Num(prev) => InitWord::Num(prev | ((byte & 0xFF) << shift)),
+        InitWord::Sym(_) => {
+            return Err(Error::Compile {
+                msg: format!("field {field} initializer collides with a symbolic word initializer"),
+            });
+        }
+    };
+    Ok(())
+}
+
+fn place_const_int_bytes(
+    v: &mut Vec<InitWord>,
+    field: &str,
+    byte_off: u32,
+    nbytes: u32,
+    value: u64,
+) -> Result<()> {
+    for b in 0..nbytes {
+        let byte = ((value >> (b * 8)) & 0xFF) as u32;
+        merge_init_byte(v, field, byte_off + b, byte)?;
+    }
+    Ok(())
+}
+
+fn flatten_const_aggregate_bytes(
+    v: &mut Vec<InitWord>,
+    field: &str,
+    init: &Expr,
+    ty: &crate::types::Type,
+    byte_off: u32,
+    tctx: &dyn crate::types::TypeCtx,
+) -> Result<()> {
+    use crate::types::Type;
+    let stripped = strip_type(ty, tctx);
+    match stripped {
+        Type::Struct { .. } | Type::Union { .. } => {
+            let fields = resolve_struct_fields(stripped, tctx).ok_or_else(|| Error::Compile {
+                msg: format!("field {field}: nested aggregate references unresolved tag"),
+            })?;
+            let is_union = matches!(stripped, Type::Union { .. });
+            let items = match init {
+                Expr::InitList(items) => items.as_slice(),
+                Expr::Cast(_, boxed) => match boxed.as_ref() {
+                    Expr::InitList(items) => items.as_slice(),
+                    _ => {
+                        return Err(Error::Compile {
+                            msg: format!("field {field}: nested aggregate requires braces"),
+                        });
+                    }
+                },
+                _ => {
+                    return Err(Error::Compile {
+                        msg: format!("field {field}: nested aggregate requires braces"),
+                    });
+                }
+            };
+            let mut cursor = 0usize;
+            for item in items {
+                let (fidx, inner) = match item {
+                    Expr::DesignatedInit {
+                        field: dfname,
+                        value,
+                    } => {
+                        let i = fields
+                            .iter()
+                            .position(|(n, _)| n == dfname)
+                            .ok_or_else(|| Error::Compile {
+                                msg: format!(
+                                    "field {field}: designated initializer .{dfname} \
+                                     does not match nested aggregate"
+                                ),
+                            })?;
+                        (i, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                if fidx >= fields.len() {
+                    break;
+                }
+                let (fname, fty) = &fields[fidx];
+                let field_off = if is_union {
+                    0
+                } else {
+                    let pack = aggregate_pack(stripped, tctx);
+                    crate::types::struct_field_layout_ctx(fields, fname, pack, tctx)
+                        .map(|(off, _, _)| off)
+                        .ok_or_else(|| Error::Compile {
+                            msg: format!("field {field}: internal nested field lookup failed"),
+                        })?
+                };
+                flatten_const_aggregate_bytes(v, field, inner, fty, byte_off + field_off, tctx)?;
+                cursor = fidx + 1;
+                if is_union {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        Type::Array(elem, Some(_)) => {
+            let elem_bytes = crate::types::size_bytes_ctx(elem, tctx).max(1);
+            let items = match init {
+                Expr::InitList(items) => items.as_slice(),
+                _ => return flatten_const_aggregate_bytes(v, field, init, elem, byte_off, tctx),
+            };
+            let mut cursor = 0u32;
+            for item in items {
+                let (idx, inner) = match item {
+                    Expr::ArrayDesignator { index, value } => {
+                        let i = eval_const_expr(index, tctx)? as u32;
+                        (i, value.as_ref())
+                    }
+                    other => (cursor, other),
+                };
+                flatten_const_aggregate_bytes(
+                    v,
+                    field,
+                    inner,
+                    elem,
+                    byte_off + idx * elem_bytes,
+                    tctx,
+                )?;
+                cursor = idx + 1;
+            }
+            Ok(())
+        }
+        _ => {
+            let scalar = match init {
+                Expr::InitList(items) if items.len() == 1 => &items[0],
+                other => other,
+            };
+            let n = eval_const_expr_i64(scalar).ok_or_else(|| Error::Compile {
+                msg: format!("field {field}: nested aggregate leaf is not constant"),
+            })? as u64;
+            let nbytes = crate::types::size_bytes_ctx(stripped, tctx);
+            place_const_int_bytes(v, field, byte_off, nbytes, n)
+        }
+    }
+}
+
 /// Per-field entry in the struct dispatch map used by `build_init_words`.
 /// Tuple fields: `(name, word_index, byte_in_word, type,
 /// bitfield_info)` where `bitfield_info == Some((bit_pos_in_word,
@@ -1724,6 +1976,12 @@ fn build_init_words(
                         return Ok(pack_narrow_entries(&entries, leaf_bytes, size_bytes));
                     }
                 }
+                if array_needs_byte_stride_flatten(t, tctx) {
+                    let declared_words = (size_bytes.div_ceil(4)).max(1) as usize;
+                    let mut v: Vec<InitWord> = vec![InitWord::Num(0); declared_words];
+                    flatten_const_aggregate_bytes(&mut v, "array", init, t, 0, tctx)?;
+                    return Ok(v);
+                }
             }
 
             // Honour designated initializers (`[n] = v`, `.field = v`).
@@ -1750,6 +2008,7 @@ fn build_init_words(
                 Type::Struct { .. } | Type::Union { .. } => resolve_struct_fields(t, tctx),
                 _ => None,
             });
+            let struct_pack = stripped.map(|t| aggregate_pack(t, tctx)).unwrap_or(0);
             let array_elem: Option<&Type> = stripped.and_then(|t| match t {
                 Type::Array(elem, _) => Some(elem.as_ref()),
                 _ => None,
@@ -1778,12 +2037,11 @@ fn build_init_words(
                     let (byte_off, bit_off_opt, bit_width_opt) = if is_union {
                         (0u32, None, None)
                     } else {
-                        let (byte_off, bo, bw) = crate::types::struct_field_layout_ctx(
-                            fields, fname, tctx,
-                        )
-                        .ok_or_else(|| Error::Compile {
-                            msg: format!("internal: field {fname} not found in own struct"),
-                        })?;
+                        let (byte_off, bo, bw) =
+                            crate::types::struct_field_layout_ctx(fields, fname, struct_pack, tctx)
+                                .ok_or_else(|| Error::Compile {
+                                    msg: format!("internal: field {fname} not found in own struct"),
+                                })?;
                         (byte_off, bo, bw)
                     };
                     let bf_info = match (bit_off_opt, bit_width_opt) {
@@ -1892,27 +2150,26 @@ fn build_init_words(
                                 || (!is_union
                                     && shares_word_with_later_subfield(woff, fidx, &field_map));
                             if packed {
-                                let n = eval_subword_const_int(field, value, fsize, Some(fty), tctx)?;
-                                let mask: u32 = if fsize >= 4 {
-                                    0xFFFF_FFFF
+                                let byte_off = (woff as u32) * 4 + bin;
+                                if matches!(
+                                    strip_type(fty, tctx),
+                                    Type::Struct { .. } | Type::Union { .. } | Type::Array(..)
+                                ) && matches!(value.as_ref(), Expr::InitList(_))
+                                {
+                                    flatten_const_aggregate_bytes(
+                                        &mut v, field, value, fty, byte_off, tctx,
+                                    )?;
                                 } else {
-                                    (1u32 << (fsize * 8)) - 1
-                                };
-                                let packed_val = (n & mask) << (bin * 8);
-                                ensure(&mut v, woff);
-                                v[woff] = match &v[woff] {
-                                    InitWord::Num(prev) => InitWord::Num(prev | packed_val),
-                                    InitWord::Sym(_) => {
-                                        return Err(Error::Compile {
+                                    let n = eval_const_expr_i64(value).ok_or_else(|| {
+                                        Error::Compile {
                                             msg: format!(
-                                                "field {field} sub-word initializer collides with a \
-                                             symbolic word initializer at the same word offset; \
-                                             sub-word struct fields in global initializers are not \
-                                             supported in this configuration"
+                                                "field {field}: non-constant initializer at \
+                                                 sub-word offset"
                                             ),
-                                        });
-                                    }
-                                };
+                                        }
+                                    })? as u64;
+                                    place_const_int_bytes(&mut v, field, byte_off, fsize, n)?;
+                                }
                             } else {
                                 let sub = build_init_words(value, fsize, tctx, Some(fty), ictx)?;
                                 for (k, w) in sub.into_iter().enumerate() {
@@ -1988,28 +2245,26 @@ fn build_init_words(
                                             &field_map,
                                         ));
                                 if packed {
-                                    let n = eval_subword_const_int(&fname, other, fsize, Some(fty), tctx)?;
-                                    let mask: u32 = if fsize >= 4 {
-                                        0xFFFF_FFFF
+                                    let byte_off = (woff as u32) * 4 + bin;
+                                    if matches!(
+                                        strip_type(fty, tctx),
+                                        Type::Struct { .. } | Type::Union { .. } | Type::Array(..)
+                                    ) && matches!(other, Expr::InitList(_))
+                                    {
+                                        flatten_const_aggregate_bytes(
+                                            &mut v, &fname, other, fty, byte_off, tctx,
+                                        )?;
                                     } else {
-                                        (1u32 << (fsize * 8)) - 1
-                                    };
-                                    let packed_val = (n & mask) << (bin * 8);
-                                    ensure(&mut v, woff);
-                                    v[woff] = match &v[woff] {
-                                        InitWord::Num(prev) => InitWord::Num(prev | packed_val),
-                                        InitWord::Sym(_) => {
-                                            return Err(Error::Compile {
+                                        let n = eval_const_expr_i64(other).ok_or_else(|| {
+                                            Error::Compile {
                                                 msg: format!(
-                                                    "field {fname} sub-word initializer collides \
-                                                 with a symbolic word initializer at the same word \
-                                                 offset; sub-word struct fields in global \
-                                                 initializers are not supported in this \
-                                                 configuration"
+                                                    "field {fname}: non-constant initializer at \
+                                                     sub-word offset"
                                                 ),
-                                            });
-                                        }
-                                    };
+                                            }
+                                        })? as u64;
+                                        place_const_int_bytes(&mut v, &fname, byte_off, fsize, n)?;
+                                    }
                                 } else {
                                     let sub =
                                         build_init_words(other, fsize, tctx, Some(fty), ictx)?;
@@ -2137,29 +2392,20 @@ fn resolve_static_lvalue(
         Expr::Member(base, field) => {
             let (root, off, base_ty) = resolve_static_lvalue(base, tctx, global_types)?;
             let stripped = strip_type(&base_ty, tctx);
-            let fields = match stripped {
-                Type::Struct { name, fields } => {
-                    if !fields.is_empty() {
-                        fields.clone()
-                    } else if let Some(n) = name {
-                        tctx.resolve_tag(n)?.to_vec()
-                    } else {
-                        return None;
-                    }
-                }
-                Type::Union { name, fields } => {
-                    if !fields.is_empty() {
-                        fields.clone()
-                    } else if let Some(n) = name {
-                        tctx.resolve_tag(n)?.to_vec()
-                    } else {
-                        return None;
-                    }
-                }
-                _ => return None,
+            let fields = resolve_struct_fields(stripped, tctx)?;
+            let (foff, fty) = if matches!(stripped, Type::Union { .. }) {
+                let fty = fields.iter().find(|(n, _)| n == field)?.1.clone();
+                (0, fty)
+            } else {
+                let (foff, _, _) = crate::types::struct_field_layout_ctx(
+                    fields,
+                    field,
+                    aggregate_pack(stripped, tctx),
+                    tctx,
+                )?;
+                let fty = fields.iter().find(|(n, _)| n == field)?.1.clone();
+                (foff, fty)
             };
-            let (foff, _, _) = crate::types::struct_field_layout_ctx(&fields, field, tctx)?;
-            let fty = fields.iter().find(|(n, _)| n == field)?.1.clone();
             Some((root, off + foff, fty))
         }
         _ => None,
@@ -2660,6 +2906,7 @@ struct FnEmitResult {
 /// time the compiler learns a new TU-level fact.
 struct UnitCtx<'a> {
     struct_defs: &'a [(String, Vec<(String, crate::types::Type)>)],
+    struct_packs: &'a [(String, u8)],
     enum_constants: &'a [(String, i64)],
     typedefs: &'a [(String, crate::types::Type)],
     known_functions: &'a HashSet<String>,
@@ -2682,6 +2929,7 @@ fn emit_function_instrs(
         known_functions: unit.known_functions,
         function_return_types: unit.function_return_types,
         function_param_types: unit.function_param_types,
+        struct_packs: unit.struct_packs,
     };
     let lower_result = lower::lower_function_with_known(
         func,
@@ -3046,13 +3294,53 @@ fn runtime_helper_clobbers_reg(mi: &MachInstr, reg: u16) -> bool {
 }
 
 fn instr_uses_reg(instr: &Instruction, reg: u16) -> bool {
+    fn ureg_is_data_reg(ureg: u16, reg: u16) -> bool {
+        (ureg & 0x70) == 0 && (ureg & 0xF) == reg
+    }
+
     match *instr {
-        Instruction::LoadImm { ureg, .. } => (ureg & 0xF) == reg && (ureg >> 4) == 0,
+        Instruction::LoadImm { ureg, .. } => ureg_is_data_reg(ureg, reg),
         Instruction::Compute { compute, .. } => compute_uses_reg(&compute, reg),
+        Instruction::DualMove { compute, dm, pm } => {
+            dm.dreg == reg || pm.dreg == reg || compute.is_some_and(|c| compute_uses_reg(&c, reg))
+        }
         Instruction::ComputeLoadStore { dreg, compute, .. } => {
             dreg == reg || compute.is_some_and(|c| compute_uses_reg(&c, reg))
         }
+        Instruction::IndirectBranch { compute, .. } | Instruction::DagModify { compute, .. } => {
+            compute.is_some_and(|c| compute_uses_reg(&c, reg))
+        }
+        Instruction::DoLoop {
+            counter: encode::LoopCounter::Ureg(ureg),
+            ..
+        } => ureg_is_data_reg(ureg as u16, reg),
+        Instruction::DoLoop { .. } => false,
         Instruction::Return { compute, .. } => compute.is_some_and(|c| compute_uses_reg(&c, reg)),
+        Instruction::UregDagMove { ureg, compute, .. } => {
+            ureg_is_data_reg(ureg, reg) || compute.is_some_and(|c| compute_uses_reg(&c, reg))
+        }
+        Instruction::RegisterSwap {
+            dreg,
+            cdreg,
+            compute,
+            ..
+        } => dreg == reg || cdreg == reg || compute.is_some_and(|c| compute_uses_reg(&c, reg)),
+        Instruction::UregTransfer {
+            src_ureg,
+            dst_ureg,
+            compute,
+            ..
+        } => {
+            ureg_is_data_reg(src_ureg, reg)
+                || ureg_is_data_reg(dst_ureg, reg)
+                || compute.is_some_and(|c| compute_uses_reg(&c, reg))
+        }
+        Instruction::URegMove { dest, src } => {
+            ureg_is_data_reg(dest, reg) || ureg_is_data_reg(src, reg)
+        }
+        Instruction::UregMemAccess { ureg, .. } => ureg_is_data_reg(ureg, reg),
+        Instruction::ImmShift { rn, rx, .. } => rn == reg || rx == reg,
+        Instruction::ImmShiftMem { rn, rx, dreg, .. } => rn == reg || rx == reg || dreg == reg,
         Instruction::Modify { .. } => false,
         _ => false,
     }
@@ -3362,10 +3650,8 @@ fn count_local_slots(instrs: &[MachInstr]) -> u32 {
             }
             Instruction::UregMemAccess {
                 pm, i_reg, offset, ..
-            } if i_reg == target::FRAME_PTR && !pm => {
-                if offset < deepest {
-                    deepest = offset;
-                }
+            } if i_reg == target::FRAME_PTR && !pm && offset < deepest => {
+                deepest = offset;
             }
             Instruction::Modify { i_reg, value, .. }
                 if i_reg == target::FRAME_PTR && value < deepest =>
@@ -3511,37 +3797,57 @@ fn adjust_frame_offsets(
                     -(spill_base + value + 1)
                 };
                 let start = result.len();
-                result.push(MachInstr {
-                    instr: Instruction::Modify {
-                        i_reg: target::FRAME_PTR,
-                        value: new_offset,
-                        width: MemWidth::Nw,
-                        bitrev: false,
-                    },
-                    reloc: None,
-                });
-                result.push(MachInstr {
-                    instr: Instruction::UregDagMove {
-                        pm: *pm,
-                        write: *write,
-                        ureg: *ureg,
-                        i_reg: *access_i_reg,
-                        m_reg: *m_reg,
-                        cond: *cond,
-                        compute: *compute,
-                        post_modify: *post_modify,
-                    },
-                    reloc: reloc.clone(),
-                });
-                result.push(MachInstr {
-                    instr: Instruction::Modify {
-                        i_reg: target::FRAME_PTR,
-                        value: -new_offset,
-                        width: MemWidth::Nw,
-                        bitrev: false,
-                    },
-                    reloc: None,
-                });
+                if *ureg == 0x73
+                    && *m_reg == 5
+                    && *cond == target::COND_TRUE
+                    && compute.is_none()
+                    && !*post_modify
+                    && reloc.is_none()
+                {
+                    result.push(MachInstr {
+                        instr: Instruction::UregMemAccess {
+                            pm: false,
+                            i_reg: target::FRAME_PTR,
+                            write: *write,
+                            lw: false,
+                            ureg: *ureg,
+                            offset: new_offset,
+                        },
+                        reloc: None,
+                    });
+                } else {
+                    result.push(MachInstr {
+                        instr: Instruction::Modify {
+                            i_reg: target::FRAME_PTR,
+                            value: new_offset,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
+                        reloc: None,
+                    });
+                    result.push(MachInstr {
+                        instr: Instruction::UregDagMove {
+                            pm: *pm,
+                            write: *write,
+                            ureg: *ureg,
+                            i_reg: *access_i_reg,
+                            m_reg: *m_reg,
+                            cond: *cond,
+                            compute: *compute,
+                            post_modify: *post_modify,
+                        },
+                        reloc: reloc.clone(),
+                    });
+                    result.push(MachInstr {
+                        instr: Instruction::Modify {
+                            i_reg: target::FRAME_PTR,
+                            value: -new_offset,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
+                        reloc: None,
+                    });
+                }
                 idx_map.push(start.saturating_add(1).min(result.len()));
                 idx_map.push(start.saturating_add(2).min(result.len()));
                 i += 3;
@@ -4517,6 +4823,38 @@ mod tests {
     }
 
     #[test]
+    fn callee_saved_scan_counts_ureg_transfer_defs() {
+        let instrs = vec![MachInstr {
+            instr: Instruction::UregTransfer {
+                src_ureg: target::ureg_i(target::FRAME_PTR),
+                dst_ureg: target::ureg_r(8),
+                cond: target::COND_TRUE,
+                compute: None,
+            },
+            reloc: None,
+        }];
+        assert!(callee_saved_used(&instrs).contains(&8));
+    }
+
+    #[test]
+    fn callee_saved_scan_counts_ureg_dag_move_regs() {
+        let instrs = vec![MachInstr {
+            instr: Instruction::UregDagMove {
+                pm: false,
+                write: true,
+                ureg: target::ureg_r(9),
+                i_reg: target::SCRATCH_I,
+                m_reg: 5,
+                cond: target::COND_TRUE,
+                compute: None,
+                post_modify: true,
+            },
+            reloc: None,
+        }];
+        assert!(callee_saved_used(&instrs).contains(&9));
+    }
+
+    #[test]
     fn has_global_and_label() {
         let m = compile("int main() { return 42; }");
         assert!(m.text.contains(".GLOBAL main.;"));
@@ -4582,6 +4920,73 @@ mod tests {
             m.text.contains("0x55667788"),
             "expected second word 0x55667788 in asm, got:\n{}",
             m.text
+        );
+    }
+
+    #[test]
+    fn packed_struct_array_global_init_uses_byte_stride() {
+        let src = "#pragma pack(push)
+                   #pragma pack(1)
+                   struct S { unsigned short a; unsigned char b; unsigned char c; unsigned char d; };
+                   #pragma pack(pop)
+                   struct S g[2] = {{0x1122,0x33,0x44,0x55},{0x6677,0x88,0x99,0xaa}};
+                   int main(void) { return g[1].b; }";
+        let processed = crate::preprocess_only(
+            src,
+            "packed-struct-array-init-test.c",
+            &crate::cli::Options {
+                char_size: 8,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let unit = parse::parse(&processed).expect("parse packed struct array global");
+        let m = emit_module(&unit, 8).expect("emit_module Ok for packed struct array global init");
+        assert!(
+            m.text.contains(".VAR g. = 0x44331122;"),
+            "expected first packed-array word in asm, got:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains(".VAR = 0x66770055;"),
+            "expected second element to start at byte offset 6, got:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains(".VAR = 0x00AA9988;"),
+            "expected packed tail word in asm, got:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
+    fn static_template_for_two_byte_struct_array_uses_aggregate_stride() {
+        let src = "#pragma pack(push)
+                   #pragma pack(1)
+                   struct S { unsigned char f0; signed char f1; };
+                   #pragma pack(pop)
+                   int main(void) {
+                       struct S l[3][5][4] = {{{{0,0x5e},{0x9c,0x27}}}};
+                       return l[0][0][0].f0 + l[0][0][1].f1;
+                   }";
+        let asm = crate::compile_to_asm(
+            src,
+            "static-template-two-byte-struct-array.c",
+            &crate::cli::Options {
+                char_size: 8,
+                ..Default::default()
+            },
+        )
+        .expect("compile static template for two-byte packed struct array");
+        assert!(
+            asm.contains("__selcc_init_main_"),
+            "expected large local aggregate to use a static template, got:\n{}",
+            asm
+        );
+        assert!(
+            asm.contains("0x279C5E00"),
+            "expected first two packed structs to be emitted contiguously, got:\n{}",
+            asm
         );
     }
 
@@ -4668,8 +5073,8 @@ mod tests {
                    static signed char *g_interior = &g_root[1];
                    int main(void) { return *g_interior; }";
         let unit = parse::parse(src).expect("parse sub-word interior addr global");
-        let m = emit_module(&unit, 8)
-            .expect("emit_module Ok for sub-word interior addr global init");
+        let m =
+            emit_module(&unit, 8).expect("emit_module Ok for sub-word interior addr global init");
         // The pointer slot resolves to the synthetic alias label that
         // points one byte past `g_root.` (byte 1 of word 0). The
         // emitted asm must contain the `.SET ... = <owner> + 1;`
@@ -4684,6 +5089,31 @@ mod tests {
         assert!(
             m.text.contains(".VAR g_interior. = .addrof_g_root_b1.;"),
             "expected pointer slot to reference the sub-word alias, got:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
+    fn union_member_addr_global_init_uses_union_base() {
+        let src = "union U { unsigned f0; unsigned short f1; long long f3; };
+                   static union U g[2] = { {0}, {0x275FD976U} };
+                   static unsigned short *p = &g[1].f1;
+                   int main(void) { return *p; }";
+        let unit = parse::parse(src).expect("parse union member addr global");
+        let m = emit_module(&unit, 8).expect("emit_module Ok for union member addr global init");
+        assert!(
+            m.text.contains(".VAR .addrof_g_2. = 0x275FD976;"),
+            "expected union member address to label g[1]'s first word, got:\n{}",
+            m.text
+        );
+        assert!(
+            m.text.contains(".VAR p. = .addrof_g_2.;"),
+            "expected pointer slot to reference g[1]'s first-word label, got:\n{}",
+            m.text
+        );
+        assert!(
+            !m.text.contains(".VAR p. = .addrof_g_3.;"),
+            "union member address must not use struct-style field offset, got:\n{}",
             m.text
         );
     }
@@ -4804,6 +5234,7 @@ mod tests {
         let unit = parse::parse(src).expect("parse cross-word bitfield struct global");
         let unit_tctx = UnitTypeCtx {
             struct_defs: &unit.struct_defs,
+            struct_packs: &unit.struct_packs,
             typedefs: &unit.typedefs,
         };
         let global = unit
@@ -4962,12 +5393,11 @@ mod tests {
     }
 
     #[test]
-    fn block0_helper_spill_overflow_falls_back_to_seg_swco() {
+    fn block0_helper_spill_overflow_tries_block1() {
         // Pure-function check on the budget cap: when the root is too
         // large for block0 and cumulative block0 spills already exceed
-        // the budget, large csmith helpers must fall back to the
-        // default `seg_swco` segment (block2_sw_code) instead of
-        // continuing to pile into `seg_l1_block0_swco`.
+        // the budget, large csmith helpers must try the other L1 code
+        // block instead of continuing to pile into `seg_l1_block0_swco`.
         //
         // First helper just under the budget: lands in block0.
         let s1 = apply_block0_budget_cap(
@@ -4994,8 +5424,8 @@ mod tests {
             BLOCK0_INSTR_BUDGET,
         );
         assert_eq!(
-            s2, "seg_swco",
-            "helper that would push past the block0 budget must spill to seg_swco"
+            s2, "seg_l1_block1_swco",
+            "helper that would push past the block0 budget must spill to block1"
         );
         // Entry symbols and func_1 are never redirected, even when
         // cumulative use is far past the budget — they remain pinned
@@ -5028,7 +5458,7 @@ mod tests {
             BLOCK0_INSTR_BUDGET,
         );
         assert_eq!(
-            s3, "seg_swco",
+            s3, "seg_l1_block1_swco",
             "small-root large body spill must obey the block0 budget cap"
         );
         let s3_fit = apply_block0_budget_cap(
@@ -5175,8 +5605,8 @@ mod tests {
             true,
             "func_4",
             2_000,
-            BLOCK2_INSTR_BUDGET - 3_000,
-            BLOCK2_INSTR_BUDGET,
+            BLOCK2_BYTE_BUDGET - 3_000,
+            BLOCK2_BYTE_BUDGET,
         );
         assert_eq!(s1, "seg_swco");
 
@@ -5185,8 +5615,8 @@ mod tests {
             true,
             "func_4",
             5_000,
-            BLOCK2_INSTR_BUDGET - 100,
-            BLOCK2_INSTR_BUDGET,
+            BLOCK2_BYTE_BUDGET - 100,
+            BLOCK2_BYTE_BUDGET,
         );
         assert_eq!(s2, "seg_l2_swco");
 
@@ -5195,10 +5625,23 @@ mod tests {
             true,
             "helper",
             5_000,
-            BLOCK2_INSTR_BUDGET,
-            BLOCK2_INSTR_BUDGET,
+            BLOCK2_BYTE_BUDGET,
+            BLOCK2_BYTE_BUDGET,
         );
         assert_eq!(s3, "seg_swco");
+
+        let reloc_instrs = vec![MachInstr {
+            instr: Instruction::LoadImm { ureg: 12, value: 0 },
+            reloc: Some(Reloc {
+                symbol: "target".into(),
+                kind: RelocKind::Addr24,
+            }),
+        }];
+        assert_eq!(
+            estimated_sw_bytes(&reloc_instrs, &HashMap::new()),
+            6,
+            "relocated SW instructions must be budgeted as full 48-bit encodings"
+        );
 
         let mut out = String::new();
         let mut current = Some("seg_l1_block1_swco");
@@ -5210,6 +5653,8 @@ mod tests {
                 ".SECTION/SW seg_l1_block0_swco;\n",
                 "func_4.:\n",
                 "    I12 = .L_sel_l2_func_4;\n",
+                "    NOP;\n",
+                "    NOP;\n",
                 "    JUMP (M13,I12);\n"
             )
         );

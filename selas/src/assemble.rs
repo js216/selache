@@ -283,7 +283,7 @@ fn reloc_type_for(instr: &selinstr::encode::Instruction) -> u8 {
 ///
 /// Returns `Some(new_instr)` when the reference can be rewritten into a
 /// position-independent form: a PC-relative Type 8b direct branch for a
-/// same-section `JUMP`/`CALL`, or a Type 12/13 DO loop whose RELADDR
+/// same-section L2 `JUMP`/`CALL`, or a Type 12/13 DO loop whose RELADDR
 /// field is `label_addr - instr_word_offset` (SHARC ISR, Program Flow
 /// Control, Type 12/13: RELADDR is "the end-of-loop address relative
 /// to the DO LOOP instruction address"). The rewritten bytes need no
@@ -296,6 +296,10 @@ fn reloc_type_for(instr: &selinstr::encode::Instruction) -> u8 {
 ///     must patch, regardless of whether the symbol is locally defined.
 ///   - `CJump`: Type 25a has no PC-relative variant, so there is no
 ///     position-independent rewrite available.
+///   - Non-L2 direct branches: these must stay as PM24
+///     absolute relocations. Long L1 generated blocks exposed that the
+///     PC-relative form is not reliable for every large-distance branch
+///     the compiler emits.
 ///   - Any cross-section reference: a PC-relative offset between two
 ///     sections is not a fixed constant because the linker is free to
 ///     place the sections arbitrarily far apart.
@@ -311,6 +315,7 @@ fn resolve_labels(
     instr: &selinstr::encode::Instruction,
     label_name: &str,
     label_map: &std::collections::HashMap<String, (usize, u32)>,
+    section_name: &str,
     instr_section_idx: usize,
     instr_word_offset: u32,
 ) -> Option<selinstr::encode::Instruction> {
@@ -329,6 +334,16 @@ fn resolve_labels(
     }
     let (label_section, label_word_offset) = *label_map.get(label_name)?;
     if label_section != instr_section_idx {
+        return None;
+    }
+    if matches!(
+        instr,
+        Instruction::Branch {
+            target: BranchTarget::Absolute(0),
+            ..
+        }
+    ) && !section_name.contains("l2")
+    {
         return None;
     }
     let offset = (label_word_offset as i32) - (instr_word_offset as i32);
@@ -593,6 +608,7 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                 &pi.instr,
                 &pi.label_ref,
                 &label_map,
+                &sections[pi.section_idx].0,
                 pi.section_idx,
                 pi.word_offset,
             ) {
@@ -628,12 +644,33 @@ fn assemble_source_inner(raw_src: &str, visa: bool) -> Result<Vec<u8>> {
                     // Local branch labels (.L_branch_*, .L_doloop_*)
                     // should have been resolved above by resolve_labels
                     // into PC-relative form. Emitting them as linker
-                    // relocations would fail because the linker doesn't
-                    // know about .L_ symbols. Skip them — but NOT
-                    // .L_ret_ labels, which are return-address labels
-                    // inserted by selcc's CJUMP delay-slot code and need
-                    // absolute-address relocations via local symbols.
-                    if pi.label_ref.starts_with(".L_") && !pi.label_ref.starts_with(".L_ret_") {
+                    // relocations would fail because they are intentionally
+                    // synthetic branch targets. Do not suppress other `.L_`
+                    // symbols: L2 thunks use `.L_sel_l2_*` labels as local
+                    // absolute LoadImm targets and need PM32 relocations.
+                    let unresolved_local_branch = matches!(
+                        pi.instr,
+                        selinstr::encode::Instruction::Branch { .. }
+                            | selinstr::encode::Instruction::DoLoop { .. }
+                            | selinstr::encode::Instruction::DoUntil { .. }
+                    ) && (pi.label_ref.starts_with(".L_branch_")
+                        || pi.label_ref.starts_with(".L_doloop_"));
+                    let local_abs_branch = matches!(
+                        pi.instr,
+                        selinstr::encode::Instruction::Branch {
+                            target: selinstr::encode::BranchTarget::Absolute(0),
+                            ..
+                        }
+                    ) && label_map
+                        .get(&pi.label_ref)
+                        .map(|(sec_idx, _)| *sec_idx == pi.section_idx)
+                        .unwrap_or(false)
+                        && !sections[pi.section_idx].0.contains("l2");
+                    if pi.label_ref.starts_with(".L_")
+                        && !pi.label_ref.starts_with(".L_ret_")
+                        && unresolved_local_branch
+                        && !local_abs_branch
+                    {
                         continue;
                     }
                     // All code-section relocations use the SHARC+ PM
@@ -977,11 +1014,7 @@ fn parse_sym_plus_offset(value: &str) -> (String, i64) {
         // Numeric literal on the right and identifier on the left:
         // accept and return the sym +/- num decomposition.
         if let Some(num) = parse_u32_literal(rhs) {
-            let signed = if c == b'-' {
-                -(num as i64)
-            } else {
-                num as i64
-            };
+            let signed = if c == b'-' { -(num as i64) } else { num as i64 };
             return (lhs.to_string(), signed);
         }
     }
@@ -1565,10 +1598,7 @@ mod tests {
     /// alias whose value is `slot_owner + remainder_bytes`.
     #[test]
     fn test_parse_sym_plus_offset() {
-        assert_eq!(
-            super::parse_sym_plus_offset("g."),
-            ("g.".to_string(), 0)
-        );
+        assert_eq!(super::parse_sym_plus_offset("g."), ("g.".to_string(), 0));
         assert_eq!(
             super::parse_sym_plus_offset("g. + 3"),
             ("g.".to_string(), 3)
@@ -1643,10 +1673,12 @@ mod tests {
 
     #[test]
     fn test_branch_label_resolution() {
-        // `_start` at word 0, JUMP at word 2, so the position-independent
+        // L2 still needs PC-relative local branches because its PM alias
+        // cannot fit in an absolute PM24 field. `_start` at parcel 0,
+        // JUMP at parcel 2, so the position-independent
         // rewrite must produce `JUMP (PC,-0x2)`.
         let data = assemble_str(
-            ".SECTION/PM seg_pmco;\n\
+            ".SECTION/PM seg_l2_swco;\n\
              .GLOBAL _start;\n\
              _start: NOP;\n\
              NOP;\n\
@@ -1656,8 +1688,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_type, 1);
 
-        let shdr =
-            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
+        let shdr = find_section_by_name(&data, &hdr, "seg_l2_swco")
+            .expect("seg_l2_swco section not found");
         assert_eq!(shdr.sh_size, 18); // 3 instructions * 6 bytes
 
         let off = shdr.sh_offset as usize;
@@ -1671,10 +1703,10 @@ mod tests {
 
     #[test]
     fn test_forward_branch_label() {
-        // JUMP at word 0, `_end` at word 2, so the rewrite must produce
+        // In L2, JUMP at parcel 0 and `_end` at parcel 2, so the rewrite must produce
         // `JUMP (PC,0x2)`.
         let data = assemble_str(
-            ".SECTION/PM seg_pmco;\n\
+            ".SECTION/PM seg_l2_swco;\n\
              .GLOBAL _start;\n\
              _start: JUMP _end;\n\
              NOP;\n\
@@ -1684,8 +1716,8 @@ mod tests {
         let hdr = selelf::elf::parse_header(&data).unwrap();
         assert_eq!(hdr.e_type, 1);
 
-        let shdr =
-            find_section_by_name(&data, &hdr, "seg_pmco").expect("seg_pmco section not found");
+        let shdr = find_section_by_name(&data, &hdr, "seg_l2_swco")
+            .expect("seg_l2_swco section not found");
         let off = shdr.sh_offset as usize;
         let word = read_word48(&data[off..off + 6]);
         let decoded = selinstr::disasm::decode_instruction(word);
@@ -1693,6 +1725,27 @@ mod tests {
             decoded, "JUMP (PC,0x2)",
             "JUMP _end at word 0 must become JUMP (PC,0x2)",
         );
+    }
+
+    #[test]
+    fn test_l1_local_branch_stays_pm24_reloc() {
+        let data = assemble_str(
+            ".SECTION/PM seg_pmco;\n\
+             .GLOBAL _start;\n\
+             _start: JUMP _end;\n\
+             NOP;\n\
+             _end: NOP;\n\
+             .ENDSEG;\n",
+        );
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+        let rela = find_section_by_name(&data, &hdr, ".rela.seg_pmco")
+            .expect(".rela.seg_pmco section not found");
+        assert_eq!(rela.sh_size, 12);
+        let rela_off = rela.sh_offset as usize;
+        let r_offset = u32::from_le_bytes(data[rela_off..rela_off + 4].try_into().unwrap());
+        let r_info = u32::from_le_bytes(data[rela_off + 4..rela_off + 8].try_into().unwrap());
+        assert_eq!(r_offset, 0);
+        assert_eq!(r_info & 0xff, selelf::elf::R_SHARC_PM24);
     }
 
     #[test]
@@ -1805,6 +1858,58 @@ mod tests {
             r_type,
             selelf::elf::R_SHARC_PM32,
             "LoadImm of extern must use R_SHARC_PM32 (0x0c), got 0x{r_type:x}",
+        );
+    }
+
+    #[test]
+    fn test_load_imm_of_local_cross_section_label_emits_pm32_reloc() {
+        let src = ".SECTION/SW seg_swco;\n\
+                   .GLOBAL _start;\n\
+                   _start: I12 = .L_sel_l2_target;\n\
+                   JUMP (M13,I12);\n\
+                   .SECTION/SW seg_l2_swco;\n\
+                   .L_sel_l2_target: NOP;\n\
+                   .ENDSEG;\n";
+        let data = assemble_source(src, true).expect("assemble");
+        let hdr = selelf::elf::parse_header(&data).unwrap();
+
+        let rela = find_section_by_name(&data, &hdr, ".rela.seg_swco")
+            .expect(".rela.seg_swco section not found");
+        assert_eq!(rela.sh_size, 12, "expected exactly one thunk relocation");
+        let rela_off = rela.sh_offset as usize;
+        let r_offset = u32::from_le_bytes(data[rela_off..rela_off + 4].try_into().unwrap());
+        let r_info = u32::from_le_bytes(data[rela_off + 4..rela_off + 8].try_into().unwrap());
+        let r_type = r_info & 0xff;
+        assert_eq!(r_offset, 0, "LoadImm relocation should patch parcel 0");
+        assert_eq!(
+            r_type,
+            selelf::elf::R_SHARC_PM32,
+            "L2 thunk LoadImm must use a PM32 relocation, got 0x{r_type:x}",
+        );
+
+        let symtab_shdr = find_section_by_name(&data, &hdr, ".symtab").expect(".symtab not found");
+        let strtab_shdr = find_section_by_name(&data, &hdr, ".strtab").expect(".strtab not found");
+        let symtab_off = symtab_shdr.sh_offset as usize;
+        let symtab_end = symtab_off + symtab_shdr.sh_size as usize;
+        let strtab = &data[strtab_shdr.sh_offset as usize
+            ..(strtab_shdr.sh_offset + strtab_shdr.sh_size) as usize];
+
+        let mut found = false;
+        let mut cursor = symtab_off;
+        while cursor + 16 <= symtab_end {
+            let st_name = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
+            let st_info = data[cursor + 12];
+            let name = selelf::elf::read_string_at(strtab, st_name);
+            if name == ".L_sel_l2_target" {
+                found = true;
+                assert_eq!(st_info >> 4, selelf::elf::STB_LOCAL);
+                break;
+            }
+            cursor += 16;
+        }
+        assert!(
+            found,
+            "cross-section L2 thunk label must be emitted as a local symbol"
         );
     }
 

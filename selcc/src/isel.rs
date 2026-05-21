@@ -2635,14 +2635,8 @@ fn emit_frame_access(instrs: &mut Vec<MachInstr>, offset: i32, dreg: u16, write:
 }
 
 /// Emit an indirect memory access through a pointer held in a data register.
-/// Transfers the pointer to I4 (scratch index register) via UregTransfer,
-/// then accesses DM(I4, offset). SHARC+ has a one-cycle DAG-latch latency
-/// between writing an index register from the register file and using it
-/// as the base of an address-generator cycle, so a NOP is inserted between
-/// the transfer and the memory access to let the new I4 value propagate.
-/// Without the NOP the AG computes the address from the STALE I4, and the
-/// load/store lands at the wrong memory location (typically an instant
-/// hard fault on a read-only or out-of-range address).
+/// Transfers the pointer to I4 (scratch index register), then accesses
+/// DM(I4, offset).
 fn emit_indirect_access(
     instrs: &mut Vec<MachInstr>,
     base: u16,

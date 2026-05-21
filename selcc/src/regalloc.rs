@@ -17,7 +17,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::mach::MachInstr;
 use crate::target;
 
-use selinstr::encode::{AluOp, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, ShiftOp};
+use selinstr::encode::{
+    AluOp, BranchTarget, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, MulOp, ShiftOp,
+};
 
 const UREG_ASTATX: u16 = 0x73;
 const DAG_M_ZERO: u8 = 5;
@@ -54,6 +56,8 @@ pub fn allocate(
     let mut alloc = Allocator::new(num_params, reserves_r1);
     let mut out = Vec::new();
     let mut index_map = Vec::with_capacity(instrs.len());
+    let live_out = (instrs.len() >= DEAD_VREG_RELEASE_MIN_INSTRS)
+        .then(|| compute_live_out(instrs, label_positions));
 
     let label_indices: BTreeSet<usize> = label_positions.iter().map(|&(_, idx)| idx).collect();
 
@@ -69,10 +73,19 @@ pub fn allocate(
         }
         index_map.push(out.len());
         alloc.rewrite(mi, &mut out);
+        if let Some(live_out) = &live_out {
+            alloc.release_dead_vregs(&live_out[i]);
+        }
     }
 
     (out, alloc.spill_slots, index_map)
 }
+
+/// Liveness-based vreg release is a targeted pressure valve for very large
+/// generated csmith functions whose dead temporaries would otherwise reserve
+/// tens of thousands of spill slots. Smaller functions keep the older
+/// conservative allocator behavior; it is less compact but battle-tested.
+const DEAD_VREG_RELEASE_MIN_INSTRS: usize = 5_000;
 
 struct Allocator {
     /// Mapping from virtual register to physical register.
@@ -112,6 +125,8 @@ struct Allocator {
     spill_slots: u32,
     /// Spill map: virtual register -> spill slot offset.
     spill_map: BTreeMap<u16, u32>,
+    /// Spill slots released after their owning vreg is dead.
+    free_spill_slots: BTreeSet<u32>,
 }
 
 fn spill_mem_access(write: bool) -> MemAccess {
@@ -205,6 +220,350 @@ fn emit_astat_spill_access(out: &mut Vec<MachInstr>, slot_marker: u32, write: bo
     });
 }
 
+#[derive(Default)]
+struct VRegRefs {
+    uses: BTreeSet<u16>,
+    defs: BTreeSet<u16>,
+}
+
+fn is_fixed_ureg_ref(ureg: u16) -> bool {
+    ureg & target::UREG_FIXED_TAG != 0 && matches!(ureg & 0x70, 0x00 | 0x10 | 0x20)
+}
+
+fn is_forced_arg_dest(ureg: u16) -> bool {
+    (0xC000..0xC010).contains(&ureg)
+}
+
+fn add_vreg_ref(set: &mut BTreeSet<u16>, vreg: u16) {
+    if !is_fixed_ureg_ref(vreg) && !is_forced_arg_dest(vreg) {
+        set.insert(vreg);
+    }
+}
+
+fn add_vreg_use(refs: &mut VRegRefs, vreg: u16) {
+    add_vreg_ref(&mut refs.uses, vreg);
+}
+
+fn add_vreg_def(refs: &mut VRegRefs, vreg: u16) {
+    add_vreg_ref(&mut refs.defs, vreg);
+}
+
+fn collect_compute_refs(compute: &ComputeOp, refs: &mut VRegRefs) {
+    match compute {
+        ComputeOp::Alu(alu) => collect_alu_refs(alu, refs),
+        ComputeOp::Mul(mul) => collect_mul_refs(mul, refs),
+        ComputeOp::Shift(shift) => collect_shift_refs(shift, refs),
+        ComputeOp::Falu(falu) => collect_falu_refs(falu, refs),
+        ComputeOp::Multi(_) => {}
+    }
+}
+
+fn collect_alu_refs(alu: &AluOp, refs: &mut VRegRefs) {
+    use AluOp::*;
+    match *alu {
+        Comp { rx, ry } | CompU { rx, ry } => {
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        Pass { rn, rx } if is_forced_arg_dest(rn) => {
+            add_vreg_use(refs, rx);
+        }
+        Add { rn, rx, ry }
+        | Sub { rn, rx, ry }
+        | And { rn, rx, ry }
+        | Or { rn, rx, ry }
+        | Xor { rn, rx, ry }
+        | AddCi { rn, rx, ry }
+        | SubCi { rn, rx, ry }
+        | Avg { rn, rx, ry }
+        | Min { rn, rx, ry }
+        | Max { rn, rx, ry }
+        | Clip { rn, rx, ry } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        Pass { rn, rx }
+        | Neg { rn, rx }
+        | Not { rn, rx }
+        | Inc { rn, rx }
+        | Dec { rn, rx }
+        | Abs { rn, rx }
+        | PassCi { rn, rx }
+        | PassCiMinus1 { rn, rx } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+        }
+    }
+}
+
+fn collect_mul_refs(mul: &MulOp, refs: &mut VRegRefs) {
+    use MulOp::*;
+    match *mul {
+        ClrMrf | ClrMrb | TrncMrf | TrncMrb => {}
+        MrfMulSsf { rx, ry }
+        | MrfMulSsi { rx, ry }
+        | MrbMulSsf { rx, ry }
+        | MrfMacSsf { rx, ry }
+        | MrbMacSsf { rx, ry }
+        | MrfMsubSsf { rx, ry }
+        | MrbMsubSsf { rx, ry }
+        | MrfMulUuf { rx, ry } => {
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        MulSsf { rn, rx, ry }
+        | MulSsi { rn, rx, ry }
+        | FMul { rn, rx, ry }
+        | MacSsf { rn, rx, ry } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        SatMrf { rn }
+        | SatMrb { rn }
+        | TrncMrfReg { rn }
+        | TrncMrbReg { rn }
+        | ReadMr0f { rn }
+        | ReadMr1f { rn }
+        | ReadMr2f { rn }
+        | ReadMr0b { rn }
+        | ReadMr1b { rn }
+        | ReadMr2b { rn } => add_vreg_def(refs, rn),
+        WriteMr0f { rn }
+        | WriteMr1f { rn }
+        | WriteMr2f { rn }
+        | WriteMr0b { rn }
+        | WriteMr1b { rn }
+        | WriteMr2b { rn } => add_vreg_use(refs, rn),
+    }
+}
+
+fn collect_falu_refs(falu: &FaluOp, refs: &mut VRegRefs) {
+    match *falu {
+        FaluOp::Comp { rx, ry } => {
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        FaluOp::Add { rn, rx, ry }
+        | FaluOp::Sub { rn, rx, ry }
+        | FaluOp::Avg { rn, rx, ry }
+        | FaluOp::AbsAdd { rn, rx, ry }
+        | FaluOp::AbsSub { rn, rx, ry }
+        | FaluOp::Scalb { rn, rx, ry }
+        | FaluOp::FixBy { rn, rx, ry }
+        | FaluOp::FloatBy { rn, rx, ry }
+        | FaluOp::TruncBy { rn, rx, ry }
+        | FaluOp::Copysign { rn, rx, ry }
+        | FaluOp::Min { rn, rx, ry }
+        | FaluOp::Max { rn, rx, ry }
+        | FaluOp::Clip { rn, rx, ry } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        FaluOp::Pass { rn, rx }
+        | FaluOp::Neg { rn, rx }
+        | FaluOp::Float { rn, rx }
+        | FaluOp::Fix { rn, rx }
+        | FaluOp::Abs { rn, rx }
+        | FaluOp::Rnd { rn, rx }
+        | FaluOp::Mant { rn, rx }
+        | FaluOp::Logb { rn, rx }
+        | FaluOp::Recips { rn, rx }
+        | FaluOp::Rsqrts { rn, rx }
+        | FaluOp::Trunc { rn, rx } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+        }
+    }
+}
+
+fn collect_shift_refs(shift: &ShiftOp, refs: &mut VRegRefs) {
+    use ShiftOp::*;
+    match *shift {
+        Btst { rx, ry } => {
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        Lshift { rn, rx, ry }
+        | Ashift { rn, rx, ry }
+        | OrLshift { rn, rx, ry }
+        | OrAshift { rn, rx, ry }
+        | Rot { rn, rx, ry }
+        | Bclr { rn, rx, ry }
+        | Bset { rn, rx, ry }
+        | Btgl { rn, rx, ry }
+        | Fext { rn, rx, ry }
+        | Fdep { rn, rx, ry }
+        | OrFextSe { rn, rx, ry }
+        | OrFdep { rn, rx, ry } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+            add_vreg_use(refs, ry);
+        }
+        Exp { rn, rx }
+        | ExpEx { rn, rx }
+        | Leftz { rn, rx }
+        | Lefto { rn, rx }
+        | Fpack { rn, rx }
+        | Funpack { rn, rx } => {
+            add_vreg_def(refs, rn);
+            add_vreg_use(refs, rx);
+        }
+    }
+}
+
+fn collect_instr_refs(instr: &Instruction) -> VRegRefs {
+    let mut refs = VRegRefs::default();
+    match instr {
+        Instruction::LoadImm { ureg, .. } => add_vreg_def(&mut refs, *ureg),
+        Instruction::Return {
+            compute: Some(compute),
+            ..
+        }
+        | Instruction::Compute { compute, .. } => collect_compute_refs(compute, &mut refs),
+        Instruction::ComputeLoadStore {
+            compute,
+            access,
+            dreg,
+            ..
+        } => {
+            if let Some(compute) = compute {
+                collect_compute_refs(compute, &mut refs);
+            }
+            if access.write {
+                add_vreg_use(&mut refs, *dreg);
+            } else {
+                add_vreg_def(&mut refs, *dreg);
+            }
+        }
+        Instruction::URegMove { dest, src } => {
+            add_vreg_def(&mut refs, *dest);
+            add_vreg_use(&mut refs, *src);
+        }
+        Instruction::UregDagMove {
+            write,
+            ureg,
+            compute,
+            ..
+        } => {
+            if let Some(compute) = compute {
+                collect_compute_refs(compute, &mut refs);
+            }
+            if *write {
+                add_vreg_use(&mut refs, *ureg);
+            } else {
+                add_vreg_def(&mut refs, *ureg);
+            }
+        }
+        Instruction::UregAbsAccess { write, ureg, .. }
+        | Instruction::UregMemAccess { write, ureg, .. } => {
+            if *write {
+                add_vreg_use(&mut refs, *ureg);
+            } else {
+                add_vreg_def(&mut refs, *ureg);
+            }
+        }
+        Instruction::UregTransfer {
+            src_ureg,
+            dst_ureg,
+            compute,
+            ..
+        } => {
+            if let Some(compute) = compute {
+                collect_compute_refs(compute, &mut refs);
+            }
+            add_vreg_use(&mut refs, *src_ureg);
+            add_vreg_def(&mut refs, *dst_ureg);
+        }
+        Instruction::IndirectBranch {
+            compute: Some(compute),
+            ..
+        }
+        | Instruction::DualMove {
+            compute: Some(compute),
+            ..
+        } => collect_compute_refs(compute, &mut refs),
+        _ => {}
+    }
+    refs
+}
+
+fn compute_successors(instrs: &[MachInstr], label_positions: &[(u32, usize)]) -> Vec<Vec<usize>> {
+    let label_to_index: BTreeMap<u32, usize> = label_positions.iter().copied().collect();
+    let mut successors = vec![Vec::new(); instrs.len()];
+    for (i, mi) in instrs.iter().enumerate() {
+        let next = (i + 1 < instrs.len()).then_some(i + 1);
+        match mi.instr {
+            Instruction::Branch {
+                call: false,
+                target: BranchTarget::PcRelative(label),
+                ..
+            } => {
+                if let Some(&idx) = (label >= 0)
+                    .then(|| label_to_index.get(&(label as u32)))
+                    .flatten()
+                    .filter(|&&idx| idx < instrs.len())
+                {
+                    successors[i].push(idx);
+                }
+                if let Some(next) = next {
+                    // Keeping the fall-through edge for unconditional
+                    // branches is conservative and also covers any delayed
+                    // branch forms that execute following instructions.
+                    successors[i].push(next);
+                }
+            }
+            Instruction::IndirectBranch { call: false, .. } | Instruction::Return { .. } => {}
+            _ => {
+                if let Some(next) = next {
+                    successors[i].push(next);
+                }
+            }
+        }
+    }
+    successors
+}
+
+fn compute_live_out(instrs: &[MachInstr], label_positions: &[(u32, usize)]) -> Vec<BTreeSet<u16>> {
+    let refs: Vec<VRegRefs> = instrs
+        .iter()
+        .map(|mi| collect_instr_refs(&mi.instr))
+        .collect();
+    let successors = compute_successors(instrs, label_positions);
+    let mut live_in = vec![BTreeSet::new(); instrs.len()];
+    let mut live_out = vec![BTreeSet::new(); instrs.len()];
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in (0..instrs.len()).rev() {
+            let mut new_out = BTreeSet::new();
+            for &succ in &successors[i] {
+                new_out.extend(live_in[succ].iter().copied());
+            }
+
+            let mut new_in = new_out.clone();
+            for def in &refs[i].defs {
+                new_in.remove(def);
+            }
+            new_in.extend(refs[i].uses.iter().copied());
+
+            if new_out != live_out[i] {
+                live_out[i] = new_out;
+                changed = true;
+            }
+            if new_in != live_in[i] {
+                live_in[i] = new_in;
+                changed = true;
+            }
+        }
+    }
+
+    live_out
+}
+
 impl Allocator {
     fn new(num_params: u16, reserves_r1: bool) -> Self {
         let mut vreg_to_phys = BTreeMap::new();
@@ -267,6 +626,57 @@ impl Allocator {
             next_evict: 0,
             spill_slots: 0,
             spill_map: BTreeMap::new(),
+            free_spill_slots: BTreeSet::new(),
+        }
+    }
+
+    fn alloc_spill_slot(&mut self) -> u32 {
+        if let Some(slot) = self.free_spill_slots.pop_first() {
+            slot
+        } else {
+            let slot = self.spill_slots;
+            self.spill_slots += 1;
+            slot
+        }
+    }
+
+    fn spill_slot_for(&mut self, vreg: u16) -> u32 {
+        if let Some(&slot) = self.spill_map.get(&vreg) {
+            slot
+        } else {
+            let slot = self.alloc_spill_slot();
+            self.spill_map.insert(vreg, slot);
+            slot
+        }
+    }
+
+    fn release_dead_vregs(&mut self, live_out: &BTreeSet<u16>) {
+        let dead_mapped: Vec<u16> = self
+            .vreg_to_phys
+            .keys()
+            .copied()
+            .filter(|vreg| !self.permanent_vregs.contains(vreg) && !live_out.contains(vreg))
+            .collect();
+
+        for vreg in dead_mapped {
+            if let Some(phys) = self.vreg_to_phys.remove(&vreg) {
+                self.phys_to_vreg.remove(&phys);
+                if !self.arg_setup_pins.contains(&phys) {
+                    self.pinned.remove(&phys);
+                }
+            }
+        }
+
+        let dead_spills: Vec<u16> = self
+            .spill_map
+            .keys()
+            .copied()
+            .filter(|vreg| !self.permanent_vregs.contains(vreg) && !live_out.contains(vreg))
+            .collect();
+        for vreg in dead_spills {
+            if let Some(slot) = self.spill_map.remove(&vreg) {
+                self.free_spill_slots.insert(slot);
+            }
         }
     }
 
@@ -329,11 +739,7 @@ impl Allocator {
 
             // Fallback: no callee-saved register is free, so spill to the
             // stack. Allocate a spill slot if not already spilled.
-            let slot = *self.spill_map.entry(vreg).or_insert_with(|| {
-                let s = self.spill_slots;
-                self.spill_slots += 1;
-                s
-            });
+            let slot = self.spill_slot_for(vreg);
             // Store to the spill slot. Use *positive* offsets from I6:
             // `adjust_frame_offsets` treats negative offsets as
             // compiler-managed local slots and positive offsets as
@@ -376,11 +782,7 @@ impl Allocator {
             .collect();
 
         for (vreg, phys) in to_flush {
-            let slot = *self.spill_map.entry(vreg).or_insert_with(|| {
-                let s = self.spill_slots;
-                self.spill_slots += 1;
-                s
-            });
+            let slot = self.spill_slot_for(vreg);
             // Use a positive offset so `adjust_frame_offsets` reroutes
             // the slot into the spill region (matching the convention
             // in `spill_caller_saved` and `get_phys`).
@@ -489,11 +891,7 @@ impl Allocator {
         let evicted_vreg = self.phys_to_vreg[&evict_phys];
 
         // Allocate or reuse a spill slot for the evicted vreg.
-        let slot = *self.spill_map.entry(evicted_vreg).or_insert_with(|| {
-            let s = self.spill_slots;
-            self.spill_slots += 1;
-            s
-        });
+        let slot = self.spill_slot_for(evicted_vreg);
 
         // Emit store of evicted register. Uses a *positive* offset
         // so `adjust_frame_offsets` reroutes the slot into the spill
@@ -1006,11 +1404,7 @@ impl Allocator {
                             && v != target::RETURN_REG_HI_VREG
                             && self.vreg_to_phys.get(&v).copied() == Some(dest_phys)
                         {
-                            let slot = *self.spill_map.entry(v).or_insert_with(|| {
-                                let s = self.spill_slots;
-                                self.spill_slots += 1;
-                                s
-                            });
+                            let slot = self.spill_slot_for(v);
                             emit_spill_access(spill, slot, dest_phys as u16, true);
                             self.vreg_to_phys.remove(&v);
                             self.phys_to_vreg.remove(&dest_phys);
@@ -1019,7 +1413,17 @@ impl Allocator {
                     // Reserve dest_phys until the upcoming CJUMP so a
                     // later get_phys cannot re-allocate it and clobber
                     // the just-placed argument value.
-                    if !self.pinned.contains(&dest_phys) {
+                    let was_transiently_pinned = if let Some(pos) =
+                        self.transient_pins.iter().position(|&p| p == dest_phys)
+                    {
+                        self.transient_pins.swap_remove(pos);
+                        true
+                    } else {
+                        false
+                    };
+                    if (!self.pinned.contains(&dest_phys) || was_transiently_pinned)
+                        && !self.arg_setup_pins.contains(&dest_phys)
+                    {
                         self.pinned.insert(dest_phys);
                         self.arg_setup_pins.push(dest_phys);
                     }
@@ -1582,6 +1986,68 @@ mod tests {
         assert!(
             n_caller >= n_callee,
             "expected more caller-saved than callee-saved, got {n_caller} vs {n_callee}"
+        );
+    }
+
+    #[test]
+    fn arg_setup_pin_survives_dead_source_release() {
+        let mut alloc = Allocator::new(0, false);
+        alloc.vreg_to_phys.insert(10, 3);
+        alloc.phys_to_vreg.insert(3, 10);
+        alloc.vreg_to_phys.insert(20, 8);
+        alloc.phys_to_vreg.insert(8, 20);
+
+        let mut out = Vec::new();
+        alloc.rewrite(
+            &MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::Pass {
+                        rn: 0xC000 | target::ARG_REGS[1] as u16,
+                        rx: 20,
+                    }),
+                },
+                reloc: None,
+            },
+            &mut out,
+        );
+        assert!(matches!(
+            out.last().map(|m| &m.instr),
+            Some(Instruction::Compute {
+                compute: ComputeOp::Alu(AluOp::Pass { rn: 8, rx: 8 }),
+                ..
+            })
+        ));
+
+        let mut live_after_arg = BTreeSet::new();
+        live_after_arg.insert(10);
+        alloc.release_dead_vregs(&live_after_arg);
+
+        let mut call_out = Vec::new();
+        alloc.rewrite(
+            &MachInstr {
+                instr: Instruction::CJump {
+                    addr: 0,
+                    delayed: true,
+                },
+                reloc: None,
+            },
+            &mut call_out,
+        );
+
+        let cjump_pos = call_out
+            .iter()
+            .position(|m| matches!(m.instr, Instruction::CJump { .. }))
+            .expect("call emitted");
+        assert!(
+            !call_out[..cjump_pos].iter().any(|m| matches!(
+                m.instr,
+                Instruction::Compute {
+                    compute: ComputeOp::Alu(AluOp::Pass { rn: 8, .. }),
+                    ..
+                }
+            )),
+            "caller-saved migration clobbered the pinned R8 argument: {call_out:#?}"
         );
     }
 
