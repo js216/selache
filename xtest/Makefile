@@ -67,7 +67,9 @@ libsel_obj = lib_$(notdir $(patsubst %/,%,$(dir $(1))))_$(basename $(notdir $(1)
 LIBSEL_OBJS_CCES  := $(foreach src,$(LIBSEL_C_SRCS) $(LIBSEL_S_SRCS),$(BUILD)/cces/$(call libsel_obj,$(src)))
 LIBSEL_OBJS_SEL   := $(foreach src,$(LIBSEL_C_SRCS) $(LIBSEL_S_SRCS),$(BUILD)/sel/$(call libsel_obj,$(src)))
 HARNESS_OBJS_CCES := $(BUILD)/cces/xtest_main.doj $(BUILD)/cces/xtest_uart.doj
-HARNESS_OBJS_SEL  := $(BUILD)/sel/xtest_main.doj  $(BUILD)/sel/xtest_uart.doj
+HARNESS_OBJS_SEL  := $(BUILD)/sel/xtest_main.doj  $(BUILD)/sel/xtest_uart.doj \
+                     $(BUILD)/sel/xtest_timer.doj
+HARNESS_OBJS_C$(subst x,CES,x) += $(BUILD)/$(subst x,ces,cx)/xtest_timer.doj
 
 CCES_ARCHIVE := $(BUILD)/cces/libxtest.dlb
 SEL_ARCHIVE  := $(BUILD)/sel/libxtest_sel.dlb
@@ -118,6 +120,18 @@ $(BUILD)/cces/xtest_%.doj: %.c | $(BUILD)/cces
 	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $@ $< > /dev/null
 
 $(BUILD)/sel/xtest_%.doj: %.c $(SELCC) $(SELAS) $(MAKEFILE_DEPS) | $(BUILD)/sel
+	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(@:.doj=.s) $< > /dev/null
+	$(Q)$(SELAS) $(SELAS_FLAGS) -o $@ $(@:.doj=.s) > /dev/null
+
+$(BUILD)/$(subst x,ces,cx)/xtest_main.doj: xtest_timer.h
+$(BUILD)/sel/xtest_main.doj: xtest_timer.h
+$(BUILD)/$(subst x,ces,cx)/xtest_main.doj $(BUILD)/$(subst x,ces,cx)/xtest_uart.doj: uart.h
+$(BUILD)/sel/xtest_main.doj $(BUILD)/sel/xtest_uart.doj: uart.h
+
+$(BUILD)/$(subst x,ces,cx)/xtest_timer.doj: xtest_timer.c xtest_timer.h | $(BUILD)/$(subst x,ces,cx)
+	$(Q)$(CC21K) $(CFLAGS_TARGET) -c -o $@ $< > /dev/null
+
+$(BUILD)/sel/xtest_timer.doj: xtest_timer.c xtest_timer.h $(SELCC) $(SELAS) $(MAKEFILE_DEPS) | $(BUILD)/sel
 	$(Q)$(SELCC) $(SELCC_FLAGS) -S -o $(@:.doj=.s) $< > /dev/null
 	$(Q)$(SELAS) $(SELAS_FLAGS) -o $@ $(@:.doj=.s) > /dev/null
 

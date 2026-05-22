@@ -5003,11 +5003,11 @@ fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     let lbl_end = ctx.alloc_label();
 
     let l = lower_expr(ctx, lhs)?;
-    ctx.emit(IrOp::Cmp(l, zero));
+    lower_compare_scalar_to_zero(ctx, l);
     ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_false));
 
     let r = lower_expr(ctx, rhs)?;
-    ctx.emit(IrOp::Cmp(r, zero));
+    lower_compare_scalar_to_zero(ctx, r);
     ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_false));
 
     let one = ctx.alloc_vreg();
@@ -5031,11 +5031,11 @@ fn lower_log_or(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     let lbl_end = ctx.alloc_label();
 
     let l = lower_expr(ctx, lhs)?;
-    ctx.emit(IrOp::Cmp(l, zero));
+    lower_compare_scalar_to_zero(ctx, l);
     ctx.emit(IrOp::BranchCond(Cond::Ne, lbl_true));
 
     let r = lower_expr(ctx, rhs)?;
-    ctx.emit(IrOp::Cmp(r, zero));
+    lower_compare_scalar_to_zero(ctx, r);
     ctx.emit(IrOp::BranchCond(Cond::Ne, lbl_true));
 
     ctx.emit(IrOp::Copy(dst, zero));
@@ -5050,17 +5050,168 @@ fn lower_log_or(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     Ok(dst)
 }
 
+fn lower_branch_if_false(ctx: &mut LowerCtx, expr: &Expr, false_label: Label) -> Result<()> {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::LogNot,
+            operand,
+        } => lower_branch_if_true(ctx, operand, false_label),
+        Expr::Binary { op, lhs, rhs }
+            if matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Gt
+                    | BinaryOp::Le
+                    | BinaryOp::Ge
+            ) && lower_comparison_branch(ctx, *op, lhs, rhs, false_label, false)? =>
+        {
+            Ok(())
+        }
+        Expr::Binary {
+            op: BinaryOp::LogAnd,
+            lhs,
+            rhs,
+        } => {
+            lower_branch_if_false(ctx, lhs, false_label)?;
+            lower_branch_if_false(ctx, rhs, false_label)
+        }
+        Expr::Binary {
+            op: BinaryOp::LogOr,
+            lhs,
+            rhs,
+        } => {
+            let true_label = ctx.alloc_label();
+            lower_branch_if_true(ctx, lhs, true_label)?;
+            lower_branch_if_false(ctx, rhs, false_label)?;
+            ctx.emit(IrOp::Label(true_label));
+            Ok(())
+        }
+        _ => {
+            let val = lower_expr(ctx, expr)?;
+            lower_compare_scalar_to_zero(ctx, val);
+            ctx.emit(IrOp::BranchCond(Cond::Eq, false_label));
+            Ok(())
+        }
+    }
+}
+
+fn lower_branch_if_true(ctx: &mut LowerCtx, expr: &Expr, true_label: Label) -> Result<()> {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::LogNot,
+            operand,
+        } => lower_branch_if_false(ctx, operand, true_label),
+        Expr::Binary { op, lhs, rhs }
+            if matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Gt
+                    | BinaryOp::Le
+                    | BinaryOp::Ge
+            ) && lower_comparison_branch(ctx, *op, lhs, rhs, true_label, true)? =>
+        {
+            Ok(())
+        }
+        Expr::Binary {
+            op: BinaryOp::LogAnd,
+            lhs,
+            rhs,
+        } => {
+            let false_label = ctx.alloc_label();
+            lower_branch_if_false(ctx, lhs, false_label)?;
+            lower_branch_if_true(ctx, rhs, true_label)?;
+            ctx.emit(IrOp::Label(false_label));
+            Ok(())
+        }
+        Expr::Binary {
+            op: BinaryOp::LogOr,
+            lhs,
+            rhs,
+        } => {
+            lower_branch_if_true(ctx, lhs, true_label)?;
+            lower_branch_if_true(ctx, rhs, true_label)
+        }
+        _ => {
+            let val = lower_expr(ctx, expr)?;
+            lower_compare_scalar_to_zero(ctx, val);
+            ctx.emit(IrOp::BranchCond(Cond::Ne, true_label));
+            Ok(())
+        }
+    }
+}
+
+fn lower_compare_scalar_to_zero(ctx: &mut LowerCtx, val: VReg) {
+    if ctx.is_float_vreg(val) {
+        let zero = ctx.alloc_vreg();
+        let fzero = ctx.alloc_vreg_float();
+        ctx.emit(IrOp::LoadImm(zero, 0));
+        ctx.emit(IrOp::IntToFloat(fzero, zero));
+        ctx.emit(IrOp::FCmp(val, fzero));
+    } else if ctx.is_64bit_vreg(val) {
+        let zero_pair = ctx.alloc_vreg_pair();
+        ctx.emit(IrOp::LoadImm64(zero_pair, 0));
+        ctx.emit(IrOp::Cmp64(val, zero_pair));
+    } else {
+        let zero = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(zero, 0));
+        ctx.emit(IrOp::Cmp(val, zero));
+    }
+}
+
+fn lower_comparison_branch(
+    ctx: &mut LowerCtx,
+    op: BinaryOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    label: Label,
+    jump_if_true: bool,
+) -> Result<bool> {
+    let lhs_ty = expr_type(lhs, ctx).map(|t| resolve_type(&t, ctx));
+    let rhs_ty = expr_type(rhs, ctx).map(|t| resolve_type(&t, ctx));
+    let unsupported = lhs_ty
+        .as_ref()
+        .is_some_and(|t| t.is_float() || t.is_complex() || ty_is_long_long(t, ctx))
+        || rhs_ty
+            .as_ref()
+            .is_some_and(|t| t.is_float() || t.is_complex() || ty_is_long_long(t, ctx));
+    if unsupported {
+        return Ok(false);
+    }
+
+    let l = lower_expr(ctx, lhs)?;
+    let r = lower_expr(ctx, rhs)?;
+    if binary_common_is_unsigned(ctx, lhs, rhs) {
+        ctx.emit(IrOp::UCmp(l, r));
+    } else {
+        ctx.emit(IrOp::Cmp(l, r));
+    }
+    let cond = comparison_branch_cond(op, jump_if_true);
+    ctx.emit(IrOp::BranchCond(cond, label));
+    Ok(true)
+}
+
+fn comparison_branch_cond(op: BinaryOp, jump_if_true: bool) -> Cond {
+    match (op, jump_if_true) {
+        (BinaryOp::Eq, true) | (BinaryOp::Ne, false) => Cond::Eq,
+        (BinaryOp::Ne, true) | (BinaryOp::Eq, false) => Cond::Ne,
+        (BinaryOp::Lt, true) | (BinaryOp::Ge, false) => Cond::Lt,
+        (BinaryOp::Gt, true) | (BinaryOp::Le, false) => Cond::Gt,
+        (BinaryOp::Le, true) | (BinaryOp::Gt, false) => Cond::Le,
+        (BinaryOp::Ge, true) | (BinaryOp::Lt, false) => Cond::Ge,
+        _ => unreachable!(),
+    }
+}
+
 fn lower_if(
     ctx: &mut LowerCtx,
     cond: &Expr,
     then_body: &[Stmt],
     else_body: Option<&[Stmt]>,
 ) -> Result<()> {
-    let cond_val = lower_expr(ctx, cond)?;
-    let zero = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
-    ctx.emit(IrOp::Cmp(cond_val, zero));
-
     // C99 6.8.4/3: each selection-statement substatement is itself a
     // block, so declarations in `then_body` / `else_body` must not leak
     // bindings into the enclosing scope.
@@ -5068,7 +5219,7 @@ fn lower_if(
         let lbl_else = ctx.alloc_label();
         let lbl_end = ctx.alloc_label();
         // Branch to else when condition is zero (not nonzero).
-        ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_else));
+        lower_branch_if_false(ctx, cond, lbl_else)?;
         let snap_then = ctx.snapshot_scope();
         for s in then_body {
             lower_stmt(ctx, s)?;
@@ -5084,7 +5235,7 @@ fn lower_if(
         ctx.emit(IrOp::Label(lbl_end));
     } else {
         let lbl_end = ctx.alloc_label();
-        ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_end));
+        lower_branch_if_false(ctx, cond, lbl_end)?;
         let snap_then = ctx.snapshot_scope();
         for s in then_body {
             lower_stmt(ctx, s)?;
@@ -5101,9 +5252,7 @@ fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
 
     ctx.emit(IrOp::Label(continue_label));
     let cond_val = lower_expr(ctx, cond)?;
-    let zero = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
-    ctx.emit(IrOp::Cmp(cond_val, zero));
+    lower_compare_scalar_to_zero(ctx, cond_val);
     ctx.emit(IrOp::BranchCond(Cond::Eq, break_label));
 
     ctx.loop_stack.push(LoopContext {
@@ -5152,9 +5301,7 @@ fn lower_for(
     ctx.emit(IrOp::Label(top_label));
     if let Some(cond_expr) = cond {
         let cond_val = lower_expr(ctx, cond_expr)?;
-        let zero = ctx.alloc_vreg();
-        ctx.emit(IrOp::LoadImm(zero, 0));
-        ctx.emit(IrOp::Cmp(cond_val, zero));
+        lower_compare_scalar_to_zero(ctx, cond_val);
         ctx.emit(IrOp::BranchCond(Cond::Eq, break_label));
     }
 
@@ -5203,9 +5350,7 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
 
     ctx.emit(IrOp::Label(continue_label));
     let cond_val = lower_expr(ctx, cond)?;
-    let zero = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
-    ctx.emit(IrOp::Cmp(cond_val, zero));
+    lower_compare_scalar_to_zero(ctx, cond_val);
     ctx.emit(IrOp::BranchCond(Cond::NonZero, top_label));
     ctx.emit(IrOp::Label(break_label));
     Ok(())
@@ -7456,11 +7601,6 @@ fn lower_ternary(
     else_expr: &Expr,
 ) -> Result<VReg> {
     let cond_val = lower_expr(ctx, cond)?;
-    let cond_val = if ctx.is_float_vreg(cond_val) {
-        lower_to_bool(ctx, cond_val)
-    } else {
-        cond_val
-    };
     let result_ty = ternary_scalar_result_type(ctx, then_expr, else_expr);
     let result_is_64 = result_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx));
     let result = if result_is_64 {
@@ -7473,9 +7613,7 @@ fn lower_ternary(
     let else_label = ctx.alloc_label();
     let end_label = ctx.alloc_label();
 
-    let zero = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
-    ctx.emit(IrOp::Cmp(cond_val, zero));
+    lower_compare_scalar_to_zero(ctx, cond_val);
     ctx.emit(IrOp::BranchCond(Cond::Eq, else_label));
 
     // Then branch.
@@ -7747,11 +7885,9 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // join point: FrameAddr is a pure function of the slot
             // index, so the three vregs all denote the same address.
             let cond_val = lower_expr(ctx, cond)?;
-            let zero = ctx.alloc_vreg();
-            ctx.emit(IrOp::LoadImm(zero, 0));
-            ctx.emit(IrOp::Cmp(cond_val, zero));
             let else_label = ctx.alloc_label();
             let end_label = ctx.alloc_label();
+            lower_compare_scalar_to_zero(ctx, cond_val);
             ctx.emit(IrOp::BranchCond(Cond::Eq, else_label));
 
             // Then arm: copy x's words into dst.
@@ -8167,19 +8303,9 @@ fn narrow_int_to_dst(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
 }
 
 /// C99 6.3.1.2 conversion to `_Bool`: any nonzero scalar becomes 1, zero
-/// becomes 0. Handles both integer and float source vregs.
+/// becomes 0. Handles integer, 64-bit integer, and float source vregs.
 fn lower_to_bool(ctx: &mut LowerCtx, val: VReg) -> VReg {
-    let src_is_float = ctx.is_float_vreg(val);
-    let zero = ctx.alloc_vreg();
-    if src_is_float {
-        let fzero = ctx.alloc_vreg_float();
-        ctx.emit(IrOp::LoadImm(zero, 0));
-        ctx.emit(IrOp::IntToFloat(fzero, zero));
-        ctx.emit(IrOp::FCmp(val, fzero));
-    } else {
-        ctx.emit(IrOp::LoadImm(zero, 0));
-        ctx.emit(IrOp::Cmp(val, zero));
-    }
+    lower_compare_scalar_to_zero(ctx, val);
     let dst = ctx.alloc_vreg();
     let label_true = ctx.alloc_label();
     let label_end = ctx.alloc_label();
@@ -10147,6 +10273,45 @@ mod tests {
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::UCmp(..))));
         assert!(!ops.iter().any(|op| matches!(op, IrOp::Cmp(..))));
+    }
+
+    #[test]
+    fn lower_if_lognot_long_long_uses_64bit_zero_compare() {
+        let src = "int f(long long x) { if (!x) return 1; return 0; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm64(_, 0)))
+                && ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))),
+            "direct branch lowering for !long long must compare both words: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_expression_log_and_long_long_uses_64bit_zero_compare() {
+        let src = "int f(long long x) { return x && 1; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))),
+            "expression-valued && must test both words of a long long: {ops:?}"
+        );
     }
 
     #[test]
