@@ -56,8 +56,7 @@ pub fn allocate(
     let mut alloc = Allocator::new(num_params, reserves_r1);
     let mut out = Vec::new();
     let mut index_map = Vec::with_capacity(instrs.len());
-    let live_out = (instrs.len() >= DEAD_VREG_RELEASE_MIN_INSTRS)
-        .then(|| compute_live_out(instrs, label_positions));
+    let live_out = compute_live_out(instrs, label_positions);
 
     let label_indices: BTreeSet<usize> = label_positions.iter().map(|&(_, idx)| idx).collect();
 
@@ -73,19 +72,11 @@ pub fn allocate(
         }
         index_map.push(out.len());
         alloc.rewrite(mi, &mut out);
-        if let Some(live_out) = &live_out {
-            alloc.release_dead_vregs(&live_out[i]);
-        }
+        alloc.release_dead_vregs(&live_out[i]);
     }
 
     (out, alloc.spill_slots, index_map)
 }
-
-/// Liveness-based vreg release is a targeted pressure valve for very large
-/// generated csmith functions whose dead temporaries would otherwise reserve
-/// tens of thousands of spill slots. Smaller functions keep the older
-/// conservative allocator behavior; it is less compact but battle-tested.
-const DEAD_VREG_RELEASE_MIN_INSTRS: usize = 5_000;
 
 struct Allocator {
     /// Mapping from virtual register to physical register.
@@ -515,6 +506,13 @@ fn compute_successors(instrs: &[MachInstr], label_positions: &[(u32, usize)]) ->
                     successors[i].push(next);
                 }
             }
+            Instruction::IndirectBranch {
+                call: false, pm_m, ..
+            } if pm_m == DAG_M_ZERO => {
+                if let Some(next) = next {
+                    successors[i].push(next);
+                }
+            }
             Instruction::IndirectBranch { call: false, .. } | Instruction::Return { .. } => {}
             _ => {
                 if let Some(next) = next {
@@ -804,6 +802,12 @@ impl Allocator {
         }
     }
 
+    fn has_flushable_vregs(&self) -> bool {
+        self.vreg_to_phys
+            .keys()
+            .any(|vreg| !self.permanent_vregs.contains(vreg))
+    }
+
     /// Return a free callee-saved physical register, if any. A register
     /// is free when it is neither mapped to a vreg nor pinned.
     fn free_callee_saved(&self) -> Option<u8> {
@@ -1018,6 +1022,10 @@ impl Allocator {
                 // the fall-through side of the merge.
                 if cond == target::COND_TRUE {
                     self.flush_all_vregs(&mut spill_pre);
+                } else if !self.has_flushable_vregs() {
+                    for p in self.arg_setup_pins.drain(..) {
+                        self.pinned.remove(&p);
+                    }
                 } else {
                     // Conditional branches consume flags from the
                     // immediately preceding compare. The spill stores
@@ -2048,6 +2056,68 @@ mod tests {
                 }
             )),
             "caller-saved migration clobbered the pinned R8 argument: {call_out:#?}"
+        );
+    }
+
+    #[test]
+    fn indirect_call_has_return_continuation_for_liveness() {
+        let instrs = vec![
+            MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::Pass { rn: 11, rx: 0 }),
+                },
+                reloc: None,
+            },
+            MachInstr {
+                instr: Instruction::IndirectBranch {
+                    call: false,
+                    cond: target::COND_TRUE,
+                    pm_i: 4,
+                    pm_m: DAG_M_ZERO,
+                    delayed: true,
+                    compute: None,
+                },
+                reloc: None,
+            },
+            MachInstr {
+                instr: Instruction::UregDagMove {
+                    pm: false,
+                    write: true,
+                    ureg: target::ureg_r(2),
+                    i_reg: target::STACK_PTR,
+                    m_reg: 7,
+                    cond: target::COND_TRUE,
+                    compute: None,
+                    post_modify: true,
+                },
+                reloc: None,
+            },
+            MachInstr {
+                instr: Instruction::ImmStore {
+                    pm: false,
+                    i_reg: target::STACK_PTR,
+                    m_reg: 7,
+                    value: 0,
+                },
+                reloc: None,
+            },
+            MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::Add {
+                        rn: 17,
+                        rx: 11,
+                        ry: 16,
+                    }),
+                },
+                reloc: None,
+            },
+        ];
+        let live_out = compute_live_out(&instrs, &[]);
+        assert!(
+            live_out[1].contains(&11),
+            "indirect call must keep post-return vregs live: {live_out:?}"
         );
     }
 

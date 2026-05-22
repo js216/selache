@@ -43,6 +43,7 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
     let mut result = Vec::with_capacity(ops.len());
     // Track which vregs have been consumed (their LoadImm was inlined).
     let mut consumed: HashSet<VReg> = HashSet::new();
+    let mut rewritten_immediates: HashMap<VReg, i64> = HashMap::new();
 
     for op in ops {
         match op {
@@ -125,6 +126,17 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                     } else {
                         result.push(op.clone());
                     }
+                } else if let (None, Some(b)) = (lv, rv) {
+                    if let Some(shift) = unsigned_power_of_two_shift(b) {
+                        if use_counts.get(rhs).copied().unwrap_or(0) <= 1 {
+                            rewritten_immediates.insert(*rhs, -(shift as i64));
+                            result.push(IrOp::Lshr(*dst, *lhs, *rhs));
+                        } else {
+                            result.push(op.clone());
+                        }
+                    } else {
+                        result.push(op.clone());
+                    }
                 } else {
                     result.push(op.clone());
                 }
@@ -161,6 +173,17 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                     } else {
                         result.push(op.clone());
                     }
+                } else if let (None, Some(b)) = (lv, rv) {
+                    if unsigned_power_of_two_shift(b).is_some() {
+                        if use_counts.get(rhs).copied().unwrap_or(0) <= 1 {
+                            rewritten_immediates.insert(*rhs, b - 1);
+                            result.push(IrOp::BitAnd(*dst, *lhs, *rhs));
+                        } else {
+                            result.push(op.clone());
+                        }
+                    } else {
+                        result.push(op.clone());
+                    }
                 } else {
                     result.push(op.clone());
                 }
@@ -190,6 +213,30 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                         known.insert(*dst, 0);
                         // Both operand LoadImms may become dead; DCE handles that.
                     }
+                    (None, Some(b)) => {
+                        if let Some(shift) = unsigned_power_of_two_shift(b) {
+                            if use_counts.get(rhs).copied().unwrap_or(0) <= 1 {
+                                rewritten_immediates.insert(*rhs, shift as i64);
+                                result.push(IrOp::Shl(*dst, *lhs, *rhs));
+                            } else {
+                                result.push(op.clone());
+                            }
+                        } else {
+                            result.push(op.clone());
+                        }
+                    }
+                    (Some(a), None) => {
+                        if let Some(shift) = unsigned_power_of_two_shift(a) {
+                            if use_counts.get(lhs).copied().unwrap_or(0) <= 1 {
+                                rewritten_immediates.insert(*lhs, shift as i64);
+                                result.push(IrOp::Shl(*dst, *rhs, *lhs));
+                            } else {
+                                result.push(op.clone());
+                            }
+                        } else {
+                            result.push(op.clone());
+                        }
+                    }
                     _ => result.push(op.clone()),
                 }
             }
@@ -208,42 +255,73 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
             IrOp::BitAnd(dst, lhs, rhs) => {
                 let lv = known.get(lhs).copied();
                 let rv = known.get(rhs).copied();
-                if let (Some(a), Some(b)) = (lv, rv) {
-                    let folded = a & b;
-                    result.push(IrOp::LoadImm(*dst, folded));
-                    known.insert(*dst, folded);
-                    mark_consumed(&use_counts, &mut consumed, *lhs);
-                    mark_consumed(&use_counts, &mut consumed, *rhs);
-                } else {
-                    result.push(op.clone());
+                match (lv, rv) {
+                    (Some(a), Some(b)) => {
+                        let folded = a & b;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    }
+                    (Some(0), None) | (None, Some(0)) => {
+                        result.push(IrOp::LoadImm(*dst, 0));
+                        known.insert(*dst, 0);
+                    }
+                    (Some(-1), None) | (Some(0xffff_ffff), None) => {
+                        result.push(IrOp::Copy(*dst, *rhs));
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                    }
+                    (None, Some(-1)) | (None, Some(0xffff_ffff)) => {
+                        result.push(IrOp::Copy(*dst, *lhs));
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    }
+                    _ => result.push(op.clone()),
                 }
             }
 
             IrOp::BitOr(dst, lhs, rhs) => {
                 let lv = known.get(lhs).copied();
                 let rv = known.get(rhs).copied();
-                if let (Some(a), Some(b)) = (lv, rv) {
-                    let folded = a | b;
-                    result.push(IrOp::LoadImm(*dst, folded));
-                    known.insert(*dst, folded);
-                    mark_consumed(&use_counts, &mut consumed, *lhs);
-                    mark_consumed(&use_counts, &mut consumed, *rhs);
-                } else {
-                    result.push(op.clone());
+                match (lv, rv) {
+                    (Some(a), Some(b)) => {
+                        let folded = a | b;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    }
+                    (Some(0), None) => {
+                        result.push(IrOp::Copy(*dst, *rhs));
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                    }
+                    (None, Some(0)) => {
+                        result.push(IrOp::Copy(*dst, *lhs));
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    }
+                    _ => result.push(op.clone()),
                 }
             }
 
             IrOp::BitXor(dst, lhs, rhs) => {
                 let lv = known.get(lhs).copied();
                 let rv = known.get(rhs).copied();
-                if let (Some(a), Some(b)) = (lv, rv) {
-                    let folded = a ^ b;
-                    result.push(IrOp::LoadImm(*dst, folded));
-                    known.insert(*dst, folded);
-                    mark_consumed(&use_counts, &mut consumed, *lhs);
-                    mark_consumed(&use_counts, &mut consumed, *rhs);
-                } else {
-                    result.push(op.clone());
+                match (lv, rv) {
+                    (Some(a), Some(b)) => {
+                        let folded = a ^ b;
+                        result.push(IrOp::LoadImm(*dst, folded));
+                        known.insert(*dst, folded);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    }
+                    (Some(0), None) => {
+                        result.push(IrOp::Copy(*dst, *rhs));
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                    }
+                    (None, Some(0)) => {
+                        result.push(IrOp::Copy(*dst, *lhs));
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    }
+                    _ => result.push(op.clone()),
                 }
             }
 
@@ -271,7 +349,7 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                     // bit propagates the same way hardware does.
                     let a32 = a as i32;
                     let folded = if b < 0 {
-                        (a32 >> ((-b) as u32)) as i64
+                        a32.wrapping_shr((-b) as u32) as i64
                     } else {
                         ((a32 as u32).wrapping_shr(b as u32)) as i32 as i64
                     };
@@ -331,6 +409,12 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
     // and are no longer needed.
     result
         .into_iter()
+        .map(|op| match op {
+            IrOp::LoadImm(dst, _) if rewritten_immediates.contains_key(&dst) => {
+                IrOp::LoadImm(dst, rewritten_immediates[&dst])
+            }
+            _ => op,
+        })
         .filter(|op| {
             if let IrOp::LoadImm(dst, _) = op {
                 !consumed.contains(dst)
@@ -339,6 +423,15 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
             }
         })
         .collect()
+}
+
+fn unsigned_power_of_two_shift(v: i64) -> Option<u32> {
+    let v = u32::try_from(v).ok()?;
+    if v.is_power_of_two() && v != 0 {
+        Some(v.trailing_zeros())
+    } else {
+        None
+    }
 }
 
 /// Mark a vreg as consumed if it has only one use (its LoadImm can be removed).
@@ -373,6 +466,309 @@ pub fn dead_code_eliminate(ops: &[IrOp]) -> Vec<IrOp> {
         })
         .cloned()
         .collect()
+}
+
+/// Forward frame-relative loads from the latest store in the same basic block.
+///
+/// The lowerer materializes C locals in frame slots. In straight-line code this
+/// often creates `Store(v, slot); Load(dst, slot)` pairs for scalar temporaries.
+/// Replacing the load with `Copy(dst, v)` lets later passes avoid round trips
+/// through DM. After forwarding, stores to frame slots that are no longer read
+/// or address-taken are removed.
+pub fn forward_stack_loads(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut slot_values: HashMap<i32, VReg> = HashMap::new();
+    let mut forwarded = Vec::with_capacity(ops.len());
+
+    for op in ops {
+        match op {
+            IrOp::Load(dst, 0, slot) => {
+                if let Some(src) = slot_values.get(slot).copied() {
+                    forwarded.push(IrOp::Copy(*dst, src));
+                } else {
+                    forwarded.push(op.clone());
+                }
+            }
+            IrOp::Store(val, 0, slot) => {
+                slot_values.insert(*slot, *val);
+                forwarded.push(op.clone());
+            }
+            IrOp::Load64(_, 0, slot)
+            | IrOp::Store64(_, 0, slot)
+            | IrOp::FrameAddr(_, slot) => {
+                slot_values.remove(slot);
+                slot_values.remove(&(*slot + 1));
+                forwarded.push(op.clone());
+            }
+            IrOp::Label(_)
+            | IrOp::Branch(_)
+            | IrOp::BranchCond(..)
+            | IrOp::Call(..)
+            | IrOp::CallIndirect(..)
+            | IrOp::CallStruct { .. }
+            | IrOp::CallIndirectStruct { .. }
+            | IrOp::Ret(_)
+            | IrOp::RetStruct { .. }
+            | IrOp::StackRestore(_)
+            | IrOp::StackAlloc(..)
+            | IrOp::Store(_, _, _)
+            | IrOp::Store64(_, _, _)
+            | IrOp::StoreGlobal(..)
+            | IrOp::WriteGlobal64(..) => {
+                slot_values.clear();
+                forwarded.push(op.clone());
+            }
+            _ => forwarded.push(op.clone()),
+        }
+    }
+
+    let mut used_slots = HashSet::new();
+    for op in &forwarded {
+        match op {
+            IrOp::Load(_, 0, slot) | IrOp::FrameAddr(_, slot) => {
+                used_slots.insert(*slot);
+            }
+            IrOp::Load64(_, 0, slot) => {
+                used_slots.insert(*slot);
+                used_slots.insert(*slot + 1);
+            }
+            _ => {}
+        }
+    }
+
+    forwarded
+        .into_iter()
+        .filter(|op| match op {
+            IrOp::Store(_, 0, slot) => used_slots.contains(slot),
+            IrOp::Store64(_, 0, slot) => {
+                used_slots.contains(slot) || used_slots.contains(&(*slot + 1))
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+/// Propagate simple 32-bit copies within a basic block.
+pub fn propagate_copies(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut aliases: HashMap<VReg, VReg> = HashMap::new();
+    let mut out = Vec::with_capacity(ops.len());
+    let mut at_block_start = false;
+
+    fn resolve(aliases: &HashMap<VReg, VReg>, mut v: VReg) -> VReg {
+        let mut seen = HashSet::new();
+        while let Some(next) = aliases.get(&v).copied() {
+            if !seen.insert(v) {
+                break;
+            }
+            v = next;
+        }
+        v
+    }
+
+    fn resolve_pointer_base(aliases: &HashMap<VReg, VReg>, base: VReg) -> VReg {
+        if base == 0 {
+            return 0;
+        }
+        let resolved = resolve(aliases, base);
+        if resolved == 0 {
+            base
+        } else {
+            resolved
+        }
+    }
+
+    fn kill(aliases: &mut HashMap<VReg, VReg>, dst: VReg) {
+        aliases.remove(&dst);
+        aliases.retain(|_, src| *src != dst);
+    }
+
+    fn flush_aliases(aliases: &mut HashMap<VReg, VReg>, out: &mut Vec<IrOp>) {
+        let mut pending: Vec<_> = aliases.iter().map(|(dst, src)| (*dst, *src)).collect();
+        pending.sort_unstable();
+        for (dst, src) in pending {
+            if dst != src {
+                out.push(IrOp::Copy(dst, src));
+            }
+        }
+        aliases.clear();
+    }
+
+    for op in ops {
+        match op {
+            IrOp::Copy(dst, src) => {
+                let src = resolve(&aliases, *src);
+                kill(&mut aliases, *dst);
+                if at_block_start {
+                    out.push(IrOp::Copy(*dst, src));
+                } else if *dst != src {
+                    aliases.insert(*dst, src);
+                }
+                at_block_start = false;
+            }
+            IrOp::LoadImm(dst, val) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::LoadImm(*dst, *val));
+                at_block_start = false;
+            }
+            IrOp::Add(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Add(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Sub(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Sub(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Mul(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Mul(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::BitAnd(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::BitAnd(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::BitOr(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::BitOr(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::BitXor(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::BitXor(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Shl(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Shl(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Shr(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Shr(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Lshr(dst, a, b) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Lshr(*dst, resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Neg(dst, src) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Neg(*dst, resolve(&aliases, *src)));
+                at_block_start = false;
+            }
+            IrOp::BitNot(dst, src) => {
+                kill(&mut aliases, *dst);
+                out.push(IrOp::BitNot(*dst, resolve(&aliases, *src)));
+                at_block_start = false;
+            }
+            IrOp::Cmp(a, b) => {
+                out.push(IrOp::Cmp(resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::UCmp(a, b) => {
+                out.push(IrOp::UCmp(resolve(&aliases, *a), resolve(&aliases, *b)));
+                at_block_start = false;
+            }
+            IrOp::Load(dst, base, slot) => {
+                kill(&mut aliases, *dst);
+                let base = resolve_pointer_base(&aliases, *base);
+                out.push(IrOp::Load(*dst, base, *slot));
+                at_block_start = false;
+            }
+            IrOp::Store(val, base, slot) => {
+                let base = resolve_pointer_base(&aliases, *base);
+                out.push(IrOp::Store(resolve(&aliases, *val), base, *slot));
+                at_block_start = false;
+            }
+            IrOp::Call(dst, name, args) => {
+                let args = args.iter().map(|v| resolve(&aliases, *v)).collect();
+                flush_aliases(&mut aliases, &mut out);
+                kill(&mut aliases, *dst);
+                out.push(IrOp::Call(*dst, name.clone(), args));
+                at_block_start = false;
+            }
+            IrOp::CallIndirect(dst, addr, args) => {
+                let addr = resolve(&aliases, *addr);
+                let args = args.iter().map(|v| resolve(&aliases, *v)).collect();
+                flush_aliases(&mut aliases, &mut out);
+                kill(&mut aliases, *dst);
+                out.push(IrOp::CallIndirect(*dst, addr, args));
+                at_block_start = false;
+            }
+            IrOp::CallStruct {
+                name,
+                args,
+                dst_addr,
+                num_words,
+            } => {
+                let args = args.iter().map(|v| resolve(&aliases, *v)).collect();
+                let dst_addr = resolve(&aliases, *dst_addr);
+                flush_aliases(&mut aliases, &mut out);
+                out.push(IrOp::CallStruct {
+                    name: name.clone(),
+                    args,
+                    dst_addr,
+                    num_words: *num_words,
+                });
+                at_block_start = false;
+            }
+            IrOp::CallIndirectStruct {
+                addr,
+                args,
+                dst_addr,
+                num_words,
+            } => {
+                let addr = resolve(&aliases, *addr);
+                let args = args.iter().map(|v| resolve(&aliases, *v)).collect();
+                let dst_addr = resolve(&aliases, *dst_addr);
+                flush_aliases(&mut aliases, &mut out);
+                out.push(IrOp::CallIndirectStruct {
+                    addr,
+                    args,
+                    dst_addr,
+                    num_words: *num_words,
+                });
+                at_block_start = false;
+            }
+            IrOp::RetStruct {
+                src_addr,
+                dst_addr,
+                num_words,
+            } => {
+                let src_addr = resolve(&aliases, *src_addr);
+                let dst_addr = dst_addr.map(|v| resolve(&aliases, v));
+                out.push(IrOp::RetStruct {
+                    src_addr,
+                    dst_addr,
+                    num_words: *num_words,
+                });
+                at_block_start = false;
+            }
+            IrOp::Ret(Some(v)) => {
+                out.push(IrOp::Ret(Some(resolve(&aliases, *v))));
+                at_block_start = false;
+            }
+            IrOp::Ret(None) => {
+                out.push(op.clone());
+                at_block_start = false;
+            }
+            IrOp::Label(_) | IrOp::Branch(_) | IrOp::BranchCond(..) => {
+                flush_aliases(&mut aliases, &mut out);
+                out.push(op.clone());
+                at_block_start = true;
+            }
+            _ => {
+                flush_aliases(&mut aliases, &mut out);
+                out.push(op.clone());
+                at_block_start = false;
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -504,12 +900,28 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
                 continue;
             }
 
-            // Reject loops whose body references the loop counter slot.
-            // Converting to a hardware DO loop drops the i++ step
-            // instructions; LCNTR replaces them. If the body still reads
-            // or takes the address of `i` from its stack slot, the value
-            // there stays at 0 forever, which silently corrupts results
-            // (e.g. `a[i] = ...` writes a[0] every iteration).
+            // Function calls and nested hardware loops inside a
+            // hardware DO loop are not safe on this target: calls use
+            // control-flow/frame-stack state, and nested DO loops would
+            // reuse LCNTR state. Keep such loops in software form.
+            let has_unsafe_body_op = body.iter().any(|op| {
+                matches!(
+                    op,
+                    IrOp::HardwareLoop { .. }
+                        | IrOp::Call(..)
+                        | IrOp::CallIndirect(..)
+                        | IrOp::CallStruct { .. }
+                        | IrOp::CallIndirectStruct { .. }
+                )
+            });
+            if has_unsafe_body_op {
+                continue;
+            }
+
+            // If the body references the loop counter slot, keep the
+            // C-level increment sequence inside the hardware-loop body.
+            // LCNTR controls the trip count, while the ordinary stack
+            // counter still provides the value read by C expressions.
             let body_uses_counter = body.iter().any(|op| match op {
                 IrOp::Load(_, _, slot)
                 | IrOp::Store(_, _, slot)
@@ -518,9 +930,6 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
                 | IrOp::FrameAddr(_, slot) => *slot == info.counter_slot,
                 _ => false,
             });
-            if body_uses_counter {
-                continue;
-            }
 
             // Reject loops with an empty body. SHARC+ hardware DO
             // requires the body to span at least one instruction so
@@ -541,8 +950,14 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
             // back-edge, replacing with HardwareLoop + body + Label(end).
             let mut new_ops = Vec::with_capacity(ops.len());
 
-            // Everything before the init (the Store that initializes the counter).
-            new_ops.extend_from_slice(&ops[..info.init_store_idx]);
+            // Everything before the loop. If the C body reads the
+            // counter, keep the original counter initialization too;
+            // only the condition/header is replaced by LCNTR.
+            if body_uses_counter {
+                new_ops.extend_from_slice(&ops[..label_top_idx]);
+            } else {
+                new_ops.extend_from_slice(&ops[..info.init_store_idx]);
+            }
 
             // Emit the HardwareLoop instruction.
             new_ops.push(IrOp::HardwareLoop {
@@ -550,8 +965,16 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
                 end_label,
             });
 
-            // Emit the body (between end of header and start of step).
-            new_ops.extend_from_slice(&ops[info.body_start..info.step_start]);
+            // Emit the body. If the C body reads the counter, retain
+            // the step sequence so those reads observe the same values
+            // as the original software loop. Otherwise LCNTR replaces
+            // the C counter and the step sequence can be dropped.
+            let body_end = if body_uses_counter {
+                back_edge_idx
+            } else {
+                info.step_start
+            };
+            new_ops.extend_from_slice(&ops[info.body_start..body_end]);
 
             // Emit Label(end) and everything after.
             new_ops.extend_from_slice(&ops[back_edge_idx + 1..]);
@@ -641,6 +1064,28 @@ fn analyze_loop_header(
         _ => return None,
     };
 
+    if after_top + 3 < ops.len()
+        && matches!(
+            &ops[after_top + 2],
+            IrOp::Cmp(lhs, rhs) | IrOp::UCmp(lhs, rhs)
+                if *lhs == counter_vreg && *rhs == limit_vreg
+        )
+        && matches!(
+            &ops[after_top + 3],
+            IrOp::BranchCond(Cond::Ge, target) if *target == end_label
+        )
+    {
+        let body_start = after_top + 4;
+        let step_start = find_loop_step_start(ops, body_start, back_edge_idx, counter_slot, known)?;
+        return Some(LoopInfo {
+            init_store_idx,
+            body_start,
+            step_start,
+            count: limit_val,
+            counter_slot,
+        });
+    }
+
     // Next: LoadImm(_, 0) and LoadImm(_, 1) for comparison results.
     if after_top + 3 >= ops.len() {
         return None;
@@ -688,12 +1133,28 @@ fn analyze_loop_header(
         return None;
     }
 
+    let step_start = find_loop_step_start(ops, body_start, back_edge_idx, counter_slot, known)?;
+
+    Some(LoopInfo {
+        init_store_idx,
+        body_start,
+        step_start,
+        count: limit_val,
+        counter_slot,
+    })
+}
+
+fn find_loop_step_start(
+    ops: &[IrOp],
+    body_start: usize,
+    back_edge_idx: usize,
+    counter_slot: i32,
+    known: &HashMap<VReg, i64>,
+) -> Option<usize> {
     // Find the step: look backwards from the back-edge for the increment
     // pattern. The step should store an incremented counter back to the
-    // same stack slot. We look for: Store(_, 0, counter_slot) preceded by
-    // an Add(_, _, inc_vreg) where inc_vreg is known to be 1.
-    // But the step might be complex; we look for a simpler pattern:
-    // the last Store to counter_slot before the back-edge.
+    // same stack slot. We look for the last Store to counter_slot before
+    // the back-edge, then verify its sequence contains an Add by one.
     let mut step_start = back_edge_idx;
     for idx in (body_start..back_edge_idx).rev() {
         match &ops[idx] {
@@ -714,31 +1175,17 @@ fn analyze_loop_header(
         }
     }
 
-    // Verify the step is +1 by checking that there is an Add with one
-    // operand being a known 1.
-    let mut step_is_plus_one = false;
     for op in &ops[step_start..back_edge_idx] {
         if let IrOp::Add(_, lhs, rhs) = op {
             let lv = known.get(lhs).copied();
             let rv = known.get(rhs).copied();
             if lv == Some(1) || rv == Some(1) {
-                step_is_plus_one = true;
-                break;
+                return Some(step_start);
             }
         }
     }
 
-    if !step_is_plus_one {
-        return None;
-    }
-
-    Some(LoopInfo {
-        init_store_idx,
-        body_start,
-        step_start,
-        count: limit_val,
-        counter_slot,
-    })
+    None
 }
 
 /// Walk backwards from a Store to find the beginning of the increment
@@ -1032,6 +1479,37 @@ mod tests {
     }
 
     #[test]
+    fn fold_unsigned_power_of_two_ops() {
+        let ops = vec![
+            IrOp::LoadImm(1, 4),
+            IrOp::UDiv(2, 3, 1),
+            IrOp::LoadImm(4, 4),
+            IrOp::UMod(5, 3, 4),
+            IrOp::LoadImm(6, 8),
+            IrOp::Mul(7, 3, 6),
+        ];
+        let folded = constant_fold(&ops);
+        assert!(
+            folded.iter().any(|op| {
+                matches!(op, IrOp::Lshr(2, 3, shift) if folded.contains(&IrOp::LoadImm(*shift, -2)))
+            }),
+            "expected unsigned divide by 4 to become logical shift: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|op| {
+                matches!(op, IrOp::BitAnd(5, 3, mask) if folded.contains(&IrOp::LoadImm(*mask, 3)))
+            }),
+            "expected unsigned mod by 4 to become bit mask: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|op| {
+                matches!(op, IrOp::Shl(7, 3, shift) if folded.contains(&IrOp::LoadImm(*shift, 3)))
+            }),
+            "expected multiply by 8 to become shift: {folded:?}"
+        );
+    }
+
+    #[test]
     fn dce_removes_dead_load_imm() {
         let ops = vec![
             IrOp::LoadImm(0, 10), // used
@@ -1127,6 +1605,115 @@ mod tests {
     }
 
     #[test]
+    fn fold_bitwise_identities() {
+        let ops = vec![
+            IrOp::LoadImm(0, 0),
+            IrOp::BitXor(2, 1, 0),
+            IrOp::BitOr(3, 2, 0),
+            IrOp::Ret(Some(3)),
+        ];
+        let folded = constant_fold(&ops);
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Copy(2, 1))),
+            "expected xor-zero copy, got: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Copy(3, 2))),
+            "expected or-zero copy, got: {folded:?}"
+        );
+        assert!(
+            !folded.iter().any(|op| matches!(op, IrOp::BitXor(..) | IrOp::BitOr(..))),
+            "expected identities to remove bitwise ops, got: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn forward_stack_loads_removes_dead_temp_slot() {
+        let ops = vec![
+            IrOp::LoadImm(1, 7),
+            IrOp::Store(1, 0, 2),
+            IrOp::Load(3, 0, 2),
+            IrOp::Ret(Some(3)),
+        ];
+        let forwarded = forward_stack_loads(&ops);
+        assert!(
+            forwarded.iter().any(|op| matches!(op, IrOp::Copy(3, 1))),
+            "expected frame load to become copy, got: {forwarded:?}"
+        );
+        assert!(
+            !forwarded.iter().any(|op| matches!(op, IrOp::Store(_, 0, 2))),
+            "expected now-dead store to temp slot to be removed, got: {forwarded:?}"
+        );
+    }
+
+    #[test]
+    fn propagate_copy_chain_to_uses() {
+        let ops = vec![
+            IrOp::Copy(2, 1),
+            IrOp::Copy(3, 2),
+            IrOp::LoadImm(4, 7),
+            IrOp::BitAnd(5, 3, 4),
+            IrOp::Ret(Some(5)),
+        ];
+        let propagated = propagate_copies(&ops);
+        assert!(
+            propagated.iter().any(|op| matches!(op, IrOp::BitAnd(5, 1, 4))),
+            "expected copy chain to collapse into BitAnd source, got: {propagated:?}"
+        );
+        assert!(
+            !propagated.iter().any(|op| matches!(op, IrOp::Copy(..))),
+            "expected redundant copies to be removed, got: {propagated:?}"
+        );
+    }
+
+    #[test]
+    fn propagate_copy_into_call_args() {
+        let ops = vec![IrOp::Copy(2, 1), IrOp::Call(3, "f".into(), vec![2])];
+        let propagated = dead_code_eliminate(&propagate_copies(&ops));
+        assert!(
+            propagated
+                .iter()
+                .any(|op| matches!(op, IrOp::Call(3, name, args) if name == "f" && args == &vec![1])),
+            "expected call arg to be rewritten before copy removal, got: {propagated:?}"
+        );
+        assert!(
+            !propagated.iter().any(|op| matches!(op, IrOp::Copy(..))),
+            "expected redundant copy to be removed, got: {propagated:?}"
+        );
+    }
+
+    #[test]
+    fn propagate_copy_materializes_branch_results() {
+        let ops = vec![
+            IrOp::LoadImm(1, 0),
+            IrOp::BranchCond(Cond::Eq, 1),
+            IrOp::LoadImm(2, 0x55),
+            IrOp::Copy(4, 2),
+            IrOp::Branch(2),
+            IrOp::Label(1),
+            IrOp::LoadImm(3, 0xaa),
+            IrOp::Copy(4, 3),
+            IrOp::Label(2),
+            IrOp::Ret(Some(4)),
+        ];
+        let propagated = dead_code_eliminate(&propagate_copies(&ops));
+        assert!(
+            propagated.iter().any(|op| matches!(op, IrOp::Copy(4, 2)))
+                && propagated.iter().any(|op| matches!(op, IrOp::Copy(4, 3))),
+            "branch-local copies into the result must survive, got: {propagated:?}"
+        );
+        assert!(
+            propagated
+                .iter()
+                .any(|op| matches!(op, IrOp::LoadImm(_, 0x55)))
+                && propagated
+                    .iter()
+                    .any(|op| matches!(op, IrOp::LoadImm(_, 0xaa))),
+            "branch-local constants must remain live, got: {propagated:?}"
+        );
+    }
+
+    #[test]
     fn hardware_loop_detection_simple() {
         // Simulate the IR pattern from `for (int i = 0; i < 10; i++) { }`
         // by building exactly what lower_for would produce.
@@ -1182,5 +1769,77 @@ mod tests {
         // Should NOT contain the back-edge Branch or the loop header.
         let has_back_edge = result.iter().any(|op| matches!(op, IrOp::Branch(0)));
         assert!(!has_back_edge, "back-edge should be removed: {result:?}");
+    }
+
+    #[test]
+    fn hardware_loop_rejects_call_body() {
+        let ops = vec![
+            IrOp::LoadImm(0, 0),
+            IrOp::Store(0, 0, 0),
+            IrOp::Label(0),
+            IrOp::Load(1, 0, 0),
+            IrOp::LoadImm(2, 8),
+            IrOp::Cmp(1, 2),
+            IrOp::BranchCond(Cond::Ge, 1),
+            IrOp::Call(10, "callee".into(), vec![1]),
+            IrOp::Store(10, 0, 1),
+            IrOp::Load(7, 0, 0),
+            IrOp::LoadImm(8, 1),
+            IrOp::Add(9, 7, 8),
+            IrOp::Store(9, 0, 0),
+            IrOp::Branch(0),
+            IrOp::Label(1),
+            IrOp::Ret(None),
+        ];
+        let result = detect_hardware_loops(&ops);
+        assert!(
+            !result
+                .iter()
+                .any(|op| matches!(op, IrOp::HardwareLoop { .. })),
+            "call-containing loop must stay software: {result:?}"
+        );
+        assert!(
+            result.iter().any(|op| matches!(op, IrOp::Branch(0))),
+            "software loop back-edge should remain: {result:?}"
+        );
+    }
+
+    #[test]
+    fn hardware_loop_rejects_nested_hardware_loop_body() {
+        let ops = vec![
+            IrOp::LoadImm(0, 0),
+            IrOp::Store(0, 0, 0),
+            IrOp::Label(0),
+            IrOp::Load(1, 0, 0),
+            IrOp::LoadImm(2, 3),
+            IrOp::Cmp(1, 2),
+            IrOp::BranchCond(Cond::Ge, 1),
+            IrOp::HardwareLoop {
+                count: 1,
+                end_label: 9,
+            },
+            IrOp::LoadImm(10, 42),
+            IrOp::Label(9),
+            IrOp::Load(7, 0, 0),
+            IrOp::LoadImm(8, 1),
+            IrOp::Add(9, 7, 8),
+            IrOp::Store(9, 0, 0),
+            IrOp::Branch(0),
+            IrOp::Label(1),
+            IrOp::Ret(None),
+        ];
+        let result = detect_hardware_loops(&ops);
+        assert!(
+            result
+                .iter()
+                .filter(|op| matches!(op, IrOp::HardwareLoop { .. }))
+                .count()
+                == 1,
+            "outer loop must not be converted around inner hardware loop: {result:?}"
+        );
+        assert!(
+            result.iter().any(|op| matches!(op, IrOp::Branch(0))),
+            "outer software loop back-edge should remain: {result:?}"
+        );
     }
 }

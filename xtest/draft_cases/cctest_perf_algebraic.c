@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Jakob Kastelic
 /* @expect 0x3e80 */
+/* @exp_ticks 0x3e90 */
 
 int test_main(void)
 {

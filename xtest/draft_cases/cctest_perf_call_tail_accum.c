@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Jakob Kastelic
 /* @expect 0xcdb */
+/* @exp_ticks 0x672 */
 
 static unsigned int mix_step(unsigned int x, unsigned int k)
 {

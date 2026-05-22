@@ -855,4 +855,14 @@ mod tests {
              pair-bump path"
         );
     }
+
+    #[test]
+    fn renumber_vregs_keeps_pointer_base_nonzero() {
+        let ir = vec![IrOp::LoadImm(1, 0x31018064), IrOp::Load(2, 1, 0)];
+        let out = renumber_vregs(&ir, 0);
+        assert!(
+            matches!(out[1], IrOp::Load(2, base, 0) if base != 0),
+            "pointer base must not collide with frame sentinel: {out:?}"
+        );
+    }
 }

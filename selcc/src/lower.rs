@@ -230,6 +230,15 @@ impl LowerCtx {
         v
     }
 
+    fn ensure_ptr_vreg(&mut self, v: VReg) -> VReg {
+        if v != 0 {
+            return v;
+        }
+        let dst = self.alloc_vreg_ptr();
+        self.emit(IrOp::Copy(dst, v));
+        dst
+    }
+
     fn alloc_label(&mut self) -> Label {
         let l = self.next_label;
         self.next_label += 1;
@@ -3903,6 +3912,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Deref(inner) => {
             let ptr_ty = expr_type(inner, ctx);
             let ptr = lower_expr(ctx, inner)?;
+            let ptr = ctx.ensure_ptr_vreg(ptr);
             // Resolve typedefs so a pointer named via `typedef int (*P)[3]`
             // still reports an array pointee here; otherwise the
             // aggregate-decay branch below would miss and we'd emit a
@@ -4160,6 +4170,21 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             if let Expr::InitList(items) = inner.as_ref() {
                 return lower_compound_literal(ctx, ty, items);
             }
+            if pointee_type_resolved(ty, ctx).is_some() {
+                match inner.as_ref() {
+                    Expr::IntLit(val, suffix) if !int_literal_type(*val, *suffix).is_long_long() => {
+                        let dst = ctx.alloc_vreg_ptr();
+                        ctx.emit(IrOp::LoadImm(dst, *val));
+                        return Ok(dst);
+                    }
+                    Expr::CharLit(val) => {
+                        let dst = ctx.alloc_vreg_ptr();
+                        ctx.emit(IrOp::LoadImm(dst, *val));
+                        return Ok(dst);
+                    }
+                    _ => {}
+                }
+            }
             let val = lower_expr(ctx, inner)?;
             let src_is_float = ctx.is_float_vreg(val);
             let src_is_64 = ctx.is_64bit_vreg(val);
@@ -4175,6 +4200,8 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             if src_is_64 && !dst_is_64 {
                 let dst = if dst_is_float {
                     ctx.alloc_vreg_float()
+                } else if pointee_type_resolved(ty, ctx).is_some() {
+                    ctx.alloc_vreg_ptr()
                 } else {
                     ctx.alloc_vreg()
                 };
@@ -5052,6 +5079,12 @@ fn lower_log_or(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
 
 fn lower_branch_if_false(ctx: &mut LowerCtx, expr: &Expr, false_label: Label) -> Result<()> {
     match expr {
+        Expr::IntLit(v, _) | Expr::CharLit(v) => {
+            if *v == 0 {
+                ctx.emit(IrOp::Branch(false_label));
+            }
+            Ok(())
+        }
         Expr::Unary {
             op: UnaryOp::LogNot,
             operand,
@@ -5099,6 +5132,12 @@ fn lower_branch_if_false(ctx: &mut LowerCtx, expr: &Expr, false_label: Label) ->
 
 fn lower_branch_if_true(ctx: &mut LowerCtx, expr: &Expr, true_label: Label) -> Result<()> {
     match expr {
+        Expr::IntLit(v, _) | Expr::CharLit(v) => {
+            if *v != 0 {
+                ctx.emit(IrOp::Branch(true_label));
+            }
+            Ok(())
+        }
         Expr::Unary {
             op: UnaryOp::LogNot,
             operand,
@@ -5212,6 +5251,22 @@ fn lower_if(
     then_body: &[Stmt],
     else_body: Option<&[Stmt]>,
 ) -> Result<()> {
+    if let Expr::IntLit(v, _) | Expr::CharLit(v) = cond {
+        let selected = if *v != 0 {
+            Some(then_body)
+        } else {
+            else_body
+        };
+        if let Some(body) = selected {
+            let snap = ctx.snapshot_scope();
+            for s in body {
+                lower_stmt(ctx, s)?;
+            }
+            ctx.restore_scope(snap);
+        }
+        return Ok(());
+    }
+
     // C99 6.8.4/3: each selection-statement substatement is itself a
     // block, so declarations in `then_body` / `else_body` must not leak
     // bindings into the enclosing scope.
@@ -5251,9 +5306,7 @@ fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
     let break_label = ctx.alloc_label();
 
     ctx.emit(IrOp::Label(continue_label));
-    let cond_val = lower_expr(ctx, cond)?;
-    lower_compare_scalar_to_zero(ctx, cond_val);
-    ctx.emit(IrOp::BranchCond(Cond::Eq, break_label));
+    lower_branch_if_false(ctx, cond, break_label)?;
 
     ctx.loop_stack.push(LoopContext {
         break_label,
@@ -5300,9 +5353,7 @@ fn lower_for(
 
     ctx.emit(IrOp::Label(top_label));
     if let Some(cond_expr) = cond {
-        let cond_val = lower_expr(ctx, cond_expr)?;
-        lower_compare_scalar_to_zero(ctx, cond_val);
-        ctx.emit(IrOp::BranchCond(Cond::Eq, break_label));
+        lower_branch_if_false(ctx, cond_expr, break_label)?;
     }
 
     ctx.loop_stack.push(LoopContext {
@@ -5349,9 +5400,7 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
     ctx.loop_stack.pop();
 
     ctx.emit(IrOp::Label(continue_label));
-    let cond_val = lower_expr(ctx, cond)?;
-    lower_compare_scalar_to_zero(ctx, cond_val);
-    ctx.emit(IrOp::BranchCond(Cond::NonZero, top_label));
+    lower_branch_if_true(ctx, cond, top_label)?;
     ctx.emit(IrOp::Label(break_label));
     Ok(())
 }

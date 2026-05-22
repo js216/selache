@@ -2943,7 +2943,30 @@ fn emit_function_instrs(
     let wide_strings = lower_result.wide_strings;
     let static_locals = lower_result.static_locals;
 
-    let ir = ir_opt::constant_fold(&lower_result.ops);
+    let mut ir = ir_opt::constant_fold(&lower_result.ops);
+    let has_calls = ir.iter().any(|op| {
+        matches!(
+            op,
+            crate::ir::IrOp::Call(..)
+                | crate::ir::IrOp::CallIndirect(..)
+                | crate::ir::IrOp::CallStruct { .. }
+                | crate::ir::IrOp::CallIndirectStruct { .. }
+        )
+    });
+    let has_indirect_mem = ir.iter().any(|op| {
+        matches!(
+            op,
+            crate::ir::IrOp::Load(_, base, _)
+                | crate::ir::IrOp::Store(_, base, _)
+                | crate::ir::IrOp::Load64(_, base, _)
+                | crate::ir::IrOp::Store64(_, base, _)
+                if *base != 0
+        )
+    });
+    if !func.is_variadic && !has_calls && !has_indirect_mem {
+        ir = ir_opt::forward_stack_loads(&ir);
+        ir = ir_opt::propagate_copies(&ir);
+    }
     let ir = ir_opt::dead_code_eliminate(&ir);
     let ir = ir_opt::detect_hardware_loops(&ir);
 
@@ -3036,7 +3059,14 @@ fn emit_function_instrs(
         label_map.insert(label, adj_idx);
     }
 
-    let optimized = eliminate_copies(&adjusted, &mut label_map);
+    let mut optimized = eliminate_copies(&adjusted, &mut label_map);
+    loop {
+        let before = optimized.len();
+        optimized = eliminate_copies(&optimized, &mut label_map);
+        if optimized.len() == before {
+            break;
+        }
+    }
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} after adjust ===", func.name);
         for (i, mi) in adjusted.iter().enumerate() {
@@ -3099,6 +3129,8 @@ fn emit_function_instrs(
     let return_seq_starts = find_return_sequence_starts(&resolved);
     let (body_with_epilogues, body_index_map) =
         splice_epilogues(resolved, &return_seq_starts, &epilogue);
+    let return_seq_start_set: std::collections::HashSet<usize> =
+        return_seq_starts.iter().copied().collect();
 
     // Rebase label_insertions: keys were function-absolute indices
     // (prologue_len + body_index). The prologue is unchanged; only
@@ -3112,7 +3144,11 @@ fn emit_function_instrs(
                 .get(body_idx)
                 .copied()
                 .unwrap_or(body_with_epilogues.len());
-            prologue_len + mapped
+            if return_seq_start_set.contains(&body_idx) {
+                prologue_len + mapped.saturating_sub(epilogue.len())
+            } else {
+                prologue_len + mapped
+            }
         } else {
             abs_idx
         };
@@ -5725,6 +5761,28 @@ mod tests {
     }
 
     #[test]
+    fn loop_exit_to_return_runs_epilogue() {
+        let m = compile("void g(int); void f(void){ for(int i=0;i<1;i++) g(i); }");
+        let exit = m
+            .text
+            .find(".L_branch_f_2:")
+            .expect("missing loop exit label");
+        let unwind = m.text[exit..]
+            .find("I7=MODIFY (I7,0x")
+            .map(|idx| exit + idx)
+            .expect("missing frame unwind after loop exit");
+        let ret = m.text[exit..]
+            .find("JUMP (M14,I12)")
+            .map(|idx| exit + idx)
+            .expect("missing return after loop exit");
+        assert!(
+            exit < unwind && unwind < ret,
+            "loop exit label must land before the return epilogue:\n{}",
+            m.text
+        );
+    }
+
+    #[test]
     fn global_address_load_uses_symbol_text() {
         let m = compile("int counter;\nint get() { return counter; }");
         assert!(m.text.contains("counter."), "got:\n{}", m.text);
@@ -5993,7 +6051,9 @@ mod tests {
 
     #[test]
     fn rt_stack_frame_has_modify() {
-        let text = round_trip_disasm("int f() { int a = 1; int b = 2; return a + b; }");
+        let text = round_trip_disasm(
+            "int f() { int a[2]; a[0] = 1; a[1] = 2; return a[0] + a[1]; }",
+        );
         assert!(
             text.iter()
                 .any(|t| t.contains("MODIFY") && t.contains("I7")),
