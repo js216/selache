@@ -22,6 +22,10 @@ pub enum Cond {
     Ge,
     Le,
     Gt,
+    /// Unsigned less-than after UCmp.
+    Ult,
+    /// Unsigned greater-or-equal after UCmp.
+    Uge,
     /// Branch if value is nonzero (used for logical tests).
     NonZero,
 }
@@ -177,8 +181,7 @@ pub enum IrOp {
     /// dst = caller-pushed stack argument at index `k` (0 = first
     /// argument beyond `target::ARG_REGS`). The SHARC+ C-ABI places
     /// these above the callee's frame pointer: arg `k` lives at
-    /// `DM(I6 + k + 1)`, where `I6 = caller_I7` at CJUMP time (see
-    /// the `FRAME_SKIP` note in emit_asm.rs). A separate opcode is
+    /// `DM(I6 + k + 1)`. A separate opcode is
     /// required because the ordinary `Load(dst, 0, slot)` path maps
     /// `slot` into the NEGATIVE-offset local-slot region below `I6`.
     LoadStackArg(VReg, u32),

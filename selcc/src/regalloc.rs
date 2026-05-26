@@ -116,8 +116,6 @@ struct Allocator {
     spill_slots: u32,
     /// Spill map: virtual register -> spill slot offset.
     spill_map: BTreeMap<u16, u32>,
-    /// Spill slots released after their owning vreg is dead.
-    free_spill_slots: BTreeSet<u32>,
 }
 
 fn spill_mem_access(write: bool) -> MemAccess {
@@ -624,18 +622,13 @@ impl Allocator {
             next_evict: 0,
             spill_slots: 0,
             spill_map: BTreeMap::new(),
-            free_spill_slots: BTreeSet::new(),
         }
     }
 
     fn alloc_spill_slot(&mut self) -> u32 {
-        if let Some(slot) = self.free_spill_slots.pop_first() {
-            slot
-        } else {
-            let slot = self.spill_slots;
-            self.spill_slots += 1;
-            slot
-        }
+        let slot = self.spill_slots;
+        self.spill_slots += 1;
+        slot
     }
 
     fn spill_slot_for(&mut self, vreg: u16) -> u32 {
@@ -665,17 +658,11 @@ impl Allocator {
             }
         }
 
-        let dead_spills: Vec<u16> = self
-            .spill_map
-            .keys()
-            .copied()
-            .filter(|vreg| !self.permanent_vregs.contains(vreg) && !live_out.contains(vreg))
-            .collect();
-        for vreg in dead_spills {
-            if let Some(slot) = self.spill_map.remove(&vreg) {
-                self.free_spill_slots.insert(slot);
-            }
-        }
+        // Keep spill slots stable for the whole function.  Branch and
+        // call handling may insert spill/reload traffic that is not
+        // represented in the original instruction liveness graph; if a
+        // slot is recycled after its original vreg looks dead, a later
+        // allocator-inserted reload can read the new occupant instead.
     }
 
     /// Pin `phys` for the remainder of the current mach-instruction rewrite,
@@ -2056,6 +2043,27 @@ mod tests {
                 }
             )),
             "caller-saved migration clobbered the pinned R8 argument: {call_out:#?}"
+        );
+    }
+
+    #[test]
+    fn dead_vreg_release_keeps_spill_slot_stable() {
+        let mut alloc = Allocator::new(0, false);
+        let slot = alloc.spill_slot_for(10);
+        alloc.vreg_to_phys.insert(10, 3);
+        alloc.phys_to_vreg.insert(3, 10);
+
+        alloc.release_dead_vregs(&BTreeSet::new());
+
+        assert_eq!(
+            alloc.spill_map.get(&10).copied(),
+            Some(slot),
+            "dead release must not recycle canonical spill slots"
+        );
+        assert_ne!(
+            alloc.alloc_spill_slot(),
+            slot,
+            "new spills must not reuse a slot that may still satisfy inserted reloads"
         );
     }
 

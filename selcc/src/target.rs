@@ -19,8 +19,8 @@ pub const SCRATCH_I: u8 = 4;
 /// The 4th and subsequent args are passed on the stack, NOT in R0.
 /// R0 is reserved exclusively for the return value.
 ///
-/// A 4-argument function reads the 4th arg via DM(M6,I6) from the
-/// caller's frame push, not from R0.
+/// A 4-argument function reads the 4th arg from the caller-pushed
+/// stack-arg area, not from R0.
 pub const ARG_REGS: &[u8] = &[4, 8, 12];
 
 /// Number of `ARG_REGS` slots used to pass a variadic function's
@@ -104,9 +104,11 @@ pub const NUM_REGS: u8 = 16;
 pub const COND_EQ: u8 = 0;
 pub const COND_LT: u8 = 1;
 pub const COND_LE: u8 = 2;
+pub const COND_AC: u8 = 3;
 pub const COND_NE: u8 = 16;
 pub const COND_GE: u8 = 17;
 pub const COND_GT: u8 = 18;
+pub const COND_NOT_AC: u8 = 19;
 pub const COND_TRUE: u8 = 31;
 
 /// Universal register encoding: R-group is 0x0n, I-group is 0x1n.

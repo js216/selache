@@ -1000,28 +1000,22 @@ pub fn lower_function_with_known(
             }
 
             if slot_idx >= target::ARG_REGS.len() {
-                // Parameters beyond the register-passed slots: loaded from
-                // the caller's stack-arg area.
+                // Parameters beyond the register-passed slots: load from
+                // the caller's stack-arg area, then snapshot immediately.
+                // Their incoming region is above I6 and later expression
+                // lowering can keep the value live for hundreds of
+                // instructions; a local copy avoids relying on a long-lived
+                // scratch register for ABI-owned stack memory.
                 let stack_offset = (slot_idx - target::ARG_REGS.len()) as u32;
-                if has_call || reassigned.contains(name) {
-                    let slot_offset = ctx.alloc_stack_slot();
-                    let param_vreg = ctx.alloc_vreg();
-                    if is_float_param {
-                        ctx.vreg_is_float.insert(param_vreg, true);
-                    }
-                    ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
-                    ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
-                    ctx.locals
-                        .insert(name.clone(), LocalStorage::Stack(slot_offset));
-                } else {
-                    let param_vreg = ctx.alloc_vreg();
-                    if is_float_param {
-                        ctx.vreg_is_float.insert(param_vreg, true);
-                    }
-                    ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
-                    ctx.locals
-                        .insert(name.clone(), LocalStorage::Reg(param_vreg));
+                let slot_offset = ctx.alloc_stack_slot();
+                let param_vreg = ctx.alloc_vreg();
+                if is_float_param {
+                    ctx.vreg_is_float.insert(param_vreg, true);
                 }
+                ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
+                ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
+                ctx.locals
+                    .insert(name.clone(), LocalStorage::Stack(slot_offset));
                 slot_idx += 1;
                 continue;
             }
@@ -4172,7 +4166,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             }
             if pointee_type_resolved(ty, ctx).is_some() {
                 match inner.as_ref() {
-                    Expr::IntLit(val, suffix) if !int_literal_type(*val, *suffix).is_long_long() => {
+                    Expr::IntLit(val, suffix)
+                        if !int_literal_type(*val, *suffix).is_long_long() =>
+                    {
                         let dst = ctx.alloc_vreg_ptr();
                         ctx.emit(IrOp::LoadImm(dst, *val));
                         return Ok(dst);
@@ -4834,21 +4830,7 @@ fn lower_comparison(
     let one = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(zero, 0));
     ctx.emit(IrOp::LoadImm(one, 1));
-    if is_unsigned {
-        ctx.emit(IrOp::UCmp(l, r));
-    } else {
-        ctx.emit(IrOp::Cmp(l, r));
-    }
-
-    let cond = match op {
-        BinaryOp::Eq => Cond::Eq,
-        BinaryOp::Ne => Cond::Ne,
-        BinaryOp::Lt => Cond::Lt,
-        BinaryOp::Gt => Cond::Gt,
-        BinaryOp::Le => Cond::Le,
-        BinaryOp::Ge => Cond::Ge,
-        _ => unreachable!(),
-    };
+    let cond = emit_compare_for_condition(ctx, op, l, r, is_unsigned);
 
     let lbl_true = ctx.alloc_label();
     let lbl_end = ctx.alloc_label();
@@ -5223,14 +5205,41 @@ fn lower_comparison_branch(
 
     let l = lower_expr(ctx, lhs)?;
     let r = lower_expr(ctx, rhs)?;
-    if binary_common_is_unsigned(ctx, lhs, rhs) {
+    let is_unsigned = binary_common_is_unsigned(ctx, lhs, rhs);
+    let cond = emit_compare_for_branch(ctx, op, l, r, is_unsigned, jump_if_true);
+    ctx.emit(IrOp::BranchCond(cond, label));
+    Ok(true)
+}
+
+fn emit_compare_for_condition(
+    ctx: &mut LowerCtx,
+    op: BinaryOp,
+    l: VReg,
+    r: VReg,
+    is_unsigned: bool,
+) -> Cond {
+    if is_unsigned {
         ctx.emit(IrOp::UCmp(l, r));
     } else {
         ctx.emit(IrOp::Cmp(l, r));
     }
-    let cond = comparison_branch_cond(op, jump_if_true);
-    ctx.emit(IrOp::BranchCond(cond, label));
-    Ok(true)
+    comparison_branch_cond(op, true)
+}
+
+fn emit_compare_for_branch(
+    ctx: &mut LowerCtx,
+    op: BinaryOp,
+    l: VReg,
+    r: VReg,
+    is_unsigned: bool,
+    jump_if_true: bool,
+) -> Cond {
+    if is_unsigned {
+        ctx.emit(IrOp::UCmp(l, r));
+    } else {
+        ctx.emit(IrOp::Cmp(l, r));
+    }
+    comparison_branch_cond(op, jump_if_true)
 }
 
 fn comparison_branch_cond(op: BinaryOp, jump_if_true: bool) -> Cond {
@@ -5252,11 +5261,7 @@ fn lower_if(
     else_body: Option<&[Stmt]>,
 ) -> Result<()> {
     if let Expr::IntLit(v, _) | Expr::CharLit(v) = cond {
-        let selected = if *v != 0 {
-            Some(then_body)
-        } else {
-            else_body
-        };
+        let selected = if *v != 0 { Some(then_body) } else { else_body };
         if let Some(body) = selected {
             let snap = ctx.snapshot_scope();
             for s in body {

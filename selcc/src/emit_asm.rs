@@ -2953,22 +2953,21 @@ fn emit_function_instrs(
                 | crate::ir::IrOp::CallIndirectStruct { .. }
         )
     });
-    let has_indirect_mem = ir.iter().any(|op| {
-        matches!(
-            op,
-            crate::ir::IrOp::Load(_, base, _)
-                | crate::ir::IrOp::Store(_, base, _)
-                | crate::ir::IrOp::Load64(_, base, _)
-                | crate::ir::IrOp::Store64(_, base, _)
-                if *base != 0
-        )
-    });
-    if !func.is_variadic && !has_calls && !has_indirect_mem {
+    if !func.is_variadic && !has_calls {
         ir = ir_opt::forward_stack_loads(&ir);
         ir = ir_opt::propagate_copies(&ir);
+        ir = ir_opt::constant_fold(&ir);
     }
     let ir = ir_opt::dead_code_eliminate(&ir);
-    let ir = ir_opt::detect_hardware_loops(&ir);
+    let mut ir = ir_opt::detect_hardware_loops(&ir);
+    ir = ir_opt::dead_code_eliminate(&ir_opt::elide_noop_hardware_loops(&ir));
+    if !func.is_variadic && !has_calls {
+        ir = ir_opt::remove_unreferenced_labels(&ir);
+        ir = ir_opt::forward_stack_loads(&ir);
+        ir = ir_opt::propagate_copies(&ir);
+        ir = ir_opt::constant_fold(&ir);
+        ir = ir_opt::dead_code_eliminate(&ir);
+    }
 
     // Decide up-front whether this function participates in an ABI
     // shape that routes data through R1: struct-by-value returns use
@@ -5877,6 +5876,67 @@ mod tests {
     }
 
     #[test]
+    fn rt_affine_reassociate_loop_body() {
+        let asm = compile(
+            "
+            int f(void) {
+                unsigned int acc = 0;
+                for (unsigned int i = 0; i < 4096U; ++i) {
+                    unsigned int x = i & 255U;
+                    acc += (((x + 7U) + 13U) - x);
+                    acc += ((x * 3U) + (x * 5U)) - (x * 8U);
+                }
+                return (int)(acc & 0xffffU);
+            }
+            ",
+        )
+        .text;
+        assert!(
+            asm.contains("0x14"),
+            "expected affine add/sub chain to become +20, got:\n{asm}"
+        );
+        assert!(
+            !asm.contains("0x7")
+                && !asm.contains("0xD")
+                && !asm.contains(" * ")
+                && !asm.contains("LSHIFT"),
+            "expected scaled affine chain to be removed, got:\n{asm}"
+        );
+    }
+
+    #[test]
+    fn rt_copy_prop_loop_does_not_read_dead_temp_slot() {
+        let asm = compile(
+            "
+            int f(void) {
+                unsigned int acc = 0;
+                unsigned int seed = 9U;
+
+                for (unsigned int i = 0; i < 3500U; ++i) {
+                    unsigned int a = seed + i;
+                    unsigned int b = a;
+                    unsigned int c = b;
+                    unsigned int d = c + 5U;
+                    acc += (d ^ a) & 63U;
+                    seed += 2U;
+                }
+
+                return (int)(acc & 0xffffU);
+            }
+            ",
+        )
+        .text;
+        assert!(
+            asm.contains("LCNTR = 0xDAC"),
+            "expected copy-prop draft shape to stay a hardware loop, got:\n{asm}"
+        );
+        assert!(
+            !asm.contains("DM (-0x8,I6)"),
+            "copy propagation left an uninitialized temporary read:\n{asm}"
+        );
+    }
+
+    #[test]
     fn rt_float_literal_bits() {
         let text = round_trip_disasm("float f() { return 2.75f; }");
         let hex = format!("0x{:08X}", 2.75f32.to_bits());
@@ -6052,7 +6112,7 @@ mod tests {
     #[test]
     fn rt_stack_frame_has_modify() {
         let text = round_trip_disasm(
-            "int f() { int a[2]; a[0] = 1; a[1] = 2; return a[0] + a[1]; }",
+            "void sink(int *p); int f() { int a[2]; a[0] = 1; sink(a); return a[0]; }",
         );
         assert!(
             text.iter()
@@ -6098,6 +6158,15 @@ mod tests {
         assert!(
             has_frame_load,
             "expected frame-relative load for 4th arg, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn rt_first_stack_arg_skips_frame_link_slot() {
+        let asm = compile("int f(int a, int b, int c, int d) { return d; }").text;
+        assert!(
+            asm.contains("I4=MODIFY (I4,0x1)(NW);"),
+            "first stack-passed argument must live at I6 + 1, got:\n{asm}"
         );
     }
 

@@ -1921,15 +1921,17 @@ pub fn select_with_name(
                     },
                     reloc: None,
                 });
-                instrs.push(MachInstr {
-                    instr: Instruction::Modify {
-                        i_reg: target::SCRATCH_I,
-                        value: offset,
-                        width: MemWidth::Nw,
-                        bitrev: false,
-                    },
-                    reloc: None,
-                });
+                if offset != 0 {
+                    instrs.push(MachInstr {
+                        instr: Instruction::Modify {
+                            i_reg: target::SCRATCH_I,
+                            value: offset,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
+                        reloc: None,
+                    });
+                }
                 instrs.push(MachInstr {
                     instr: Instruction::UregTransfer {
                         src_ureg: target::ureg_i_pre(target::SCRATCH_I),
@@ -1944,6 +1946,7 @@ pub fn select_with_name(
             IrOp::LoadStackArg(dst, k) => {
                 // Caller-pushed stack argument `k` lives at DM(I6 + k + 1):
                 // the caller pushes args via post-modify `DM(I7, M7) = Rn`
+                // in reverse order. The call frame reserves the return
                 // in reverse order; CJUMP(DB) then captures I6 = I7 at
                 // call time (before delay slots), so arg 0 of the
                 // stack-passed region ends up one word above I6 and
@@ -1963,15 +1966,17 @@ pub fn select_with_name(
                 });
                 // Word-scaled (NW) modify: stack-arg addresses are in
                 // the same word-stepped frame world as `DM(±N, I6)`.
-                instrs.push(MachInstr {
-                    instr: Instruction::Modify {
-                        i_reg: target::SCRATCH_I,
-                        value: offset,
-                        width: MemWidth::Nw,
-                        bitrev: false,
-                    },
-                    reloc: None,
-                });
+                if offset != 0 {
+                    instrs.push(MachInstr {
+                        instr: Instruction::Modify {
+                            i_reg: target::SCRATCH_I,
+                            value: offset,
+                            width: MemWidth::Nw,
+                            bitrev: false,
+                        },
+                        reloc: None,
+                    });
+                }
                 // Read at DM(I4, 0). Use a zero-offset post-modify via
                 // M5 (= 0 at startup, same convention as
                 // `emit_indirect_access`) so the instruction encodes
@@ -3564,6 +3569,8 @@ fn ir_cond_to_sharc(cond: Cond) -> u8 {
         Cond::Ge => target::COND_GE,
         Cond::Le => target::COND_LE,
         Cond::Gt => target::COND_GT,
+        Cond::Ult => target::COND_NOT_AC,
+        Cond::Uge => target::COND_AC,
         Cond::NonZero => target::COND_NE,
     }
 }
