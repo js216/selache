@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x1F */
+/* @exp_ticks 0x92 */
 
 #include <math.h>
 

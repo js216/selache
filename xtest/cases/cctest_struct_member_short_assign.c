@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x99ff8888 */
+/* @exp_ticks 0xe */
 
 #include <stdint.h>
 

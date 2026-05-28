@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x284 */
+/* @exp_ticks 0x19 */
 
 struct S {
    unsigned f0 : 24;

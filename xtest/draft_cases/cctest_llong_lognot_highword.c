@@ -3,6 +3,7 @@
 // cctest_llong_lognot_highword.c --- !long long must inspect high word
 
 /* @expect 0x2a */
+/* @exp_ticks 0x14 */
 
 static int highword_truth(long long x)
 {

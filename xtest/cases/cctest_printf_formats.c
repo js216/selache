@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x3F */
+/* @exp_ticks 0xa7e */
 
 #include <stdio.h>
 #include <string.h>

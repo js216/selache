@@ -76,6 +76,12 @@ pub fn select_with_name(
     // Convenience: scratch_vreg(i) gives the i-th FDiv scratch vreg
     // id, replacing the old hardcoded literals 0..5.
     let s = |i: u16| -> u16 { fdiv_scratch_base + i };
+    let shift64_scratch_base: u16 = fdiv_scratch_base + 6;
+    assert!(
+        shift64_scratch_base + 7 < 0x8000,
+        "function uses too many vregs to fit 64-bit shift scratch slots; \
+         max_ir_vreg={max_ir_vreg}",
+    );
 
     // Fresh label allocator for isel-internal skip branches (e.g. the
     // 64-bit compare lowers `IF NE skip` over the lo half compare). The
@@ -1764,6 +1770,15 @@ pub fn select_with_name(
                     reloc: None,
                 });
             }
+            IrOp::HardwareLoopReg { count, end_label } => {
+                instrs.push(MachInstr {
+                    instr: Instruction::DoLoop {
+                        counter: selinstr::encode::LoopCounter::Ureg(*count as u8),
+                        end_pc: *end_label,
+                    },
+                    reloc: None,
+                });
+            }
 
             IrOp::FCmp(lhs, rhs) => {
                 instrs.push(MachInstr {
@@ -2237,17 +2252,21 @@ pub fn select_with_name(
                 // `emit_inline_shr_64` but in the opposite direction so
                 // the helper stays self-contained (no cross-function
                 // register-ABI dependency).
-                emit_inline_shl_64(&mut instrs, *dst, *lhs, *rhs);
+                emit_inline_shl_64(&mut instrs, *dst, *lhs, *rhs, shift64_scratch_base);
             }
 
             IrOp::Shr64(dst, lhs, rhs) => {
                 // Inline 64-bit arithmetic right shift.
-                emit_inline_shr_64(&mut instrs, *dst, *lhs, *rhs, true);
+                emit_inline_shr_64(&mut instrs, *dst, *lhs, *rhs, shift64_scratch_base, true);
             }
 
             IrOp::UShr64(dst, lhs, rhs) => {
                 // Inline 64-bit logical right shift.
-                emit_inline_shr_64(&mut instrs, *dst, *lhs, *rhs, false);
+                emit_inline_shr_64(&mut instrs, *dst, *lhs, *rhs, shift64_scratch_base, false);
+            }
+
+            IrOp::ExtractByte64(dst, src, byte_index) => {
+                emit_extract_byte_64(&mut instrs, *dst, *src, *byte_index, shift64_scratch_base);
             }
 
             IrOp::Neg64(dst, src) => {
@@ -2841,6 +2860,185 @@ fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
     }
 }
 
+fn emit_extract_byte_64(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    src: u32,
+    byte_index: u32,
+    scratch_base: u16,
+) {
+    let dst = dst as u16;
+    let src_lo = src as u16;
+    let src_hi = (src + 1) as u16;
+    let byte_index = byte_index as u16;
+    let high = scratch_base;
+    let sel_mask = scratch_base + 1;
+    let inv_mask = scratch_base + 2;
+    let word = scratch_base + 3;
+    let lane = scratch_base + 4;
+    let shift = scratch_base + 5;
+    let neg_shift = scratch_base + 6;
+    let tmp = scratch_base + 7;
+
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: tmp,
+            value: (-2i32) as u32,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: high,
+                rx: byte_index,
+                ry: tmp,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Neg {
+                rn: sel_mask,
+                rx: high,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Not {
+                rn: inv_mask,
+                rx: sel_mask,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::And {
+                rn: lane,
+                rx: src_lo,
+                ry: inv_mask,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::And {
+                rn: word,
+                rx: src_hi,
+                ry: sel_mask,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Or {
+                rn: word,
+                rx: lane,
+                ry: word,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: tmp,
+            value: 2,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: high,
+                rx: high,
+                ry: tmp,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Sub {
+                rn: lane,
+                rx: byte_index,
+                ry: high,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: tmp,
+            value: 3,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: shift,
+                rx: lane,
+                ry: tmp,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Neg {
+                rn: neg_shift,
+                rx: shift,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: dst,
+                rx: word,
+                ry: neg_shift,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: tmp,
+            value: 0xFF,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::And {
+                rn: dst,
+                rx: dst,
+                ry: tmp,
+            }),
+        },
+        reloc: None,
+    });
+}
+
 /// Emit an inline 64-bit right shift (arithmetic for signed,
 /// logical for unsigned) that handles any shift count in `[0, 63]`
 /// branch-free, using the SHARC+ barrel-shifter trick.
@@ -2871,47 +3069,61 @@ fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
 /// holds the shift count, rhs_hi is ignored).  Scratch registers R4,
 /// R5, R7 are clobbered.  Result is returned in R0:R1 and copied to
 /// the destination vreg pair.
-fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32, signed: bool) {
+fn emit_inline_shr_64(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    scratch_base: u16,
+    signed: bool,
+) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;
     let lhs_hi = (lhs + 1) as u16;
     let rhs_lo = rhs as u16;
-    // Move args into R0 = lo, R1 = hi, R2 = shift count.
-    if lhs_lo != 0 {
-        instrs.push(MachInstr::compute_pass(0, lhs_lo));
+    let r0 = scratch_base;
+    let r1 = scratch_base + 1;
+    let r2 = scratch_base + 2;
+    let r3 = scratch_base + 3;
+    let r4 = scratch_base + 4;
+    let r5 = scratch_base + 5;
+    let r7 = scratch_base + 7;
+    // Move args into scratch lo, hi, and shift-count vregs.
+    if lhs_lo != r0 {
+        instrs.push(MachInstr::compute_pass(r0, lhs_lo));
     }
-    if lhs_hi != 1 {
-        instrs.push(MachInstr::compute_pass(1, lhs_hi));
+    if lhs_hi != r1 {
+        instrs.push(MachInstr::compute_pass(r1, lhs_hi));
     }
-    if rhs_lo != 2 {
-        instrs.push(MachInstr::compute_pass(2, rhs_lo));
+    if rhs_lo != r2 {
+        instrs.push(MachInstr::compute_pass(r2, rhs_lo));
     }
-    // R3 = -R2  (the negated shift count).
+    // r3 = -r2  (the negated shift count).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Alu(AluOp::Neg { rn: 3, rx: 2 }),
+            compute: ComputeOp::Alu(AluOp::Neg { rn: r3, rx: r2 }),
         },
         reloc: None,
     });
-    // R4 = 32.
+    // r4 = 32.
     instrs.push(MachInstr {
         instr: Instruction::LoadImm {
-            ureg: target::ureg_r(4),
+            ureg: r4,
             value: 32,
         },
         reloc: None,
     });
-    // R5 = R3 + R4 = 32 - n  (signed: positive for n < 32, negative
+    // r5 = r3 + r4 = 32 - n  (signed: positive for n < 32, negative
     // for n > 32, zero for n == 32).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Alu(AluOp::Add {
-                rn: 5,
-                rx: 3,
-                ry: 4,
+                rn: r5,
+                rx: r3,
+                ry: r4,
             }),
         },
         reloc: None,
@@ -2927,15 +3139,15 @@ fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32,
     // word for signed right shift.
     let hi_to_lo_shift = if signed {
         ShiftOp::Ashift {
-            rn: 7,
-            rx: 1,
-            ry: 5,
+            rn: r7,
+            rx: r1,
+            ry: r5,
         }
     } else {
         ShiftOp::Lshift {
-            rn: 7,
-            rx: 1,
-            ry: 5,
+            rn: r7,
+            rx: r1,
+            ry: r5,
         }
     };
     instrs.push(MachInstr {
@@ -2950,15 +3162,15 @@ fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32,
     // zero (unsigned) or all sign bits (signed), both correct.
     let new_hi_shift = if signed {
         ShiftOp::Ashift {
-            rn: 1,
-            rx: 1,
-            ry: 3,
+            rn: r1,
+            rx: r1,
+            ry: r3,
         }
     } else {
         ShiftOp::Lshift {
-            rn: 1,
-            rx: 1,
-            ry: 3,
+            rn: r1,
+            rx: r1,
+            ry: r3,
         }
     };
     instrs.push(MachInstr {
@@ -2975,9 +3187,9 @@ fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32,
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Shift(ShiftOp::Lshift {
-                rn: 0,
-                rx: 0,
-                ry: 3,
+                rn: r0,
+                rx: r0,
+                ry: r3,
             }),
         },
         reloc: None,
@@ -2987,19 +3199,218 @@ fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32,
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Alu(AluOp::Or {
-                rn: 0,
-                rx: 0,
-                ry: 7,
+                rn: r0,
+                rx: r0,
+                ry: r7,
             }),
         },
         reloc: None,
     });
     // Copy result from R0:R1 to the destination vreg pair.
-    if dst_lo != 0 {
-        instrs.push(MachInstr::compute_pass(dst_lo, 0));
+    if dst_lo != r0 {
+        instrs.push(MachInstr::compute_pass(dst_lo, r0));
     }
-    if dst_hi != 1 {
-        instrs.push(MachInstr::compute_pass(dst_hi, 1));
+    if dst_hi != r1 {
+        instrs.push(MachInstr::compute_pass(dst_hi, r1));
+    }
+}
+
+#[allow(dead_code)]
+fn emit_inline_shr_64_const(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    shift: u32,
+    scratch_base: u16,
+    signed: bool,
+) {
+    let dst_lo = dst as u16;
+    let dst_hi = (dst + 1) as u16;
+    let lhs_lo = lhs as u16;
+    let lhs_hi = (lhs + 1) as u16;
+    let r0 = scratch_base;
+    let r1 = scratch_base + 1;
+    let r2 = scratch_base + 2;
+    let r3 = scratch_base + 3;
+    let r4 = scratch_base + 4;
+
+    if shift == 0 {
+        if dst_lo != lhs_lo {
+            instrs.push(MachInstr::compute_pass(dst_lo, lhs_lo));
+        }
+        if dst_hi != lhs_hi {
+            instrs.push(MachInstr::compute_pass(dst_hi, lhs_hi));
+        }
+        return;
+    }
+
+    if shift == 32 {
+        if dst_lo != lhs_hi {
+            instrs.push(MachInstr::compute_pass(dst_lo, lhs_hi));
+        }
+        if signed {
+            instrs.push(MachInstr {
+                instr: Instruction::LoadImm {
+                    ureg: r2,
+                    value: (-31i32) as u32,
+                },
+                reloc: None,
+            });
+            instrs.push(MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Shift(ShiftOp::Ashift {
+                        rn: dst_hi,
+                        rx: lhs_hi,
+                        ry: r2,
+                    }),
+                },
+                reloc: None,
+            });
+        } else {
+            instrs.push(MachInstr {
+                instr: Instruction::LoadImm {
+                    ureg: dst_hi,
+                    value: 0,
+                },
+                reloc: None,
+            });
+        }
+        return;
+    }
+
+    if shift > 32 {
+        let count = -((shift - 32) as i32);
+        instrs.push(MachInstr {
+            instr: Instruction::LoadImm {
+                ureg: r2,
+                value: count as u32,
+            },
+            reloc: None,
+        });
+        let low_shift = if signed {
+            ShiftOp::Ashift {
+                rn: dst_lo,
+                rx: lhs_hi,
+                ry: r2,
+            }
+        } else {
+            ShiftOp::Lshift {
+                rn: dst_lo,
+                rx: lhs_hi,
+                ry: r2,
+            }
+        };
+        instrs.push(MachInstr {
+            instr: Instruction::Compute {
+                cond: target::COND_TRUE,
+                compute: ComputeOp::Shift(low_shift),
+            },
+            reloc: None,
+        });
+        if signed {
+            instrs.push(MachInstr {
+                instr: Instruction::LoadImm {
+                    ureg: r3,
+                    value: (-31i32) as u32,
+                },
+                reloc: None,
+            });
+            instrs.push(MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Shift(ShiftOp::Ashift {
+                        rn: dst_hi,
+                        rx: lhs_hi,
+                        ry: r3,
+                    }),
+                },
+                reloc: None,
+            });
+        } else {
+            instrs.push(MachInstr {
+                instr: Instruction::LoadImm {
+                    ureg: dst_hi,
+                    value: 0,
+                },
+                reloc: None,
+            });
+        }
+        return;
+    }
+
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: r2,
+            value: (-(shift as i32)) as u32,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::LoadImm {
+            ureg: r3,
+            value: 32 - shift,
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: r0,
+                rx: lhs_lo,
+                ry: r2,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(ShiftOp::Lshift {
+                rn: r1,
+                rx: lhs_hi,
+                ry: r3,
+            }),
+        },
+        reloc: None,
+    });
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Alu(AluOp::Or {
+                rn: r4,
+                rx: r0,
+                ry: r1,
+            }),
+        },
+        reloc: None,
+    });
+    let high_shift = if signed {
+        ShiftOp::Ashift {
+            rn: r1,
+            rx: lhs_hi,
+            ry: r2,
+        }
+    } else {
+        ShiftOp::Lshift {
+            rn: r1,
+            rx: lhs_hi,
+            ry: r2,
+        }
+    };
+    instrs.push(MachInstr {
+        instr: Instruction::Compute {
+            cond: target::COND_TRUE,
+            compute: ComputeOp::Shift(high_shift),
+        },
+        reloc: None,
+    });
+    if dst_lo != r4 {
+        instrs.push(MachInstr::compute_pass(dst_lo, r4));
+    }
+    if dst_hi != r1 {
+        instrs.push(MachInstr::compute_pass(dst_hi, r1));
     }
 }
 
@@ -3026,38 +3437,50 @@ fn emit_inline_shr_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32,
 /// Staying in the low-numbered vreg space keeps the sequence
 /// internally consistent (regalloc rewrites the vreg ids, but the
 /// instructions reference the same vregs before and after the rewrite).
-fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32) {
+fn emit_inline_shl_64(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    scratch_base: u16,
+) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;
     let lhs_hi = (lhs + 1) as u16;
     let rhs_lo = rhs as u16;
-    // vreg 0 = lhs_lo, vreg 1 = lhs_hi, vreg 2 = rhs_lo.
-    if lhs_lo != 0 {
-        instrs.push(MachInstr::compute_pass(0, lhs_lo));
+    let r0 = scratch_base;
+    let r1 = scratch_base + 1;
+    let r2 = scratch_base + 2;
+    let r4 = scratch_base + 4;
+    let r5 = scratch_base + 5;
+    let r7 = scratch_base + 7;
+    // Scratch lo, hi, and shift-count vregs.
+    if lhs_lo != r0 {
+        instrs.push(MachInstr::compute_pass(r0, lhs_lo));
     }
-    if lhs_hi != 1 {
-        instrs.push(MachInstr::compute_pass(1, lhs_hi));
+    if lhs_hi != r1 {
+        instrs.push(MachInstr::compute_pass(r1, lhs_hi));
     }
-    if rhs_lo != 2 {
-        instrs.push(MachInstr::compute_pass(2, rhs_lo));
+    if rhs_lo != r2 {
+        instrs.push(MachInstr::compute_pass(r2, rhs_lo));
     }
-    // R4 = -32 (constant).
+    // r4 = -32 (constant).
     instrs.push(MachInstr {
         instr: Instruction::LoadImm {
-            ureg: target::ureg_r(4),
+            ureg: r4,
             value: (-32i32) as u32,
         },
         reloc: None,
     });
-    // R5 = R2 + R4 = n - 32.  Positive for n >= 32, negative for n < 32.
+    // r5 = r2 + r4 = n - 32.  Positive for n >= 32, negative for n < 32.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Alu(AluOp::Add {
-                rn: 5,
-                rx: 2,
-                ry: 4,
+                rn: r5,
+                rx: r2,
+                ry: r4,
             }),
         },
         reloc: None,
@@ -3071,9 +3494,9 @@ fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Shift(ShiftOp::Lshift {
-                rn: 7,
-                rx: 0,
-                ry: 5,
+                rn: r7,
+                rx: r0,
+                ry: r5,
             }),
         },
         reloc: None,
@@ -3084,9 +3507,9 @@ fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Shift(ShiftOp::Lshift {
-                rn: 1,
-                rx: 1,
-                ry: 2,
+                rn: r1,
+                rx: r1,
+                ry: r2,
             }),
         },
         reloc: None,
@@ -3096,9 +3519,9 @@ fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Alu(AluOp::Or {
-                rn: 1,
-                rx: 1,
-                ry: 7,
+                rn: r1,
+                rx: r1,
+                ry: r7,
             }),
         },
         reloc: None,
@@ -3108,19 +3531,19 @@ fn emit_inline_shl_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32)
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Shift(ShiftOp::Lshift {
-                rn: 0,
-                rx: 0,
-                ry: 2,
+                rn: r0,
+                rx: r0,
+                ry: r2,
             }),
         },
         reloc: None,
     });
     // Copy result from vreg 0:1 to the destination pair.
-    if dst_lo != 0 {
-        instrs.push(MachInstr::compute_pass(dst_lo, 0));
+    if dst_lo != r0 {
+        instrs.push(MachInstr::compute_pass(dst_lo, r0));
     }
-    if dst_hi != 1 {
-        instrs.push(MachInstr::compute_pass(dst_hi, 1));
+    if dst_hi != r1 {
+        instrs.push(MachInstr::compute_pass(dst_hi, r1));
     }
 }
 
@@ -3393,6 +3816,23 @@ fn emit_runtime_call_32_divmod(
 }
 
 /// Map IR condition to SHARC condition code.
+#[allow(dead_code)]
+fn recent_load_imm(ir: &[IrOp], before: usize, mut vreg: VReg) -> Option<i64> {
+    for op in ir[..before].iter().rev().take(8) {
+        match op {
+            IrOp::LoadImm(dst, value) if *dst == vreg => return Some(*value),
+            IrOp::Copy(dst, src) if *dst == vreg => {
+                vreg = *src;
+            }
+            IrOp::IntToLongLong(dst, src) | IrOp::SExtToLongLong(dst, src) if *dst == vreg => {
+                vreg = *src;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Largest vreg id referenced anywhere in `ir`, or 0 if no vreg is
 /// referenced. Used by inline-expansion helpers (e.g. `IrOp::FDiv`'s
 /// Newton-Raphson scratch slots) to pick scratch vreg ids strictly
@@ -3469,6 +3909,12 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
                 bump(*b);
                 bump(*c);
             }
+            IrOp::ExtractByte64(a, b, c) => {
+                bump(*a);
+                bump(*b);
+                bump(*b + 1);
+                bump(*c);
+            }
             IrOp::FCmp(a, b)
             | IrOp::Cmp(a, b)
             | IrOp::Cmp64(a, b)
@@ -3535,6 +3981,7 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
             | IrOp::Label(_)
             | IrOp::HardwareLoop { .. }
             | IrOp::Nop => {}
+            IrOp::HardwareLoopReg { count, .. } => bump(*count),
         }
     }
     m
@@ -3554,7 +4001,9 @@ fn max_ir_label(ir: &[IrOp]) -> Label {
     for op in ir {
         match op {
             IrOp::Label(l) | IrOp::Branch(l) | IrOp::BranchCond(_, l) => bump(*l),
-            IrOp::HardwareLoop { end_label, .. } => bump(*end_label),
+            IrOp::HardwareLoop { end_label, .. } | IrOp::HardwareLoopReg { end_label, .. } => {
+                bump(*end_label)
+            }
             _ => {}
         }
     }

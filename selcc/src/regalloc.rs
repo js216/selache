@@ -18,7 +18,8 @@ use crate::mach::MachInstr;
 use crate::target;
 
 use selinstr::encode::{
-    AluOp, BranchTarget, ComputeOp, FaluOp, Instruction, MemAccess, MemWidth, MulOp, ShiftOp,
+    AluOp, BranchTarget, ComputeOp, FaluOp, Instruction, LoopCounter, MemAccess, MemWidth, MulOp,
+    ShiftOp,
 };
 
 const UREG_ASTATX: u16 = 0x73;
@@ -237,6 +238,13 @@ fn add_vreg_def(refs: &mut VRegRefs, vreg: u16) {
     add_vreg_ref(&mut refs.defs, vreg);
 }
 
+fn preserve_conditional_defs(refs: &mut VRegRefs) {
+    let defs: Vec<u16> = refs.defs.iter().copied().collect();
+    for vreg in defs {
+        add_vreg_use(refs, vreg);
+    }
+}
+
 fn collect_compute_refs(compute: &ComputeOp, refs: &mut VRegRefs) {
     match compute {
         ComputeOp::Alu(alu) => collect_alu_refs(alu, refs),
@@ -409,9 +417,20 @@ fn collect_instr_refs(instr: &Instruction) -> VRegRefs {
         Instruction::LoadImm { ureg, .. } => add_vreg_def(&mut refs, *ureg),
         Instruction::Return {
             compute: Some(compute),
+            cond,
             ..
+        } => {
+            collect_compute_refs(compute, &mut refs);
+            if *cond != target::COND_TRUE {
+                preserve_conditional_defs(&mut refs);
+            }
         }
-        | Instruction::Compute { compute, .. } => collect_compute_refs(compute, &mut refs),
+        Instruction::Compute { compute, cond } => {
+            collect_compute_refs(compute, &mut refs);
+            if *cond != target::COND_TRUE {
+                preserve_conditional_defs(&mut refs);
+            }
+        }
         Instruction::ComputeLoadStore {
             compute,
             access,
@@ -1142,12 +1161,26 @@ impl Allocator {
                 mi.instr
             }
 
+            Instruction::DoLoop {
+                counter: LoopCounter::Ureg(ureg),
+                end_pc,
+            } => {
+                let phys = self.get_phys(ureg as u16, &mut spill_pre);
+                Instruction::DoLoop {
+                    counter: LoopCounter::Ureg(phys as u8),
+                    end_pc,
+                }
+            }
+
             Instruction::Nop
             | Instruction::Idle
             | Instruction::Rframe
             | Instruction::EmuIdle
             | Instruction::Sync
-            | Instruction::DoLoop { .. }
+            | Instruction::DoLoop {
+                counter: LoopCounter::Immediate(_),
+                ..
+            }
             | Instruction::DualMove { .. }
             | Instruction::Modify { .. }
             | Instruction::BitOp { .. }

@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x0501 */
+/* @exp_ticks 0x16 */
 
 #include <complex.h>
 

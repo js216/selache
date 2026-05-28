@@ -21,6 +21,7 @@ use crate::ir::{Cond, IrOp, Label, VReg};
 /// - `Mul(dst, src, 1)` becomes `Copy(dst, src)`
 /// - Single-use immediates are propagated into the consuming instruction.
 pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut next_vreg = fresh_vreg(ops);
     // Map vreg -> known immediate value.
     let mut known: HashMap<VReg, i64> = HashMap::new();
     // Map vreg -> a simple one-variable affine expression in 32-bit integer
@@ -148,6 +149,15 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                         result.push(IrOp::LoadImm(*dst, folded));
                         known.insert(*dst, folded);
                         mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    } else {
+                        result.push(op.clone());
+                    }
+                } else if let (None, Some(b)) = (lv, rv) {
+                    if let Some(shift) = signed_power_of_two_shift(b) {
+                        emit_signed_div_pow2(&mut result, &mut next_vreg, *dst, *lhs, shift);
+                        known.remove(dst);
+                        affine.remove(dst);
                         mark_consumed(&use_counts, &mut consumed, *rhs);
                     } else {
                         result.push(op.clone());
@@ -480,6 +490,42 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
                 }
             }
 
+            IrOp::FAdd(dst, lhs, rhs)
+            | IrOp::FSub(dst, lhs, rhs)
+            | IrOp::FMul(dst, lhs, rhs)
+            | IrOp::FDiv(dst, lhs, rhs) => {
+                let lv = known.get(lhs).copied();
+                let rv = known.get(rhs).copied();
+                if let (Some(a), Some(b)) = (lv, rv) {
+                    if let Some(folded) = fold_float_binary(op, a as u32, b as u32) {
+                        result.push(IrOp::LoadImm(*dst, folded as i64));
+                        known.insert(*dst, folded as i64);
+                        affine.remove(dst);
+                        mark_consumed(&use_counts, &mut consumed, *lhs);
+                        mark_consumed(&use_counts, &mut consumed, *rhs);
+                    } else {
+                        affine.remove(dst);
+                        result.push(op.clone());
+                    }
+                } else {
+                    affine.remove(dst);
+                    result.push(op.clone());
+                }
+            }
+
+            IrOp::FNeg(dst, src) => {
+                if let Some(v) = known.get(src).copied() {
+                    let folded = (v as u32) ^ 0x8000_0000;
+                    result.push(IrOp::LoadImm(*dst, folded as i64));
+                    known.insert(*dst, folded as i64);
+                    affine.remove(dst);
+                    mark_consumed(&use_counts, &mut consumed, *src);
+                } else {
+                    affine.remove(dst);
+                    result.push(op.clone());
+                }
+            }
+
             IrOp::LoadImm(dst, val) => {
                 known.insert(*dst, *val);
                 affine.remove(dst);
@@ -520,6 +566,130 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
         .collect()
 }
 
+pub fn strength_reduce_nonnegative_divisions(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut known: HashMap<VReg, i64> = HashMap::new();
+    let mut use_counts: HashMap<VReg, u32> = HashMap::new();
+    for op in ops {
+        for vreg in source_vregs(op) {
+            *use_counts.entry(vreg).or_insert(0) += 1;
+        }
+    }
+
+    let mut result = Vec::with_capacity(ops.len());
+    let mut rewritten_immediates: HashMap<VReg, i64> = HashMap::new();
+    let mut last_cmp: Option<(VReg, VReg)> = None;
+    let mut le_facts: HashSet<(VReg, VReg)> = HashSet::new();
+    let mut frame_source: HashMap<VReg, i32> = HashMap::new();
+    let mut slot_le_facts: HashSet<(i32, i32)> = HashSet::new();
+    let mut nonnegative: HashSet<VReg> = HashSet::new();
+
+    for op in ops {
+        for dst in dest_vregs(op) {
+            known.remove(&dst);
+            nonnegative.remove(&dst);
+            frame_source.remove(&dst);
+        }
+
+        match op {
+            IrOp::LoadImm(dst, value) => {
+                known.insert(*dst, *value);
+                if *value >= 0 {
+                    nonnegative.insert(*dst);
+                }
+                last_cmp = None;
+                result.push(op.clone());
+            }
+            IrOp::Load(dst, 0, slot) => {
+                frame_source.insert(*dst, *slot);
+                last_cmp = None;
+                result.push(op.clone());
+            }
+            IrOp::Cmp(lhs, rhs) => {
+                last_cmp = Some((*lhs, *rhs));
+                result.push(op.clone());
+            }
+            IrOp::BranchCond(Cond::Gt, _) => {
+                if let Some((lhs, rhs)) = last_cmp.take() {
+                    le_facts.insert((lhs, rhs));
+                    if let (Some(lhs_slot), Some(rhs_slot)) =
+                        (frame_source.get(&lhs), frame_source.get(&rhs))
+                    {
+                        slot_le_facts.insert((*lhs_slot, *rhs_slot));
+                    }
+                }
+                result.push(op.clone());
+            }
+            IrOp::BranchCond(_, _) => {
+                last_cmp = None;
+                result.push(op.clone());
+            }
+            IrOp::Sub(dst, lhs, rhs) => {
+                if le_facts.contains(&(*rhs, *lhs))
+                    || frame_source
+                        .get(rhs)
+                        .zip(frame_source.get(lhs))
+                        .is_some_and(|(rhs_slot, lhs_slot)| {
+                            slot_le_facts.contains(&(*rhs_slot, *lhs_slot))
+                        })
+                {
+                    nonnegative.insert(*dst);
+                }
+                last_cmp = None;
+                result.push(op.clone());
+            }
+            IrOp::Div(dst, lhs, rhs)
+                if nonnegative.contains(lhs)
+                    && use_counts.get(rhs).copied().unwrap_or(0) <= 1
+                    && known
+                        .get(rhs)
+                        .and_then(|v| signed_power_of_two_shift(*v))
+                        .is_some() =>
+            {
+                let shift = signed_power_of_two_shift(known[rhs]).expect("checked above");
+                rewritten_immediates.insert(*rhs, -(shift as i64));
+                nonnegative.insert(*dst);
+                last_cmp = None;
+                result.push(IrOp::Lshr(*dst, *lhs, *rhs));
+            }
+            IrOp::Store(_, 0, slot) => {
+                slot_le_facts.retain(|(lhs, rhs)| lhs != slot && rhs != slot);
+                last_cmp = None;
+                result.push(op.clone());
+            }
+            IrOp::Store(..)
+            | IrOp::Store64(..)
+            | IrOp::StoreGlobal(..)
+            | IrOp::Call(..)
+            | IrOp::CallIndirect(..)
+            | IrOp::CallStruct { .. }
+            | IrOp::CallIndirectStruct { .. }
+            | IrOp::Branch(_)
+            | IrOp::Label(_)
+            | IrOp::HardwareLoop { .. }
+            | IrOp::HardwareLoopReg { .. } => {
+                le_facts.clear();
+                slot_le_facts.clear();
+                last_cmp = None;
+                result.push(op.clone());
+            }
+            _ => {
+                last_cmp = None;
+                result.push(op.clone());
+            }
+        }
+    }
+
+    result
+        .into_iter()
+        .map(|op| match op {
+            IrOp::LoadImm(dst, _) if rewritten_immediates.contains_key(&dst) => {
+                IrOp::LoadImm(dst, rewritten_immediates[&dst])
+            }
+            _ => op,
+        })
+        .collect()
+}
+
 fn unsigned_power_of_two_shift(v: i64) -> Option<u32> {
     let v = u32::try_from(v).ok()?;
     if v.is_power_of_two() && v != 0 {
@@ -527,6 +697,72 @@ fn unsigned_power_of_two_shift(v: i64) -> Option<u32> {
     } else {
         None
     }
+}
+
+fn signed_power_of_two_shift(v: i64) -> Option<u32> {
+    let v = i32::try_from(v).ok()?;
+    if v > 0 && (v as u32).is_power_of_two() {
+        Some((v as u32).trailing_zeros())
+    } else {
+        None
+    }
+}
+
+fn bump_fresh_vreg(next: &mut VReg) -> VReg {
+    let out = *next;
+    *next = out.saturating_add(1);
+    out
+}
+
+fn emit_signed_div_pow2(
+    result: &mut Vec<IrOp>,
+    next_vreg: &mut VReg,
+    dst: VReg,
+    lhs: VReg,
+    shift: u32,
+) {
+    if shift == 0 {
+        result.push(IrOp::Copy(dst, lhs));
+        return;
+    }
+
+    let sign_shift = bump_fresh_vreg(next_vreg);
+    let sign_or_mask = bump_fresh_vreg(next_vreg);
+    let bias = if shift == 1 {
+        sign_or_mask
+    } else {
+        let mask = bump_fresh_vreg(next_vreg);
+        let bias = bump_fresh_vreg(next_vreg);
+        result.push(IrOp::LoadImm(sign_shift, -31));
+        result.push(IrOp::Shr(sign_or_mask, lhs, sign_shift));
+        result.push(IrOp::LoadImm(mask, (1i64 << shift) - 1));
+        result.push(IrOp::BitAnd(bias, sign_or_mask, mask));
+        bias
+    };
+
+    if shift == 1 {
+        result.push(IrOp::LoadImm(sign_shift, -31));
+        result.push(IrOp::Lshr(sign_or_mask, lhs, sign_shift));
+    }
+
+    let adjusted = bump_fresh_vreg(next_vreg);
+    let div_shift = bump_fresh_vreg(next_vreg);
+    result.push(IrOp::Add(adjusted, lhs, bias));
+    result.push(IrOp::LoadImm(div_shift, -(shift as i64)));
+    result.push(IrOp::Shr(dst, adjusted, div_shift));
+}
+
+fn fold_float_binary(op: &IrOp, lhs_bits: u32, rhs_bits: u32) -> Option<u32> {
+    let lhs = f32::from_bits(lhs_bits);
+    let rhs = f32::from_bits(rhs_bits);
+    let result = match op {
+        IrOp::FAdd(..) => lhs + rhs,
+        IrOp::FSub(..) => lhs - rhs,
+        IrOp::FMul(..) => lhs * rhs,
+        IrOp::FDiv(..) if rhs != 0.0 => lhs / rhs,
+        _ => return None,
+    };
+    result.is_finite().then_some(result.to_bits())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -805,7 +1041,11 @@ impl FrameMemLoc {
         }
     }
 
-    fn with_ir_offset(self, offset_words: i32) -> Self {
+    fn with_ir_byte_offset(self, offset_bytes: i32) -> Self {
+        self.with_byte_offset(offset_bytes)
+    }
+
+    fn with_ir_word_offset(self, offset_words: i32) -> Self {
         self.with_byte_offset(offset_words * 4)
     }
 }
@@ -884,7 +1124,7 @@ fn frame_load_loc(op: &IrOp, facts: &FrameFacts) -> Option<FrameMemLoc> {
             .addrs
             .get(base)
             .copied()
-            .map(|loc| loc.with_ir_offset(*offset)),
+            .map(|loc| loc.with_ir_byte_offset(*offset)),
         _ => None,
     }
 }
@@ -899,7 +1139,7 @@ fn frame_store_loc(op: &IrOp, facts: &FrameFacts) -> Option<FrameMemLoc> {
             .addrs
             .get(base)
             .copied()
-            .map(|loc| loc.with_ir_offset(*offset)),
+            .map(|loc| loc.with_ir_byte_offset(*offset)),
         _ => None,
     }
 }
@@ -925,14 +1165,18 @@ fn escaped_frame_addr_slots(ops: &[IrOp]) -> HashSet<i32> {
         for src in source_vregs(op) {
             if let Some(loc) = facts.addrs.get(&src) {
                 if !frame_addr_use_is_internal(op, src, &facts) {
-                    escaped.insert(loc.slot);
+                    mark_escaped_frame_slot_range(&mut escaped, loc.slot);
                 }
             }
         }
 
         if matches!(
             op,
-            IrOp::Label(_) | IrOp::Branch(_) | IrOp::BranchCond(..) | IrOp::HardwareLoop { .. }
+            IrOp::Label(_)
+                | IrOp::Branch(_)
+                | IrOp::BranchCond(..)
+                | IrOp::HardwareLoop { .. }
+                | IrOp::HardwareLoopReg { .. }
         ) {
             facts.clear();
         } else {
@@ -941,6 +1185,14 @@ fn escaped_frame_addr_slots(ops: &[IrOp]) -> HashSet<i32> {
     }
 
     escaped
+}
+
+fn mark_escaped_frame_slot_range(escaped: &mut HashSet<i32>, slot: i32) {
+    if slot >= 0 {
+        escaped.extend(0..=slot);
+    } else {
+        escaped.insert(slot);
+    }
 }
 
 fn used_frame_load_locs(ops: &[IrOp]) -> HashSet<FrameMemLoc> {
@@ -974,8 +1226,8 @@ fn used_frame_load_locs(ops: &[IrOp]) -> HashSet<FrameMemLoc> {
                     .copied()
                     .or_else(|| global_facts.addrs.get(base).copied())
                 {
-                    used.insert(loc.with_ir_offset(*offset));
-                    used.insert(loc.with_ir_offset(*offset + 1));
+                    used.insert(loc.with_ir_word_offset(*offset));
+                    used.insert(loc.with_ir_word_offset(*offset + 1));
                 }
             }
             _ => {}
@@ -983,7 +1235,11 @@ fn used_frame_load_locs(ops: &[IrOp]) -> HashSet<FrameMemLoc> {
 
         if matches!(
             op,
-            IrOp::Label(_) | IrOp::Branch(_) | IrOp::BranchCond(..) | IrOp::HardwareLoop { .. }
+            IrOp::Label(_)
+                | IrOp::Branch(_)
+                | IrOp::BranchCond(..)
+                | IrOp::HardwareLoop { .. }
+                | IrOp::HardwareLoopReg { .. }
         ) {
             facts.clear();
         } else {
@@ -1029,7 +1285,11 @@ fn frame_addr_calc_vregs(ops: &[IrOp]) -> (HashSet<VReg>, HashSet<VReg>) {
 
         if matches!(
             op,
-            IrOp::Label(_) | IrOp::Branch(_) | IrOp::BranchCond(..) | IrOp::HardwareLoop { .. }
+            IrOp::Label(_)
+                | IrOp::Branch(_)
+                | IrOp::BranchCond(..)
+                | IrOp::HardwareLoop { .. }
+                | IrOp::HardwareLoopReg { .. }
         ) {
             facts.clear();
         } else {
@@ -1072,6 +1332,56 @@ fn remove_dead_frame_addr_calcs(ops: &[IrOp]) -> Vec<IrOp> {
     }
 }
 
+/// Rewrite indirect accesses through a known frame address back to direct
+/// frame-relative loads/stores, without forwarding or deleting memory ops.
+pub fn canonicalize_frame_indirect_accesses(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut facts = FrameFacts::default();
+    let mut out = Vec::with_capacity(ops.len());
+
+    for op in ops {
+        match op {
+            IrOp::Load(dst, _, _) => {
+                if let Some(loc) = frame_load_loc(op, &facts).filter(|loc| loc.byte_offset == 0) {
+                    out.push(IrOp::Load(*dst, 0, loc.slot));
+                } else {
+                    out.push(op.clone());
+                }
+                facts.update_after(op);
+            }
+            IrOp::Store(val, _, _) => {
+                if let Some(loc) = frame_store_loc(op, &facts).filter(|loc| loc.byte_offset == 0) {
+                    out.push(IrOp::Store(*val, 0, loc.slot));
+                } else {
+                    out.push(op.clone());
+                }
+                facts.update_after(op);
+            }
+            IrOp::Label(_)
+            | IrOp::Branch(_)
+            | IrOp::BranchCond(..)
+            | IrOp::HardwareLoop { .. }
+            | IrOp::HardwareLoopReg { .. }
+            | IrOp::Call(..)
+            | IrOp::CallIndirect(..)
+            | IrOp::CallStruct { .. }
+            | IrOp::CallIndirectStruct { .. }
+            | IrOp::Ret(_)
+            | IrOp::RetStruct { .. }
+            | IrOp::StackRestore(_)
+            | IrOp::StackAlloc(..) => {
+                out.push(op.clone());
+                facts.clear();
+            }
+            _ => {
+                out.push(op.clone());
+                facts.update_after(op);
+            }
+        }
+    }
+
+    remove_dead_frame_addr_calcs(&out)
+}
+
 /// Forward frame-relative loads from the latest store in the same basic block.
 ///
 /// The lowerer materializes C locals in frame slots. In straight-line code this
@@ -1095,6 +1405,8 @@ pub fn forward_stack_loads(ops: &[IrOp]) -> Vec<IrOp> {
                     .and_then(|loc| slot_values.get(&loc).copied())
                 {
                     forwarded.push(IrOp::Copy(*dst, src));
+                } else if let Some(loc) = loc.filter(|loc| loc.byte_offset == 0) {
+                    forwarded.push(IrOp::Load(*dst, 0, loc.slot));
                 } else {
                     forwarded.push(op.clone());
                 }
@@ -1108,7 +1420,11 @@ pub fn forward_stack_loads(ops: &[IrOp]) -> Vec<IrOp> {
                 } else {
                     slot_values.clear();
                 }
-                forwarded.push(op.clone());
+                if let Some(loc) = frame_store_loc(op, &facts).filter(|loc| loc.byte_offset == 0) {
+                    forwarded.push(IrOp::Store(*val, 0, loc.slot));
+                } else {
+                    forwarded.push(op.clone());
+                }
                 facts.update_after(op);
             }
             IrOp::Load64(_, 0, slot) | IrOp::Store64(_, 0, slot) => {
@@ -1127,6 +1443,7 @@ pub fn forward_stack_loads(ops: &[IrOp]) -> Vec<IrOp> {
             | IrOp::Branch(_)
             | IrOp::BranchCond(..)
             | IrOp::HardwareLoop { .. }
+            | IrOp::HardwareLoopReg { .. }
             | IrOp::Call(..)
             | IrOp::CallIndirect(..)
             | IrOp::CallStruct { .. }
@@ -1185,6 +1502,7 @@ pub fn forward_stack_loads(ops: &[IrOp]) -> Vec<IrOp> {
                         | IrOp::Branch(_)
                         | IrOp::BranchCond(..)
                         | IrOp::HardwareLoop { .. }
+                        | IrOp::HardwareLoopReg { .. }
                 ) {
                     facts.clear();
                 } else {
@@ -1215,12 +1533,20 @@ pub fn propagate_copies(ops: &[IrOp]) -> Vec<IrOp> {
         v
     }
 
-    fn resolve_pointer_base(aliases: &HashMap<VReg, VReg>, base: VReg) -> VReg {
+    fn resolve_pointer_base(
+        aliases: &mut HashMap<VReg, VReg>,
+        out: &mut Vec<IrOp>,
+        base: VReg,
+    ) -> VReg {
         if base == 0 {
             return 0;
         }
         let resolved = resolve(aliases, base);
         if resolved == 0 {
+            if aliases.contains_key(&base) {
+                out.push(IrOp::Copy(base, 0));
+                aliases.remove(&base);
+            }
             base
         } else {
             resolved
@@ -1361,12 +1687,12 @@ pub fn propagate_copies(ops: &[IrOp]) -> Vec<IrOp> {
             }
             IrOp::Load(dst, base, slot) => {
                 kill(&mut aliases, *dst);
-                let base = resolve_pointer_base(&aliases, *base);
+                let base = resolve_pointer_base(&mut aliases, &mut out, *base);
                 out.push(IrOp::Load(*dst, base, *slot));
                 at_block_start = false;
             }
             IrOp::Store(val, base, slot) => {
-                let base = resolve_pointer_base(&aliases, *base);
+                let base = resolve_pointer_base(&mut aliases, &mut out, *base);
                 out.push(IrOp::Store(resolve(&aliases, *val), base, *slot));
                 at_block_start = false;
             }
@@ -1532,10 +1858,15 @@ pub fn elide_noop_hardware_loops(ops: &[IrOp]) -> Vec<IrOp> {
     let mut idx = 0;
 
     while idx < ops.len() {
-        let IrOp::HardwareLoop { end_label, .. } = ops[idx] else {
-            out.push(ops[idx].clone());
-            idx += 1;
-            continue;
+        let end_label = match ops[idx] {
+            IrOp::HardwareLoop { end_label, .. } | IrOp::HardwareLoopReg { end_label, .. } => {
+                end_label
+            }
+            _ => {
+                out.push(ops[idx].clone());
+                idx += 1;
+                continue;
+            }
         };
 
         let Some(end_idx) = ops[idx + 1..]
@@ -1567,7 +1898,7 @@ pub fn remove_unreferenced_labels(ops: &[IrOp]) -> Vec<IrOp> {
             IrOp::Branch(label) | IrOp::BranchCond(_, label) => {
                 referenced.insert(*label);
             }
-            IrOp::HardwareLoop { end_label, .. } => {
+            IrOp::HardwareLoop { end_label, .. } | IrOp::HardwareLoopReg { end_label, .. } => {
                 referenced.insert(*end_label);
             }
             _ => {}
@@ -1760,7 +2091,7 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
         {
             // Validate: the loop count must fit in u16 for the SHARC LCNTR
             // immediate encoding, and must be positive.
-            if info.count <= 0 || info.count > i64::from(u16::MAX) {
+            if info.count_vreg.is_none() && (info.count <= 0 || info.count > i64::from(u16::MAX)) {
                 continue;
             }
 
@@ -1801,6 +2132,7 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
                 matches!(
                     op,
                     IrOp::HardwareLoop { .. }
+                        | IrOp::HardwareLoopReg { .. }
                         | IrOp::Call(..)
                         | IrOp::CallIndirect(..)
                         | IrOp::CallStruct { .. }
@@ -1854,10 +2186,19 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
             }
 
             // Emit the HardwareLoop instruction.
-            new_ops.push(IrOp::HardwareLoop {
-                count: info.count,
-                end_label,
-            });
+            new_ops.extend_from_slice(&ops[info.count_setup_start..info.count_setup_end]);
+            if let Some(count) = info.count_vreg {
+                let zero = fresh_vreg(ops);
+                new_ops.push(IrOp::LoadImm(zero, 0));
+                new_ops.push(IrOp::Cmp(zero, count));
+                new_ops.push(IrOp::BranchCond(Cond::Ge, end_label));
+                new_ops.push(IrOp::HardwareLoopReg { count, end_label });
+            } else {
+                new_ops.push(IrOp::HardwareLoop {
+                    count: info.count,
+                    end_label,
+                });
+            }
 
             // Emit the body. If the C body reads the counter, retain
             // the step sequence so those reads observe the same values
@@ -1880,6 +2221,18 @@ fn try_detect_one_loop(ops: &[IrOp], known: &HashMap<VReg, i64>) -> Option<Vec<I
     None
 }
 
+fn fresh_vreg(ops: &[IrOp]) -> VReg {
+    ops.iter()
+        .flat_map(|op| {
+            let mut regs = source_vregs(op);
+            regs.extend(dest_vregs(op));
+            regs
+        })
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 /// Information about a detected for-loop suitable for hardware loop conversion.
 struct LoopInfo {
     /// Index of the Store that initializes the counter to 0.
@@ -1890,6 +2243,12 @@ struct LoopInfo {
     step_start: usize,
     /// Number of iterations.
     count: i64,
+    /// Runtime trip count when the loop bound is held in a vreg.
+    count_vreg: Option<VReg>,
+    /// Header instructions that compute `count_vreg` and are safe to hoist
+    /// before the hardware-loop guard.
+    count_setup_start: usize,
+    count_setup_end: usize,
     /// Stack slot of the loop counter `i`. The body must not read or write
     /// this slot, because hardware loops increment LCNTR (an internal
     /// register), not the C-level induction variable on the stack. If the
@@ -1955,41 +2314,86 @@ fn analyze_loop_header(
         _ => return None,
     };
 
-    // Next: LoadImm(v_limit, N) -- the loop bound.
-    if after_top + 1 >= ops.len() {
-        return None;
+    if after_top + 2 < ops.len() {
+        if let (IrOp::Cmp(lhs, limit_vreg), IrOp::BranchCond(Cond::Ge, target)) =
+            (&ops[after_top + 1], &ops[after_top + 2])
+        {
+            if *lhs == counter_vreg && *target == end_label {
+                let body_start = after_top + 3;
+                let step_start =
+                    find_loop_step_start(ops, body_start, back_edge_idx, counter_slot, known)?;
+                return Some(LoopInfo {
+                    init_store_idx,
+                    body_start,
+                    step_start,
+                    count: 0,
+                    count_vreg: Some(*limit_vreg),
+                    count_setup_start: after_top + 1,
+                    count_setup_end: after_top + 1,
+                    counter_slot,
+                    keep_counter_state: true,
+                });
+            }
+        }
     }
-    let limit_val = match &ops[after_top + 1] {
-        IrOp::LoadImm(_, val) => *val,
-        _ => return None,
-    };
-    let limit_vreg = match &ops[after_top + 1] {
-        IrOp::LoadImm(dst, _) => *dst,
-        _ => return None,
-    };
 
-    if after_top + 3 < ops.len()
-        && matches!(
-            &ops[after_top + 2],
-            IrOp::Cmp(lhs, rhs) | IrOp::UCmp(lhs, rhs)
-                if *lhs == counter_vreg && *rhs == limit_vreg
-        )
-        && matches!(
-            &ops[after_top + 3],
-            IrOp::BranchCond(Cond::Ge, target) if *target == end_label
-        )
-    {
-        let body_start = after_top + 4;
-        let step_start = find_loop_step_start(ops, body_start, back_edge_idx, counter_slot, known)?;
-        return Some(LoopInfo {
-            init_store_idx,
-            body_start,
-            step_start,
-            count: limit_val,
-            counter_slot,
-            keep_counter_state: false,
-        });
+    // Next: LoadImm(v_limit, N) -- the loop bound.
+    let mut immediate_limit = None;
+    if let Some(IrOp::LoadImm(limit_vreg, limit_val)) = ops.get(after_top + 1) {
+        immediate_limit = Some((*limit_vreg, *limit_val));
+        if after_top + 3 < ops.len()
+            && matches!(
+                &ops[after_top + 2],
+                IrOp::Cmp(lhs, rhs) | IrOp::UCmp(lhs, rhs)
+                    if *lhs == counter_vreg && *rhs == *limit_vreg
+            )
+            && matches!(
+                &ops[after_top + 3],
+                IrOp::BranchCond(Cond::Ge, target) if *target == end_label
+            )
+        {
+            let body_start = after_top + 4;
+            let step_start =
+                find_loop_step_start(ops, body_start, back_edge_idx, counter_slot, known)?;
+            return Some(LoopInfo {
+                init_store_idx,
+                body_start,
+                step_start,
+                count: *limit_val,
+                count_vreg: None,
+                count_setup_start: after_top + 1,
+                count_setup_end: after_top + 1,
+                counter_slot,
+                keep_counter_state: false,
+            });
+        }
     }
+
+    if let Some((cmp_idx, limit_vreg)) = find_hoistable_dynamic_loop_bound(
+        ops,
+        after_top + 1,
+        back_edge_idx,
+        end_label,
+        counter_vreg,
+    ) {
+        let body_start = cmp_idx + 2;
+        let step_start = find_loop_step_start(ops, body_start, back_edge_idx, counter_slot, known)?;
+        if loop_body_allows_hoisted_bound_loads(&ops[body_start..step_start]) {
+            return Some(LoopInfo {
+                init_store_idx,
+                body_start,
+                step_start,
+                count: 0,
+                count_vreg: Some(limit_vreg),
+                count_setup_start: after_top + 1,
+                count_setup_end: cmp_idx,
+                counter_slot,
+                keep_counter_state: true,
+            });
+        }
+    }
+
+    let (limit_vreg, limit_val) = immediate_limit?;
 
     // Next: LoadImm(_, 0) and LoadImm(_, 1) for comparison results.
     if after_top + 3 >= ops.len() {
@@ -2045,8 +2449,64 @@ fn analyze_loop_header(
         body_start,
         step_start,
         count: limit_val,
+        count_vreg: None,
+        count_setup_start: after_top + 1,
+        count_setup_end: after_top + 1,
         counter_slot,
         keep_counter_state: false,
+    })
+}
+
+fn find_hoistable_dynamic_loop_bound(
+    ops: &[IrOp],
+    start: usize,
+    back_edge_idx: usize,
+    end_label: Label,
+    counter_vreg: VReg,
+) -> Option<(usize, VReg)> {
+    let max_scan = back_edge_idx.min(start + 8);
+    let mut defined = HashSet::new();
+    for idx in start..max_scan {
+        match &ops[idx] {
+            IrOp::Cmp(lhs, rhs) if *lhs == counter_vreg => {
+                if matches!(
+                    ops.get(idx + 1),
+                    Some(IrOp::BranchCond(Cond::Ge, target)) if *target == end_label
+                ) {
+                    return Some((idx, *rhs));
+                }
+                return None;
+            }
+            op if hoistable_loop_bound_op(op, counter_vreg, &defined) => {
+                for dst in dest_vregs(op) {
+                    defined.insert(dst);
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn hoistable_loop_bound_op(op: &IrOp, counter_vreg: VReg, defined: &HashSet<VReg>) -> bool {
+    if source_vregs(op).into_iter().any(|src| src == counter_vreg) {
+        return false;
+    }
+    match op {
+        IrOp::LoadImm(..) | IrOp::Copy(..) | IrOp::Add(..) | IrOp::Sub(..) => true,
+        IrOp::Load(dst, base, _) if *base != 0 => defined.contains(base) || !defined.contains(dst),
+        _ => false,
+    }
+}
+
+fn loop_body_allows_hoisted_bound_loads(body: &[IrOp]) -> bool {
+    !body.iter().any(|op| match op {
+        IrOp::Store(_, base, _) | IrOp::Store64(_, base, _) => *base != 0,
+        IrOp::Call(..)
+        | IrOp::CallIndirect(..)
+        | IrOp::CallStruct { .. }
+        | IrOp::CallIndirectStruct { .. } => true,
+        _ => false,
     })
 }
 
@@ -2115,6 +2575,9 @@ fn build_pointer_loop_info(
         body_start: bounds.body_start,
         step_start: back_edge_idx,
         count: span / stride,
+        count_vreg: None,
+        count_setup_start: bounds.body_start,
+        count_setup_end: bounds.body_start,
         counter_slot: ptr_slot,
         keep_counter_state: true,
     })
@@ -2395,6 +2858,7 @@ fn dest_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::Shl(d, _, _)
         | IrOp::Shr(d, _, _)
         | IrOp::Lshr(d, _, _)
+        | IrOp::ExtractByte64(d, _, _)
         | IrOp::Neg(d, _)
         | IrOp::BitNot(d, _)
         | IrOp::Load(d, _, _)
@@ -2458,6 +2922,7 @@ fn dest_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::WriteGlobal64(..)
         | IrOp::StackRestore(_)
         | IrOp::HardwareLoop { .. }
+        | IrOp::HardwareLoopReg { .. }
         | IrOp::Nop => Vec::new(),
     }
 }
@@ -2474,6 +2939,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::LoadStackArg(..)
         | IrOp::StackArgAddr(..)
         | IrOp::Nop => Vec::new(),
+        IrOp::HardwareLoopReg { count, .. } => vec![*count],
         IrOp::Copy(_, s)
         | IrOp::Neg(_, s)
         | IrOp::BitNot(_, s)
@@ -2561,6 +3027,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::BitOr64(_, a, b)
         | IrOp::BitXor64(_, a, b) => vec![*a, *a + 1, *b, *b + 1],
         IrOp::Shl64(_, a, b) | IrOp::Shr64(_, a, b) | IrOp::UShr64(_, a, b) => vec![*a, *a + 1, *b],
+        IrOp::ExtractByte64(_, a, b) => vec![*a, *a + 1, *b],
         IrOp::Cmp64(a, b) | IrOp::UCmp64(a, b) => vec![*a, *a + 1, *b, *b + 1],
         IrOp::Load64(_, base, _) => vec![*base],
         IrOp::Store64(val, base, _) => vec![*val, *val + 1, *base],
@@ -2628,6 +3095,28 @@ mod tests {
     }
 
     #[test]
+    fn fold_float_arithmetic_constants() {
+        let ops = vec![
+            IrOp::LoadImm(0, std::f32::consts::PI.to_bits() as i64),
+            IrOp::LoadImm(1, 4.0f32.to_bits() as i64),
+            IrOp::FDiv(2, 0, 1),
+            IrOp::Ret(Some(2)),
+        ];
+        let folded = constant_fold(&ops);
+        let expected = (std::f32::consts::PI / 4.0f32).to_bits() as i64;
+        assert!(
+            folded
+                .iter()
+                .any(|op| matches!(op, IrOp::LoadImm(2, bits) if *bits == expected)),
+            "expected folded float divide to LoadImm bits 0x{expected:x}, got: {folded:?}"
+        );
+        assert!(
+            !folded.iter().any(|op| matches!(op, IrOp::FDiv(..))),
+            "constant float divide should not survive: {folded:?}"
+        );
+    }
+
+    #[test]
     fn fold_add_zero_to_copy() {
         let ops = vec![IrOp::LoadImm(0, 0), IrOp::Add(2, 1, 0), IrOp::Ret(Some(2))];
         let folded = constant_fold(&ops);
@@ -2671,6 +3160,86 @@ mod tests {
                 matches!(op, IrOp::Shl(7, 3, shift) if folded.contains(&IrOp::LoadImm(*shift, 3)))
             }),
             "expected multiply by 8 to become shift: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn fold_signed_power_of_two_division() {
+        let ops = vec![
+            IrOp::LoadImm(1, 2),
+            IrOp::Div(2, 3, 1),
+            IrOp::LoadImm(4, 4),
+            IrOp::Div(5, 3, 4),
+            IrOp::Ret(Some(5)),
+        ];
+        let folded = constant_fold(&ops);
+        assert!(
+            !folded.iter().any(|op| matches!(op, IrOp::Div(..))),
+            "signed power-of-two divides should not call runtime division: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Lshr(_, 3, _))),
+            "divide by two should use sign-bit bias from logical shift: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::BitAnd(..))),
+            "larger signed power-of-two divide should mask the sign bias: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn fold_signed_power_of_two_division_keeps_non_power_runtime_divide() {
+        let ops = vec![IrOp::LoadImm(1, 3), IrOp::Div(2, 3, 1), IrOp::Ret(Some(2))];
+        let folded = constant_fold(&ops);
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Div(2, 3, 1))),
+            "non-power-of-two signed divide must stay a runtime divide: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn strength_reduce_nonnegative_signed_division_after_loop_guard() {
+        let ops = vec![
+            IrOp::LoadImm(1, 2),
+            IrOp::Cmp(2, 3),
+            IrOp::BranchCond(Cond::Gt, 9),
+            IrOp::Sub(4, 3, 2),
+            IrOp::Div(5, 4, 1),
+            IrOp::Ret(Some(5)),
+            IrOp::Label(9),
+            IrOp::Ret(None),
+        ];
+        let folded = strength_reduce_nonnegative_divisions(&ops);
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Lshr(5, 4, 1))),
+            "hi - lo is nonnegative after a lo<=hi fallthrough guard: {folded:?}"
+        );
+        assert!(
+            folded.contains(&IrOp::LoadImm(1, -1)),
+            "divide by two should reuse the divisor register as a right-shift count: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn strength_reduce_nonnegative_signed_division_after_frame_reload_guard() {
+        let ops = vec![
+            IrOp::LoadImm(1, 2),
+            IrOp::Load(2, 0, 11),
+            IrOp::Load(3, 0, 12),
+            IrOp::Cmp(2, 3),
+            IrOp::BranchCond(Cond::Gt, 9),
+            IrOp::Load(4, 0, 12),
+            IrOp::Load(5, 0, 11),
+            IrOp::Sub(6, 4, 5),
+            IrOp::Div(7, 6, 1),
+            IrOp::Ret(Some(7)),
+            IrOp::Label(9),
+            IrOp::Ret(None),
+        ];
+        let folded = strength_reduce_nonnegative_divisions(&ops);
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Lshr(7, 6, 1))),
+            "hi - lo remains nonnegative after reloading guarded frame slots: {folded:?}"
         );
     }
 
@@ -2906,6 +3475,33 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_frame_indirect_accesses_keeps_escaped_stores() {
+        let ops = vec![
+            IrOp::LoadImm(1, 11),
+            IrOp::FrameAddr(2, 5),
+            IrOp::LoadImm(3, 4),
+            IrOp::Add(4, 2, 3),
+            IrOp::Store(1, 4, 0),
+            IrOp::FrameAddr(5, 5),
+            IrOp::Call(6, "consume".into(), vec![5]),
+            IrOp::Ret(Some(6)),
+        ];
+        let canonical = canonicalize_frame_indirect_accesses(&ops);
+        assert!(
+            canonical
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(1, 0, 4))),
+            "field store should become a direct frame store even when the aggregate escapes: {canonical:?}"
+        );
+        assert!(
+            canonical.iter().any(
+                |op| matches!(op, IrOp::Call(6, name, args) if name == "consume" && args == &vec![5])
+            ),
+            "escaping call must remain intact: {canonical:?}"
+        );
+    }
+
+    #[test]
     fn forward_stack_loads_keeps_escaped_frameaddr_store() {
         let ops = vec![
             IrOp::LoadImm(1, 7),
@@ -2919,12 +3515,34 @@ mod tests {
         assert!(
             forwarded
                 .iter()
-                .any(|op| matches!(op, IrOp::Store(1, 2, 0))),
+                .any(|op| matches!(op, IrOp::Store(1, 0, 5))),
             "escaped frame store must remain visible, got: {forwarded:?}"
         );
         assert!(
             forwarded.iter().any(|op| matches!(op, IrOp::Load(4, 2, 0))),
             "escaped frame load must not be forwarded, got: {forwarded:?}"
+        );
+    }
+
+    #[test]
+    fn forward_stack_loads_keeps_other_frame_stores_after_frameaddr_escape() {
+        let ops = vec![
+            IrOp::FrameAddr(1, 10),
+            IrOp::Store(1, 0, 20),
+            IrOp::LoadImm(2, 5),
+            IrOp::FrameAddr(3, 9),
+            IrOp::Store(2, 3, 0),
+            IrOp::Label(0),
+            IrOp::Load(4, 0, 20),
+            IrOp::Load(5, 4, 0),
+            IrOp::Ret(Some(5)),
+        ];
+        let forwarded = forward_stack_loads(&ops);
+        assert!(
+            forwarded
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(2, 0, 9))),
+            "escaped frame stores should be kept and canonicalized: {forwarded:?}"
         );
     }
 
@@ -2944,7 +3562,7 @@ mod tests {
         assert!(
             forwarded
                 .iter()
-                .any(|op| matches!(op, IrOp::Store(1, 4, 0))),
+                .any(|op| matches!(op, IrOp::Store(1, 0, 4))),
             "store feeding a post-label indirect frame load must remain, got: {forwarded:?}"
         );
         assert!(
@@ -2954,7 +3572,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_stack_loads_canonicalizes_frameaddr_word_offsets() {
+    fn forward_stack_loads_canonicalizes_frameaddr_added_byte_offsets() {
         let ops = vec![
             IrOp::LoadImm(1, 7),
             IrOp::FrameAddr(2, 8),
@@ -2975,6 +3593,27 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, IrOp::Store(_, 2, 0))),
             "forwarded adjacent-slot store should be removable, got: {forwarded:?}"
+        );
+    }
+
+    #[test]
+    fn forward_stack_loads_treats_indirect_load_offsets_as_bytes() {
+        let ops = vec![
+            IrOp::LoadImm(1, 20),
+            IrOp::FrameAddr(2, 8),
+            IrOp::Store(1, 2, 0),
+            IrOp::FrameAddr(3, 9),
+            IrOp::Load(4, 3, 4),
+            IrOp::Ret(Some(4)),
+        ];
+        let forwarded = forward_stack_loads(&ops);
+        assert!(
+            forwarded.iter().any(|op| matches!(op, IrOp::Copy(4, 1))),
+            "Load(FrameAddr(9), 4) should alias slot 8, got: {forwarded:?}"
+        );
+        assert!(
+            !forwarded.iter().any(|op| matches!(op, IrOp::Load(4, _, _))),
+            "byte-offset load should be forwarded away, got: {forwarded:?}"
         );
     }
 
@@ -3042,6 +3681,30 @@ mod tests {
         assert!(
             !propagated.iter().any(|op| matches!(op, IrOp::Copy(..))),
             "expected redundant copy to be removed, got: {propagated:?}"
+        );
+    }
+
+    #[test]
+    fn propagate_copy_materializes_arg_zero_pointer_base_before_load() {
+        let ops = vec![
+            IrOp::Copy(2, 0),
+            IrOp::Load(3, 2, 0),
+            IrOp::Branch(1),
+            IrOp::Label(1),
+            IrOp::Ret(Some(3)),
+        ];
+        let propagated = propagate_copies(&ops);
+        let copy_pos = propagated
+            .iter()
+            .position(|op| matches!(op, IrOp::Copy(2, 0)))
+            .expect("pointer-base copy should be materialized");
+        let load_pos = propagated
+            .iter()
+            .position(|op| matches!(op, IrOp::Load(3, 2, 0)))
+            .expect("load should keep the nonzero pointer-base vreg");
+        assert!(
+            copy_pos < load_pos,
+            "pointer-base copy must dominate the load, got: {propagated:?}"
         );
     }
 
@@ -3132,6 +3795,46 @@ mod tests {
         // Should NOT contain the back-edge Branch or the loop header.
         let has_back_edge = result.iter().any(|op| matches!(op, IrOp::Branch(0)));
         assert!(!has_back_edge, "back-edge should be removed: {result:?}");
+    }
+
+    #[test]
+    fn hardware_loop_detection_hoists_invariant_dynamic_bound() {
+        let ops = vec![
+            IrOp::LoadImm(0, 0),
+            IrOp::Store(0, 0, 0),
+            IrOp::Label(0),
+            IrOp::Load(1, 0, 0),
+            IrOp::LoadImm(2, 4),
+            IrOp::Add(3, 10, 2),
+            IrOp::Load(4, 3, 0),
+            IrOp::Cmp(1, 4),
+            IrOp::BranchCond(Cond::Ge, 1),
+            IrOp::Load(5, 0, 2),
+            IrOp::LoadImm(6, 1),
+            IrOp::Add(7, 5, 6),
+            IrOp::Store(7, 0, 2),
+            IrOp::Load(8, 0, 0),
+            IrOp::LoadImm(9, 1),
+            IrOp::Add(11, 8, 9),
+            IrOp::Store(11, 0, 0),
+            IrOp::Branch(0),
+            IrOp::Label(1),
+            IrOp::Ret(None),
+        ];
+
+        let result = detect_hardware_loops(&ops);
+        let hw_pos = result
+            .iter()
+            .position(|op| matches!(op, IrOp::HardwareLoopReg { count: 4, .. }))
+            .expect("expected register-count hardware loop");
+        let load_bound_pos = result
+            .iter()
+            .position(|op| matches!(op, IrOp::Load(4, 3, 0)))
+            .expect("expected hoisted bound load");
+        assert!(
+            load_bound_pos < hw_pos,
+            "bound load should be hoisted before hardware-loop guard: {result:?}"
+        );
     }
 
     #[test]

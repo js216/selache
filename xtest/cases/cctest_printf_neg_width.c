@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x55 */
+/* @exp_ticks 0x24d */
 
 #include <stdarg.h>
 #include <stdio.h>

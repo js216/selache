@@ -45,6 +45,20 @@ struct LowerCtx {
     locals: HashMap<String, LocalStorage>,
     /// Type of each local variable.
     local_types: HashMap<String, Type>,
+    /// Known integer values for unescaped scalar locals.
+    const_locals: HashMap<String, i64>,
+    /// Known IEEE-754 single-precision bit patterns for unescaped float locals.
+    const_float_locals: HashMap<String, u32>,
+    /// Known values for direct bitfield members of unescaped local aggregates.
+    const_bitfield_locals: HashMap<(String, String), i64>,
+    /// Known elements of local function-pointer arrays.
+    const_fn_ptr_arrays: HashMap<String, Vec<Option<String>>>,
+    /// Local pointer aliases to a known element in one of those arrays.
+    const_fn_ptr_aliases: HashMap<String, (String, usize)>,
+    /// Local pointer variables initialized to a constant scalar compound literal.
+    const_scalar_ptr_values: HashMap<String, (i64, Type)>,
+    /// Local pointer variables initialized to side-effect-free array compound literals.
+    const_array_literal_ptrs: HashMap<String, (Vec<Expr>, Type, HashSet<String>)>,
     /// Whether a given vreg holds a float value.
     vreg_is_float: HashMap<VReg, bool>,
     /// Whether a given vreg is the lo half of a 64-bit register pair.
@@ -145,6 +159,13 @@ struct LowerCtx {
 struct ScopeSnapshot {
     locals: HashMap<String, LocalStorage>,
     local_types: HashMap<String, Type>,
+    const_locals: HashMap<String, i64>,
+    const_float_locals: HashMap<String, u32>,
+    const_bitfield_locals: HashMap<(String, String), i64>,
+    const_fn_ptr_arrays: HashMap<String, Vec<Option<String>>>,
+    const_fn_ptr_aliases: HashMap<String, (String, usize)>,
+    const_scalar_ptr_values: HashMap<String, (i64, Type)>,
+    const_array_literal_ptrs: HashMap<String, (Vec<Expr>, Type, HashSet<String>)>,
     vla_dims: HashMap<String, VReg>,
     /// Number of typedef entries at scope entry. Inner-block typedefs
     /// are discarded by truncating back to this length (C99 6.2.1).
@@ -173,6 +194,13 @@ impl LowerCtx {
             next_label: 0,
             locals: HashMap::new(),
             local_types: HashMap::new(),
+            const_locals: HashMap::new(),
+            const_float_locals: HashMap::new(),
+            const_bitfield_locals: HashMap::new(),
+            const_fn_ptr_arrays: HashMap::new(),
+            const_fn_ptr_aliases: HashMap::new(),
+            const_scalar_ptr_values: HashMap::new(),
+            const_array_literal_ptrs: HashMap::new(),
             vreg_is_float: HashMap::new(),
             vreg_is_64bit: HashSet::new(),
             frame_size: 0,
@@ -283,6 +311,13 @@ impl LowerCtx {
         ScopeSnapshot {
             locals: self.locals.clone(),
             local_types: self.local_types.clone(),
+            const_locals: self.const_locals.clone(),
+            const_float_locals: self.const_float_locals.clone(),
+            const_bitfield_locals: self.const_bitfield_locals.clone(),
+            const_fn_ptr_arrays: self.const_fn_ptr_arrays.clone(),
+            const_fn_ptr_aliases: self.const_fn_ptr_aliases.clone(),
+            const_scalar_ptr_values: self.const_scalar_ptr_values.clone(),
+            const_array_literal_ptrs: self.const_array_literal_ptrs.clone(),
             vla_dims: self.vla_dims.clone(),
             typedefs_len: self.typedefs.len(),
             enum_constants: self.enum_constants.clone(),
@@ -299,6 +334,13 @@ impl LowerCtx {
     fn restore_scope(&mut self, snap: ScopeSnapshot) {
         self.locals = snap.locals;
         self.local_types = snap.local_types;
+        self.const_locals = snap.const_locals;
+        self.const_float_locals = snap.const_float_locals;
+        self.const_bitfield_locals = snap.const_bitfield_locals;
+        self.const_fn_ptr_arrays = snap.const_fn_ptr_arrays;
+        self.const_fn_ptr_aliases = snap.const_fn_ptr_aliases;
+        self.const_scalar_ptr_values = snap.const_scalar_ptr_values;
+        self.const_array_literal_ptrs = snap.const_array_literal_ptrs;
         self.vla_dims = snap.vla_dims;
         self.typedefs.truncate(snap.typedefs_len);
         self.enum_constants = snap.enum_constants;
@@ -655,6 +697,56 @@ fn collect_assigned_expr(expr: &Expr, set: &mut HashSet<String>) {
             collect_assigned_expr(value, set);
         }
     }
+}
+
+fn assigned_in_stmts(stmts: &[Stmt]) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for stmt in stmts {
+        collect_assigned(stmt, &mut set);
+    }
+    set
+}
+
+fn invalidate_const_locals(ctx: &mut LowerCtx, names: &HashSet<String>) {
+    for name in names {
+        ctx.const_locals.remove(name);
+        ctx.const_float_locals.remove(name);
+        ctx.const_bitfield_locals
+            .retain(|(base, _), _| base != name);
+        ctx.const_fn_ptr_arrays.remove(name);
+        ctx.const_fn_ptr_aliases.remove(name);
+        ctx.const_fn_ptr_aliases
+            .retain(|_, (array_name, _)| array_name != name);
+        ctx.const_scalar_ptr_values.remove(name);
+        ctx.const_array_literal_ptrs.remove(name);
+        ctx.const_array_literal_ptrs
+            .retain(|_, (_, _, deps)| !deps.contains(name));
+    }
+}
+
+fn clear_const_local(ctx: &mut LowerCtx, name: &str) {
+    ctx.const_locals.remove(name);
+    ctx.const_float_locals.remove(name);
+    ctx.const_bitfield_locals
+        .retain(|(base, _), _| base != name);
+    ctx.const_fn_ptr_arrays.remove(name);
+    ctx.const_fn_ptr_aliases.remove(name);
+    ctx.const_fn_ptr_aliases
+        .retain(|_, (array_name, _)| array_name != name);
+    ctx.const_scalar_ptr_values.remove(name);
+    ctx.const_array_literal_ptrs.remove(name);
+    ctx.const_array_literal_ptrs
+        .retain(|_, (_, _, deps)| !deps.contains(name));
+}
+
+fn clear_all_const_locals(ctx: &mut LowerCtx) {
+    ctx.const_locals.clear();
+    ctx.const_float_locals.clear();
+    ctx.const_bitfield_locals.clear();
+    ctx.const_fn_ptr_arrays.clear();
+    ctx.const_fn_ptr_aliases.clear();
+    ctx.const_scalar_ptr_values.clear();
+    ctx.const_array_literal_ptrs.clear();
 }
 
 /// Result of lowering a single function.
@@ -1181,6 +1273,11 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     } else {
                         None
                     };
+                    if let Some(dst_addr) = dst_addr {
+                        emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                        ctx.emit(IrOp::Ret(Some(dst_addr)));
+                        return Ok(());
+                    }
                     ctx.emit(IrOp::RetStruct {
                         src_addr,
                         dst_addr,
@@ -1233,6 +1330,24 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     });
                     return Ok(());
                 }
+            }
+            if let Some(Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            }) = expr
+            {
+                let lbl_else = ctx.alloc_label();
+                let lbl_end = ctx.alloc_label();
+                lower_branch_if_false(ctx, cond, lbl_else)?;
+                let then_val = lower_return_expr(ctx, then_expr)?;
+                ctx.emit(IrOp::Ret(Some(then_val)));
+                ctx.emit(IrOp::Branch(lbl_end));
+                ctx.emit(IrOp::Label(lbl_else));
+                let else_val = lower_return_expr(ctx, else_expr)?;
+                ctx.emit(IrOp::Ret(Some(else_val)));
+                ctx.emit(IrOp::Label(lbl_end));
+                return Ok(());
             }
             let val = match expr {
                 Some(e) => Some(lower_return_expr(ctx, e)?),
@@ -1355,6 +1470,17 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                 ctx.locals
                     .insert(name.clone(), LocalStorage::Stack(storage_slot));
                 ctx.local_types.insert(name.clone(), ty.clone());
+                let const_fn_ptr_array = const_fn_ptr_array_init(ctx, ty, init.as_ref());
+                let const_fn_ptr_alias = const_fn_ptr_alias_init(ctx, init.as_ref());
+                let const_scalar_ptr = const_scalar_compound_ptr_init(ctx, init.as_ref());
+                let const_array_ptr = const_array_compound_ptr_init(ctx, init.as_ref());
+                clear_const_local(ctx, name);
+                if init.is_none() {
+                    if let Some(len) = function_ptr_array_len(ctx, ty) {
+                        ctx.const_fn_ptr_arrays
+                            .insert(name.clone(), vec![None; len]);
+                    }
+                }
                 if let Some(Expr::InitList(items)) = init {
                     // Aggregates store element `i` at
                     // `slot_offset + num_words - 1 - i` so that walking
@@ -1380,6 +1506,9 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         emit_struct_copy(ctx, dst_addr, src_addr, num_words);
                     } else {
                         lower_aggregate_init(ctx, items, ty, slot_offset, num_words, is_aggregate)?;
+                    }
+                    if let Some(functions) = const_fn_ptr_array {
+                        ctx.const_fn_ptr_arrays.insert(name.clone(), functions);
                     }
                 } else if let Some(init_expr) = init {
                     // `char s[] = "hello"` and friends: expand the
@@ -1420,12 +1549,19 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         }
                     }
                     if is_struct_type(ty, ctx) && num_words > 1 {
-                        let src_addr = lower_struct_expr_addr(ctx, init_expr)?;
-                        let dst_addr = ctx.alloc_vreg_ptr();
-                        // Use `storage_slot` so the copy starts at the
-                        // deepest word (field 0) and walks upward.
-                        ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
-                        emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                        if !lower_struct_return_call_into_frame(
+                            ctx,
+                            init_expr,
+                            storage_slot,
+                            num_words,
+                        )? {
+                            let src_addr = lower_struct_expr_addr(ctx, init_expr)?;
+                            let dst_addr = ctx.alloc_vreg_ptr();
+                            // Use `storage_slot` so the copy starts at the
+                            // deepest word (field 0) and walks upward.
+                            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+                            emit_struct_copy(ctx, dst_addr, src_addr, num_words);
+                        }
                     } else if ty.is_complex() {
                         // C99 6.2.5p13 / SHARC+ downward stack: real
                         // at the deepest slot (= storage_slot, the
@@ -1446,9 +1582,47 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                         };
                         ctx.emit(IrOp::Store64(val, 0, storage_slot as i32));
                     } else {
-                        let val = lower_expr(ctx, init_expr)?;
-                        let val = coerce_vreg(ctx, val, ty);
+                        let const_int_init = if !ty.is_float() {
+                            const_local_i64_expr(ctx, init_expr)
+                                .map(|value| const_int_to_type(ctx, value, ty))
+                        } else {
+                            None
+                        };
+                        let val = if let Some(value) = const_int_init {
+                            let val = ctx.alloc_vreg();
+                            ctx.emit(IrOp::LoadImm(val, value));
+                            val
+                        } else {
+                            let val = lower_expr(ctx, init_expr)?;
+                            coerce_vreg(ctx, val, ty)
+                        };
                         ctx.emit(IrOp::Store(val, 0, storage_slot as i32));
+                        if ty.is_float() && !ty.is_volatile() {
+                            if let Some(bits) = const_local_float_bits_expr(ctx, init_expr) {
+                                ctx.const_float_locals.insert(name.clone(), bits);
+                            } else {
+                                ctx.const_float_locals.remove(name);
+                            }
+                            ctx.const_locals.remove(name);
+                            ctx.const_bitfield_locals
+                                .retain(|(base, _), _| base != name);
+                        } else if let Some(value) = const_int_init {
+                            ctx.const_locals.insert(name.clone(), value);
+                            ctx.const_float_locals.remove(name);
+                            ctx.const_bitfield_locals
+                                .retain(|(base, _), _| base != name);
+                        } else {
+                            clear_const_local(ctx, name);
+                        }
+                    }
+                    if let Some(alias) = const_fn_ptr_alias {
+                        ctx.const_fn_ptr_aliases.insert(name.clone(), alias);
+                    }
+                    if let Some(ptr_value) = const_scalar_ptr {
+                        ctx.const_scalar_ptr_values.insert(name.clone(), ptr_value);
+                    }
+                    if let Some(array_ptr) = const_array_ptr {
+                        ctx.const_array_literal_ptrs.insert(name.clone(), array_ptr);
                     }
                 }
             }
@@ -1622,7 +1796,10 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
         ctx.vla_save_stack.push(save_vreg);
     }
 
-    for s in stmts {
+    for (idx, s) in stmts.iter().enumerate() {
+        if try_lower_array_literal_alias_decl_only(ctx, s, &stmts[idx + 1..]) {
+            continue;
+        }
         lower_stmt(ctx, s)?;
     }
 
@@ -1963,6 +2140,51 @@ fn const_aggregate_template_type(
     (template_words == num_words).then_some(template_ty)
 }
 
+fn full_word_array_init_covers_all(ctx: &mut LowerCtx, items: &[Expr], ty: &Type) -> bool {
+    let resolved_ty = resolve_type(ty, ctx);
+    let (elem_ty, count) = match resolved_ty.unqualified() {
+        Type::Array(elem_ty, Some(count)) => (elem_ty.clone(), *count),
+        _ => return false,
+    };
+    if items.len() != count {
+        return false;
+    }
+
+    let elem_ty = resolve_type(&elem_ty, ctx);
+    let elem_is_array = matches!(elem_ty.unqualified(), Type::Array(..));
+    let elem_is_other_aggregate = matches!(
+        elem_ty.unqualified(),
+        Type::Struct { .. } | Type::Union { .. }
+    );
+    for item in items {
+        if matches!(
+            item,
+            Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+        ) {
+            return false;
+        }
+        if elem_is_array {
+            let inner_items = match item {
+                Expr::InitList(inner_items) => inner_items.as_slice(),
+                Expr::Cast(_, boxed) => match boxed.as_ref() {
+                    Expr::InitList(inner_items) => inner_items.as_slice(),
+                    _ => return false,
+                },
+                _ => return false,
+            };
+            if !full_word_array_init_covers_all(ctx, inner_items, &elem_ty) {
+                return false;
+            }
+        } else if elem_is_other_aggregate
+            || type_size_words(&elem_ty, ctx) != 1
+            || matches!(item, Expr::InitList(_))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn expr_is_static_template_safe(expr: &Expr) -> bool {
     match expr {
         Expr::IntLit(..) | Expr::FloatLit(_) | Expr::CharLit(_) | Expr::StringLit(_) => true,
@@ -2257,6 +2479,151 @@ fn emit_byte_load(ctx: &mut LowerCtx, addr: VReg, signed: bool) -> VReg {
     let down = ctx.alloc_vreg();
     ctx.emit(IrOp::Shr(down, up, neg24));
     down
+}
+
+enum ByteIndexExpr<'a> {
+    Expr(&'a Expr),
+    Const(i64),
+}
+
+fn strip_casts_for_byte_extract(mut expr: &Expr) -> &Expr {
+    while let Expr::Cast(_, inner) = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn byte_index_from_shift_count(expr: &Expr) -> Option<ByteIndexExpr<'_>> {
+    let expr = strip_casts_for_byte_extract(expr);
+    if let Some(n) = const_i64_expr(expr) {
+        if (0..64).contains(&n) && n % 8 == 0 {
+            return Some(ByteIndexExpr::Const(n / 8));
+        }
+    }
+    if let Expr::Binary {
+        op: BinaryOp::Mul,
+        lhs,
+        rhs,
+    } = expr
+    {
+        let lhs_const = const_i64_expr(strip_casts_for_byte_extract(lhs));
+        let rhs_const = const_i64_expr(strip_casts_for_byte_extract(rhs));
+        if rhs_const == Some(8) {
+            return Some(ByteIndexExpr::Expr(lhs));
+        }
+        if lhs_const == Some(8) {
+            return Some(ByteIndexExpr::Expr(rhs));
+        }
+    }
+    None
+}
+
+fn masked_64_shift_byte_parts<'a>(expr: &'a Expr) -> Option<(&'a Expr, ByteIndexExpr<'a>)> {
+    let Expr::Binary {
+        op: BinaryOp::BitAnd,
+        lhs,
+        rhs,
+    } = strip_casts_for_byte_extract(expr)
+    else {
+        return None;
+    };
+    let shifted = if const_i64_expr(strip_casts_for_byte_extract(rhs)) == Some(0xFF) {
+        lhs.as_ref()
+    } else if const_i64_expr(strip_casts_for_byte_extract(lhs)) == Some(0xFF) {
+        rhs.as_ref()
+    } else {
+        return None;
+    };
+    let Expr::Binary {
+        op: BinaryOp::Shr,
+        lhs: value,
+        rhs: shift_count,
+    } = strip_casts_for_byte_extract(shifted)
+    else {
+        return None;
+    };
+    let byte_index = byte_index_from_shift_count(shift_count)?;
+    Some((value, byte_index))
+}
+
+fn lower_byte_extract_from_64_shift(
+    ctx: &mut LowerCtx,
+    cast_ty: &Type,
+    inner: &Expr,
+) -> Result<Option<VReg>> {
+    if crate::types::size_bytes_ctx(cast_ty, ctx) != 1 {
+        return Ok(None);
+    }
+    let Some((value_expr, byte_index_expr)) = masked_64_shift_byte_parts(inner) else {
+        return Ok(None);
+    };
+    if !expr_type(value_expr, ctx).is_some_and(|ty| ty_is_long_long(&ty, ctx)) {
+        return Ok(None);
+    }
+
+    let value = lower_expr(ctx, value_expr)?;
+    if !ctx.is_64bit_vreg(value) {
+        return Ok(None);
+    }
+    let byte_index = match byte_index_expr {
+        ByteIndexExpr::Expr(expr) => lower_expr(ctx, expr)?,
+        ByteIndexExpr::Const(n) => {
+            let byte = emit_const_64bit_byte_extract(ctx, value, n);
+            if ty_is_unsigned(cast_ty, ctx) {
+                return Ok(Some(byte));
+            }
+            let shl24 = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(shl24, 24));
+            let up = ctx.alloc_vreg();
+            ctx.emit(IrOp::Shl(up, byte, shl24));
+            let neg24 = ctx.alloc_vreg();
+            ctx.emit(IrOp::LoadImm(neg24, -24));
+            let down = ctx.alloc_vreg();
+            ctx.emit(IrOp::Shr(down, up, neg24));
+            return Ok(Some(down));
+        }
+    };
+    let byte = emit_64bit_byte_extract(ctx, value, byte_index);
+    if ty_is_unsigned(cast_ty, ctx) {
+        return Ok(Some(byte));
+    }
+
+    let shl24 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(shl24, 24));
+    let up = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shl(up, byte, shl24));
+    let neg24 = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(neg24, -24));
+    let down = ctx.alloc_vreg();
+    ctx.emit(IrOp::Shr(down, up, neg24));
+    Ok(Some(down))
+}
+
+fn emit_const_64bit_byte_extract(ctx: &mut LowerCtx, value: VReg, byte_index: i64) -> VReg {
+    let word = if byte_index < 4 { value } else { value + 1 };
+    let lane_bits = (byte_index & 3) * 8;
+    let shifted = if lane_bits == 0 {
+        let copy = ctx.alloc_vreg();
+        ctx.emit(IrOp::Copy(copy, word));
+        copy
+    } else {
+        let neg_shift = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(neg_shift, -lane_bits));
+        let shifted = ctx.alloc_vreg();
+        ctx.emit(IrOp::Lshr(shifted, word, neg_shift));
+        shifted
+    };
+    let mask = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(mask, 0xFF));
+    let byte = ctx.alloc_vreg();
+    ctx.emit(IrOp::BitAnd(byte, shifted, mask));
+    byte
+}
+
+fn emit_64bit_byte_extract(ctx: &mut LowerCtx, value: VReg, byte_index: VReg) -> VReg {
+    let byte = ctx.alloc_vreg();
+    ctx.emit(IrOp::ExtractByte64(byte, value, byte_index));
+    byte
 }
 
 /// Emit a byte-granularity store: write the low 8 bits of `val` to the
@@ -2566,6 +2933,66 @@ struct BitfieldInfo {
     signed: bool,
 }
 
+fn direct_local_member_key(expr: &Expr) -> Option<(String, String)> {
+    match expr {
+        Expr::Member(base, field) => match base.as_ref() {
+            Expr::Ident(base) => Some((base.clone(), field.clone())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn direct_local_member_frame_slot(ctx: &LowerCtx, expr: &Expr) -> Option<(u32, Type)> {
+    let Expr::Member(base, field) = expr else {
+        return None;
+    };
+    let Expr::Ident(base_name) = base.as_ref() else {
+        return None;
+    };
+    let LocalStorage::Stack(base_slot) = ctx.locals.get(base_name)? else {
+        return None;
+    };
+    let base_ty = expr_type(base, ctx)?;
+    if is_union_type(&base_ty) {
+        let fields = resolve_struct_fields(&base_ty, ctx)?;
+        let field_ty = union_field_type(fields, field, ctx)?;
+        if matches!(field_ty, Type::Bitfield(..)) {
+            return None;
+        }
+        Some((*base_slot, field_ty))
+    } else {
+        let fields = resolve_struct_fields(&base_ty, ctx)?;
+        let (byte_off, field_ty) =
+            struct_field_offset(fields, field, aggregate_pack(&base_ty, ctx), ctx)?;
+        if matches!(field_ty, Type::Bitfield(..)) {
+            return None;
+        }
+        if byte_off % 4 != 0 {
+            return None;
+        }
+        Some((base_slot.checked_sub(byte_off / 4)?, field_ty))
+    }
+}
+
+fn const_int_to_bitfield(val: i64, info: &BitfieldInfo) -> i64 {
+    let width = info.bit_width as u32;
+    if width == 0 || width >= 32 {
+        return val as i32 as i64;
+    }
+    let mask = (1u64 << width) - 1;
+    let narrowed = (val as u64) & mask;
+    if !info.signed {
+        return narrowed as i64;
+    }
+    let sign_bit = 1u64 << (width - 1);
+    if narrowed & sign_bit == 0 {
+        narrowed as i64
+    } else {
+        (narrowed | !mask) as i64
+    }
+}
+
 /// If the Member/Arrow expression names a bitfield field, return its
 /// layout info; otherwise `None`. Honours anonymous struct/union members
 /// by re-running `struct_field_layout_ctx` on the nested field list.
@@ -2658,6 +3085,21 @@ fn emit_bitfield_load(ctx: &mut LowerCtx, container_addr: VReg, info: &BitfieldI
         ctx.emit(IrOp::Lshr(tmp, word, neg_sh));
         tmp
     };
+    if info.signed && width < 32 {
+        // Sign-extension shifts discard bits above the field, so a
+        // separate mask is redundant on the signed path.
+        let pad = 32 - width;
+        let pad_imm = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(pad_imm, pad));
+        let up = ctx.alloc_vreg();
+        ctx.emit(IrOp::Shl(up, shifted, pad_imm));
+        let neg_pad = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(neg_pad, -pad));
+        let down = ctx.alloc_vreg();
+        ctx.emit(IrOp::Shr(down, up, neg_pad));
+        return down;
+    }
+
     let mask_val = if width >= 32 {
         -1i64
     } else {
@@ -2667,20 +3109,10 @@ fn emit_bitfield_load(ctx: &mut LowerCtx, container_addr: VReg, info: &BitfieldI
     ctx.emit(IrOp::LoadImm(mask_imm, mask_val));
     let masked = ctx.alloc_vreg();
     ctx.emit(IrOp::BitAnd(masked, shifted, mask_imm));
-    if !info.signed || width >= 32 {
+    if width >= 32 {
         return masked;
     }
-    // Sign-extend from bit (width-1): (masked << (32-width)) >> (32-width) arithmetic.
-    let pad = 32 - width;
-    let pad_imm = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(pad_imm, pad));
-    let up = ctx.alloc_vreg();
-    ctx.emit(IrOp::Shl(up, masked, pad_imm));
-    let neg_pad = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(neg_pad, -pad));
-    let down = ctx.alloc_vreg();
-    ctx.emit(IrOp::Shr(down, up, neg_pad));
-    down
+    masked
 }
 
 /// Emit IR to store `val` into a bitfield whose storage unit starts at
@@ -3313,6 +3745,19 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             if is_array {
                 return lower_lvalue_addr(ctx, expr);
             }
+            if !is_float_var && !is_64bit_var {
+                if let Some(value) = ctx.const_locals.get(name).copied() {
+                    let dst = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(dst, value));
+                    return Ok(dst);
+                }
+            } else if is_float_var && !is_64bit_var {
+                if let Some(bits) = ctx.const_float_locals.get(name).copied() {
+                    let dst = ctx.alloc_vreg_float();
+                    ctx.emit(IrOp::LoadImm(dst, bits as i64));
+                    return Ok(dst);
+                }
+            }
             if let Some(storage) = ctx.locals.get(name).cloned() {
                 if is_64bit_var {
                     // 64-bit variable: load two words from stack.
@@ -3559,6 +4004,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         Expr::Call { name, args } => {
             // Recognised compiler builtins: lowered inline rather than
             // emitted as real call instructions.
+            if let Some(component) = lower_complex_accessor_call(ctx, name, args)? {
+                return Ok(component);
+            }
             if name == "__builtin_va_start_sel" {
                 let named = ctx.va_named_slot_count.ok_or_else(|| Error::Compile {
                     msg: "__builtin_va_start_sel called outside a variadic function".into(),
@@ -3682,6 +4130,21 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             Ok(dst)
         }
         Expr::CallIndirect { func_expr, args } => {
+            if let Some(callee) = resolve_const_function_pointer_expr(ctx, func_expr) {
+                if let Some(ret_ty) = simple_direct_call_ret_type(ctx, &callee) {
+                    let param_tys_owned: Option<Vec<Type>> =
+                        lookup_callee_param_types(ctx, &callee).map(|p| p.to_vec());
+                    let arg_vregs =
+                        lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
+                    let dst = if ret_ty.is_float() {
+                        ctx.alloc_vreg_float()
+                    } else {
+                        ctx.alloc_vreg()
+                    };
+                    ctx.emit(IrOp::Call(dst, callee, arg_vregs));
+                    return Ok(dst);
+                }
+            }
             let func_addr = lower_expr(ctx, func_expr)?;
             // Resolve the FunctionPtr's parameter types so 32-bit
             // arguments bound to `long long` parameters still get
@@ -3807,6 +4270,19 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
 
             match target.as_ref() {
                 Expr::Ident(name) => {
+                    let const_value = target_ty.as_ref().and_then(|ty| {
+                        (!ty.is_float())
+                            .then(|| {
+                                const_local_i64_expr(ctx, value)
+                                    .map(|v| const_int_to_type(ctx, v, ty))
+                            })
+                            .flatten()
+                    });
+                    let const_float_value = target_ty.as_ref().and_then(|ty| {
+                        (ty.is_float() && !ty.is_volatile())
+                            .then(|| const_local_float_bits_expr(ctx, value))
+                            .flatten()
+                    });
                     if let Some(storage) = ctx.locals.get(name).cloned() {
                         match storage {
                             LocalStorage::Stack(offset) => {
@@ -3819,6 +4295,19 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                                 ctx.emit(IrOp::StoreGlobal(val, sym.clone()));
                             }
                         }
+                        if let Some(value) = const_value {
+                            ctx.const_locals.insert(name.clone(), value);
+                            ctx.const_float_locals.remove(name);
+                            ctx.const_bitfield_locals
+                                .retain(|(base, _), _| base != name);
+                        } else if let Some(bits) = const_float_value {
+                            ctx.const_float_locals.insert(name.clone(), bits);
+                            ctx.const_locals.remove(name);
+                            ctx.const_bitfield_locals
+                                .retain(|(base, _), _| base != name);
+                        } else {
+                            clear_const_local(ctx, name);
+                        }
                     } else if ctx.globals.contains_key(name) {
                         ctx.emit(IrOp::StoreGlobal(val, name.clone()));
                     } else {
@@ -3826,6 +4315,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     }
                 }
                 Expr::Deref(inner) => {
+                    clear_all_const_locals(ctx);
                     let ptr_ty = expr_type(inner, ctx);
                     let ptr = lower_expr(ctx, inner)?;
                     // Byte-granularity store for char / bool pointee:
@@ -3844,6 +4334,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::Store(val, ptr, 0));
                 }
                 Expr::Index(a, b) => {
+                    if !update_const_fn_ptr_array_store(ctx, target, value) {
+                        clear_all_const_locals(ctx);
+                    }
                     // C99 6.5.2.1: scale the index by `sizeof(*base)`.
                     // Subscript is commutative; pick the pointer / array
                     // operand as the base so `2[arr] = v` works.
@@ -3871,6 +4364,14 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::Store(val, addr, 0));
                 }
                 Expr::Member(..) | Expr::Arrow(..) => {
+                    let bitfield_const = member_bitfield_info(target, ctx).and_then(|info| {
+                        direct_local_member_key(target).and_then(|key| {
+                            const_local_i64_expr(ctx, value)
+                                .map(|v| (key, const_int_to_bitfield(v, &info)))
+                        })
+                    });
+                    ctx.const_locals.clear();
+                    ctx.const_float_locals.clear();
                     let addr = lower_lvalue_addr(ctx, target)?;
                     if let Some(info) = member_bitfield_info(target, ctx) {
                         emit_bitfield_store(ctx, addr, val, &info);
@@ -3895,8 +4396,15 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                             ctx.emit(IrOp::Store(val, addr, 0));
                         }
                     }
+                    match bitfield_const {
+                        Some((key, value)) => {
+                            ctx.const_bitfield_locals.insert(key, value);
+                        }
+                        None => ctx.const_bitfield_locals.clear(),
+                    }
                 }
                 _ => {
+                    clear_all_const_locals(ctx);
                     let addr = lower_lvalue_addr(ctx, target)?;
                     ctx.emit(IrOp::Store(val, addr, 0));
                 }
@@ -3904,6 +4412,13 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             Ok(val)
         }
         Expr::Deref(inner) => {
+            if let Expr::Ident(name) = inner.as_ref() {
+                if let Some((value, ty)) = ctx.const_scalar_ptr_values.get(name).cloned() {
+                    let dst = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(dst, value));
+                    return Ok(coerce_vreg(ctx, dst, &ty));
+                }
+            }
             let ptr_ty = expr_type(inner, ctx);
             let ptr = lower_expr(ctx, inner)?;
             let ptr = ctx.ensure_ptr_vreg(ptr);
@@ -3975,6 +4490,9 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
         }
         Expr::AddrOf(inner) => {
             // Use lower_lvalue_addr which handles Ident, Deref, Index, Member, Arrow.
+            if let Expr::Ident(name) = inner.as_ref() {
+                clear_const_local(ctx, name);
+            }
             lower_lvalue_addr(ctx, inner)
         }
         Expr::Index(a, b) => {
@@ -3982,6 +4500,18 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // Subscript is commutative (`2[arr]` == `arr[2]`); pick the
             // pointer / array operand as the base.
             let (base, idx) = canonical_index_operands(a, b, ctx);
+            if let Expr::Ident(name) = base {
+                if let Some(index) = const_index_expr(ctx, idx) {
+                    if let Some((items, elem_ty, _)) =
+                        ctx.const_array_literal_ptrs.get(name).cloned()
+                    {
+                        if let Some(item) = items.get(index) {
+                            let val = lower_expr(ctx, item)?;
+                            return Ok(coerce_vreg(ctx, val, &elem_ty));
+                        }
+                    }
+                }
+            }
             let base_ty = expr_type(base, ctx);
             // Resolve typedefs so e.g. `arr3_ptr p; p[i]` (where
             // `arr3_ptr = int(*)[3]`) sees an array pointee and emits
@@ -4063,6 +4593,24 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             // `[i]` or `.field` — e.g. `o.a[i]` on an inner struct
             // array would multiply-scale a garbage word instead of
             // indexing into `o.a`.
+            if let Some(value) = const_local_i64_expr(ctx, expr) {
+                let dst = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(dst, value));
+                return Ok(dst);
+            }
+            if let Some((slot, ty)) = direct_local_member_frame_slot(ctx, expr) {
+                let resolved = resolve_type(&ty, ctx);
+                if is_plain_32bit_scalar(&resolved, ctx) {
+                    let dst = ctx.alloc_vreg();
+                    ctx.emit(IrOp::Load(dst, 0, slot as i32));
+                    return Ok(dst);
+                }
+                if resolved.is_float() {
+                    let dst = ctx.alloc_vreg_float();
+                    ctx.emit(IrOp::Load(dst, 0, slot as i32));
+                    return Ok(dst);
+                }
+            }
             let addr = lower_lvalue_addr(ctx, expr)?;
             if let Some(info) = member_bitfield_info(expr, ctx) {
                 return Ok(emit_bitfield_load(ctx, addr, &info));
@@ -4181,6 +4729,21 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     _ => {}
                 }
             }
+            if *ty == Type::Bool {
+                if let Some(v) = const_i64_expr(inner) {
+                    let dst = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(dst, i64::from(v != 0)));
+                    return Ok(dst);
+                }
+                if let Expr::FloatLit(v) = inner.as_ref() {
+                    let dst = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(dst, i64::from((*v as f32) != 0.0)));
+                    return Ok(dst);
+                }
+            }
+            if let Some(byte) = lower_byte_extract_from_64_shift(ctx, ty, inner)? {
+                return Ok(byte);
+            }
             let val = lower_expr(ctx, inner)?;
             let src_is_float = ctx.is_float_vreg(val);
             let src_is_64 = ctx.is_64bit_vreg(val);
@@ -4208,7 +4771,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     ctx.emit(IrOp::IntToFloat(flt, dst));
                     return Ok(flt);
                 }
-                return Ok(dst);
+                return Ok(narrow_int_to_dst(ctx, dst, ty));
             }
 
             // 32-bit -> 64-bit widening.
@@ -4451,6 +5014,39 @@ fn lower_complex_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<ComplexPair> {
             let v = lower_expr(ctx, expr)?;
             Ok(real_to_complex(ctx, v))
         }
+    }
+}
+
+fn lower_complex_accessor_call(
+    ctx: &mut LowerCtx,
+    name: &str,
+    args: &[Expr],
+) -> Result<Option<VReg>> {
+    let is_real = matches!(name, "creal" | "crealf");
+    let is_imag = matches!(name, "cimag" | "cimagf");
+    if (!is_real && !is_imag) || args.len() != 1 {
+        return Ok(None);
+    }
+    if ctx.function_return_types.contains_key(name) {
+        return Ok(None);
+    }
+
+    let arg = &args[0];
+    let Some(arg_ty) = expr_type(arg, ctx) else {
+        return Ok(None);
+    };
+    if matches!(resolve_type_chain(&arg_ty, ctx), Type::Complex(_)) {
+        let pair = lower_complex_expr(ctx, arg)?;
+        return Ok(Some(if is_real { pair.real } else { pair.imag }));
+    }
+
+    if is_real {
+        let val = lower_expr(ctx, arg)?;
+        Ok(Some(coerce_vreg(ctx, val, &Type::Double)))
+    } else {
+        let zero = ctx.alloc_vreg_float();
+        ctx.emit(IrOp::LoadImm(zero, 0));
+        Ok(Some(zero))
     }
 }
 
@@ -5004,6 +5600,15 @@ fn lower_signed_divmod_64(
 }
 
 fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
+    if let (Some(lhs), Some(rhs)) = (
+        const_local_i64_expr(ctx, lhs),
+        const_local_i64_expr(ctx, rhs),
+    ) {
+        let dst = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(dst, i64::from(lhs != 0 && rhs != 0)));
+        return Ok(dst);
+    }
+
     let dst = ctx.alloc_vreg();
     let zero = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(zero, 0));
@@ -5032,6 +5637,15 @@ fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
 }
 
 fn lower_log_or(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
+    if let (Some(lhs), Some(rhs)) = (
+        const_local_i64_expr(ctx, lhs),
+        const_local_i64_expr(ctx, rhs),
+    ) {
+        let dst = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(dst, i64::from(lhs != 0 || rhs != 0)));
+        return Ok(dst);
+    }
+
     let dst = ctx.alloc_vreg();
     let zero = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(zero, 0));
@@ -5191,24 +5805,909 @@ fn lower_comparison_branch(
     label: Label,
     jump_if_true: bool,
 ) -> Result<bool> {
+    if let Some(value) = constant_pointer_comparison(ctx, op, lhs, rhs) {
+        if value == jump_if_true {
+            ctx.emit(IrOp::Branch(label));
+        }
+        return Ok(true);
+    }
+    if let Some(value) = constant_same_scalar_lvalue_comparison(ctx, op, lhs, rhs) {
+        if value == jump_if_true {
+            ctx.emit(IrOp::Branch(label));
+        }
+        return Ok(true);
+    }
+    if let Some(value) = constant_integer_comparison(ctx, op, lhs, rhs) {
+        if value == jump_if_true {
+            ctx.emit(IrOp::Branch(label));
+        }
+        return Ok(true);
+    }
+
     let lhs_ty = expr_type(lhs, ctx).map(|t| resolve_type(&t, ctx));
     let rhs_ty = expr_type(rhs, ctx).map(|t| resolve_type(&t, ctx));
+    let lhs_is_float = lhs_ty.as_ref().is_some_and(|t| t.is_float());
+    let rhs_is_float = rhs_ty.as_ref().is_some_and(|t| t.is_float());
     let unsupported = lhs_ty
         .as_ref()
-        .is_some_and(|t| t.is_float() || t.is_complex() || ty_is_long_long(t, ctx))
+        .is_some_and(|t| t.is_complex() || ty_is_long_long(t, ctx))
         || rhs_ty
             .as_ref()
-            .is_some_and(|t| t.is_float() || t.is_complex() || ty_is_long_long(t, ctx));
+            .is_some_and(|t| t.is_complex() || ty_is_long_long(t, ctx));
     if unsupported {
         return Ok(false);
     }
 
     let l = lower_expr(ctx, lhs)?;
     let r = lower_expr(ctx, rhs)?;
+    if lhs_is_float || rhs_is_float {
+        let l = if lhs_is_float {
+            l
+        } else {
+            let conv = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::IntToFloat(conv, l));
+            conv
+        };
+        let r = if rhs_is_float {
+            r
+        } else {
+            let conv = ctx.alloc_vreg_float();
+            ctx.emit(IrOp::IntToFloat(conv, r));
+            conv
+        };
+        ctx.emit(IrOp::FCmp(l, r));
+        ctx.emit(IrOp::BranchCond(
+            comparison_branch_cond(op, jump_if_true),
+            label,
+        ));
+        return Ok(true);
+    }
     let is_unsigned = binary_common_is_unsigned(ctx, lhs, rhs);
     let cond = emit_compare_for_branch(ctx, op, l, r, is_unsigned, jump_if_true);
     ctx.emit(IrOp::BranchCond(cond, label));
     Ok(true)
+}
+
+fn constant_integer_comparison(
+    ctx: &LowerCtx,
+    op: BinaryOp,
+    lhs: &Expr,
+    rhs: &Expr,
+) -> Option<bool> {
+    let lhs_val = const_local_i64_expr(ctx, lhs)?;
+    let rhs_val = const_local_i64_expr(ctx, rhs)?;
+    let is_unsigned = binary_common_is_unsigned(ctx, lhs, rhs);
+    Some(match op {
+        BinaryOp::Eq => lhs_val == rhs_val,
+        BinaryOp::Ne => lhs_val != rhs_val,
+        BinaryOp::Lt if is_unsigned => (lhs_val as u32) < (rhs_val as u32),
+        BinaryOp::Gt if is_unsigned => (lhs_val as u32) > (rhs_val as u32),
+        BinaryOp::Le if is_unsigned => (lhs_val as u32) <= (rhs_val as u32),
+        BinaryOp::Ge if is_unsigned => (lhs_val as u32) >= (rhs_val as u32),
+        BinaryOp::Lt => (lhs_val as i32) < (rhs_val as i32),
+        BinaryOp::Gt => (lhs_val as i32) > (rhs_val as i32),
+        BinaryOp::Le => (lhs_val as i32) <= (rhs_val as i32),
+        BinaryOp::Ge => (lhs_val as i32) >= (rhs_val as i32),
+        _ => return None,
+    })
+}
+
+fn constant_pointer_comparison(
+    ctx: &LowerCtx,
+    op: BinaryOp,
+    lhs: &Expr,
+    rhs: &Expr,
+) -> Option<bool> {
+    if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+        return None;
+    }
+    let lhs_key = const_array_pointer_key(ctx, lhs)?;
+    let rhs_key = const_array_pointer_key(ctx, rhs)?;
+    let eq = lhs_key == rhs_key;
+    Some(if op == BinaryOp::Eq { eq } else { !eq })
+}
+
+fn constant_same_scalar_lvalue_comparison(
+    ctx: &LowerCtx,
+    op: BinaryOp,
+    lhs: &Expr,
+    rhs: &Expr,
+) -> Option<bool> {
+    if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+        return None;
+    }
+    let lhs_ty = const_scalar_lvalue_type(ctx, lhs).map(|ty| resolve_type(&ty, ctx))?;
+    let rhs_ty = const_scalar_lvalue_type(ctx, rhs).map(|ty| resolve_type(&ty, ctx))?;
+    if type_contains_volatile(&lhs_ty) || type_contains_volatile(&rhs_ty) {
+        return None;
+    }
+    if !(lhs_ty.is_integer() && rhs_ty.is_integer()) {
+        return None;
+    }
+
+    let lhs_key = const_scalar_lvalue_key(ctx, lhs)?;
+    let rhs_key = const_scalar_lvalue_key(ctx, rhs)?;
+    let eq = lhs_key == rhs_key;
+    Some(if op == BinaryOp::Eq { eq } else { !eq })
+}
+
+fn type_contains_volatile(ty: &Type) -> bool {
+    match ty {
+        Type::Volatile(_) => true,
+        Type::Const(inner)
+        | Type::Unsigned(inner)
+        | Type::Pointer(inner)
+        | Type::Array(inner, _)
+        | Type::Bitfield(inner, _)
+        | Type::Complex(inner)
+        | Type::Imaginary(inner) => type_contains_volatile(inner),
+        Type::Struct { fields, .. } | Type::Union { fields, .. } => {
+            fields.iter().any(|(_, ty)| type_contains_volatile(ty))
+        }
+        Type::FunctionPtr {
+            return_type,
+            params,
+        } => type_contains_volatile(return_type) || params.iter().any(type_contains_volatile),
+        _ => false,
+    }
+}
+
+fn const_scalar_lvalue_key(ctx: &LowerCtx, expr: &Expr) -> Option<(String, i64)> {
+    match expr {
+        Expr::Cast(_, inner) => const_scalar_lvalue_key(ctx, inner),
+        Expr::Deref(inner) => const_array_pointer_key(ctx, inner),
+        Expr::Index(a, b) => {
+            let (base, index) = canonical_index_operands(a, b, ctx);
+            let (base_name, base_off) = const_array_pointer_key(ctx, base)?;
+            let elem_ty = pointer_step_type(ctx, base)?;
+            let idx = const_i64_expr(index)?;
+            let elem_size = crate::types::size_bytes_ctx(&elem_ty, ctx).max(1) as i64;
+            Some((base_name, base_off + idx.saturating_mul(elem_size)))
+        }
+        _ => None,
+    }
+}
+
+fn const_scalar_lvalue_type(ctx: &LowerCtx, expr: &Expr) -> Option<Type> {
+    match expr {
+        Expr::Cast(_, inner) => const_scalar_lvalue_type(ctx, inner),
+        Expr::Deref(inner) => pointer_step_type(ctx, inner),
+        Expr::Index(..) => expr_type(expr, ctx),
+        _ => None,
+    }
+}
+
+fn const_array_pointer_key(ctx: &LowerCtx, expr: &Expr) -> Option<(String, i64)> {
+    match expr {
+        Expr::Cast(_, inner) => const_array_pointer_key(ctx, inner),
+        Expr::Ident(name) => {
+            let ty = ctx
+                .local_types
+                .get(name)
+                .or_else(|| ctx.globals.get(name))
+                .map(|ty| resolve_type(ty, ctx))?;
+            matches!(ty.unqualified(), Type::Array(..)).then(|| (name.clone(), 0))
+        }
+        Expr::AddrOf(inner) => match inner.as_ref() {
+            Expr::Index(base, index) => {
+                let (base_name, base_off) = const_array_pointer_key(ctx, base)?;
+                let elem_ty = pointer_step_type(ctx, base)?;
+                let idx = const_i64_expr(index)?;
+                let elem_size = crate::types::size_bytes_ctx(&elem_ty, ctx).max(1) as i64;
+                Some((base_name, base_off + idx.saturating_mul(elem_size)))
+            }
+            Expr::Ident(name) => {
+                let ty = ctx
+                    .local_types
+                    .get(name)
+                    .or_else(|| ctx.globals.get(name))
+                    .map(|ty| resolve_type(ty, ctx))?;
+                matches!(ty.unqualified(), Type::Array(..)).then(|| (name.clone(), 0))
+            }
+            _ => None,
+        },
+        Expr::Binary { op, lhs, rhs } if matches!(op, BinaryOp::Add | BinaryOp::Sub) => {
+            if let Some((base_name, base_off)) = const_array_pointer_key(ctx, lhs) {
+                let elem_ty = pointer_step_type(ctx, lhs)?;
+                let idx = const_i64_expr(rhs)?;
+                let elem_size = crate::types::size_bytes_ctx(&elem_ty, ctx).max(1) as i64;
+                let delta = idx.saturating_mul(elem_size);
+                return Some((
+                    base_name,
+                    if *op == BinaryOp::Add {
+                        base_off + delta
+                    } else {
+                        base_off - delta
+                    },
+                ));
+            }
+            if *op == BinaryOp::Add {
+                if let Some((base_name, base_off)) = const_array_pointer_key(ctx, rhs) {
+                    let elem_ty = pointer_step_type(ctx, rhs)?;
+                    let idx = const_i64_expr(lhs)?;
+                    let elem_size = crate::types::size_bytes_ctx(&elem_ty, ctx).max(1) as i64;
+                    return Some((base_name, base_off + idx.saturating_mul(elem_size)));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn pointer_step_type(ctx: &LowerCtx, expr: &Expr) -> Option<Type> {
+    if let Expr::Binary { op, lhs, rhs } = expr {
+        if matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+            if let Some(ty) = pointer_step_type(ctx, lhs) {
+                return Some(ty);
+            }
+            if matches!(op, BinaryOp::Add) {
+                if let Some(ty) = pointer_step_type(ctx, rhs) {
+                    return Some(ty);
+                }
+            }
+        }
+    }
+
+    let ty = expr_type(expr, ctx).map(|ty| resolve_type(&ty, ctx))?;
+    match ty.unqualified() {
+        Type::Array(elem, _) | Type::Pointer(elem) => Some((**elem).clone()),
+        _ => None,
+    }
+}
+
+fn const_i64_expr(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::IntLit(v, _) | Expr::CharLit(v) => Some(*v),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => const_i64_expr(operand).map(|v| v.saturating_neg()),
+        Expr::Cast(ty, inner) if *ty == Type::Bool => {
+            if let Some(v) = const_i64_expr(inner) {
+                return Some(i64::from(v != 0));
+            }
+            match inner.as_ref() {
+                Expr::FloatLit(v) => Some(i64::from((*v as f32) != 0.0)),
+                _ => None,
+            }
+        }
+        Expr::Cast(ty, inner) if ty.is_integer() => const_i64_expr(inner),
+        Expr::Cast(_, inner) => const_i64_expr(inner),
+        _ => None,
+    }
+}
+
+fn const_int_to_type(ctx: &LowerCtx, val: i64, dst_ty: &Type) -> i64 {
+    let resolved = resolve_type_chain(dst_ty, ctx);
+    if resolved == Type::Bool {
+        return i64::from(val != 0);
+    }
+    if !resolved.is_integer() {
+        return val;
+    }
+    let dst_bytes = crate::types::size_bytes_ctx(&resolved, ctx);
+    if dst_bytes == 0 || dst_bytes >= 8 {
+        return val;
+    }
+    let bits = dst_bytes * 8;
+    let mask = if bits >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let narrowed = (val as u64) & mask;
+    if resolved.is_unsigned() {
+        return narrowed as i64;
+    }
+    let sign_bit = 1u64 << (bits - 1);
+    if narrowed & sign_bit == 0 {
+        narrowed as i64
+    } else {
+        (narrowed | (!mask)) as i64
+    }
+}
+
+fn const_local_i64_expr(ctx: &LowerCtx, expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Ident(name) => ctx.const_locals.get(name).copied(),
+        Expr::Member(..) => direct_local_member_key(expr)
+            .and_then(|key| ctx.const_bitfield_locals.get(&key).copied()),
+        Expr::Binary { op, lhs, rhs } => {
+            let lhs = const_local_i64_expr(ctx, lhs)?;
+            let rhs = const_local_i64_expr(ctx, rhs)?;
+            eval_integer_binary(*op, lhs, rhs, false)
+        }
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => const_local_i64_expr(ctx, operand).map(|v| v.wrapping_neg()),
+        Expr::Unary {
+            op: UnaryOp::BitNot,
+            operand,
+        } => const_local_i64_expr(ctx, operand).map(|v| !v),
+        Expr::Unary {
+            op: UnaryOp::LogNot,
+            operand,
+        } => const_local_i64_expr(ctx, operand).map(|v| i64::from(v == 0)),
+        Expr::Cast(ty, inner) => {
+            const_local_i64_expr(ctx, inner).map(|v| const_int_to_type(ctx, v, ty))
+        }
+        _ => const_i64_expr(expr),
+    }
+}
+
+fn const_condition_i64_expr(ctx: &LowerCtx, expr: &Expr) -> Option<i64> {
+    if let Some(value) = const_local_i64_expr(ctx, expr) {
+        return Some(value);
+    }
+    if let Expr::Binary { op, lhs, rhs } = expr {
+        if matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge
+        ) {
+            return constant_integer_comparison(ctx, *op, lhs, rhs).map(i64::from);
+        }
+    }
+    None
+}
+
+fn function_ptr_array_len(ctx: &LowerCtx, ty: &Type) -> Option<usize> {
+    let resolved = resolve_type_chain(ty, ctx);
+    let Type::Array(elem_ty, len) = resolved.unqualified() else {
+        return None;
+    };
+    if !is_function_ptr_type(elem_ty, ctx) {
+        return None;
+    }
+    *len
+}
+
+fn const_fn_ptr_array_init(
+    ctx: &LowerCtx,
+    ty: &Type,
+    init: Option<&Expr>,
+) -> Option<Vec<Option<String>>> {
+    let len = function_ptr_array_len(ctx, ty)?;
+
+    let Expr::InitList(items) = init? else {
+        return None;
+    };
+    if items.len() > len {
+        return None;
+    }
+    let mut functions = vec![None; len];
+    for (idx, item) in items.iter().enumerate() {
+        match item {
+            Expr::Ident(name) if ctx.known_functions.contains(name) => {
+                functions[idx] = Some(name.clone());
+            }
+            _ => return None,
+        }
+    }
+    Some(functions)
+}
+
+fn const_index_expr(ctx: &LowerCtx, expr: &Expr) -> Option<usize> {
+    let value = const_local_i64_expr(ctx, expr)?;
+    usize::try_from(value).ok()
+}
+
+fn const_fn_ptr_array_element(ctx: &LowerCtx, expr: &Expr) -> Option<(String, usize)> {
+    let Expr::Index(lhs, rhs) = expr else {
+        return None;
+    };
+    if let Expr::Ident(array_name) = lhs.as_ref() {
+        if ctx.const_fn_ptr_arrays.contains_key(array_name) {
+            return const_index_expr(ctx, rhs).map(|idx| (array_name.clone(), idx));
+        }
+    }
+    if let Expr::Ident(array_name) = rhs.as_ref() {
+        if ctx.const_fn_ptr_arrays.contains_key(array_name) {
+            return const_index_expr(ctx, lhs).map(|idx| (array_name.clone(), idx));
+        }
+    }
+    None
+}
+
+fn const_fn_ptr_alias_init(ctx: &LowerCtx, init: Option<&Expr>) -> Option<(String, usize)> {
+    match init? {
+        Expr::AddrOf(inner) => const_fn_ptr_array_element(ctx, inner),
+        Expr::Cast(_, inner) => const_fn_ptr_alias_init(ctx, Some(inner)),
+        _ => None,
+    }
+}
+
+fn const_scalar_compound_ptr_init(ctx: &LowerCtx, init: Option<&Expr>) -> Option<(i64, Type)> {
+    let Expr::AddrOf(inner) = init? else {
+        return None;
+    };
+    let Expr::Cast(ty, value) = inner.as_ref() else {
+        return None;
+    };
+    let Expr::InitList(items) = value.as_ref() else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    let resolved = resolve_type(ty, ctx);
+    if type_contains_volatile(&resolved)
+        || !resolved.is_integer()
+        || ty_is_long_long(&resolved, ctx)
+    {
+        return None;
+    }
+    let value = const_local_i64_expr(ctx, item)?;
+    Some((const_int_to_type(ctx, value, &resolved), resolved))
+}
+
+fn expr_has_runtime_side_effect(expr: &Expr) -> bool {
+    match expr {
+        Expr::Assign { .. }
+        | Expr::CompoundAssign { .. }
+        | Expr::PreInc(_)
+        | Expr::PreDec(_)
+        | Expr::PostInc(_)
+        | Expr::PostDec(_)
+        | Expr::Call { .. }
+        | Expr::CallIndirect { .. } => true,
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf(operand)
+        | Expr::Deref(operand)
+        | Expr::Cast(_, operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => expr_has_runtime_side_effect(operand),
+        Expr::Binary { lhs, rhs, .. } | Expr::Comma(lhs, rhs) | Expr::Index(lhs, rhs) => {
+            expr_has_runtime_side_effect(lhs) || expr_has_runtime_side_effect(rhs)
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => expr_has_runtime_side_effect(base),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_runtime_side_effect(cond)
+                || expr_has_runtime_side_effect(then_expr)
+                || expr_has_runtime_side_effect(else_expr)
+        }
+        Expr::Sizeof(arg) => match arg.as_ref() {
+            SizeofArg::Expr(inner) => expr_has_runtime_side_effect(inner),
+            SizeofArg::Type(_) => false,
+        },
+        Expr::InitList(items) => items.iter().any(expr_has_runtime_side_effect),
+        Expr::DesignatedInit { value, .. } => expr_has_runtime_side_effect(value),
+        Expr::ArrayDesignator { index, value } => {
+            expr_has_runtime_side_effect(index) || expr_has_runtime_side_effect(value)
+        }
+        Expr::Ident(_)
+        | Expr::IntLit(..)
+        | Expr::CharLit(_)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_) => false,
+    }
+}
+
+fn collect_expr_idents(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            out.insert(name.clone());
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf(operand)
+        | Expr::Deref(operand)
+        | Expr::Cast(_, operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => collect_expr_idents(operand, out),
+        Expr::Binary { lhs, rhs, .. } | Expr::Comma(lhs, rhs) | Expr::Index(lhs, rhs) => {
+            collect_expr_idents(lhs, out);
+            collect_expr_idents(rhs, out);
+        }
+        Expr::Assign { target, value } | Expr::CompoundAssign { target, value, .. } => {
+            collect_expr_idents(target, out);
+            collect_expr_idents(value, out);
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => collect_expr_idents(base, out),
+        Expr::PreInc(inner) | Expr::PreDec(inner) | Expr::PostInc(inner) | Expr::PostDec(inner) => {
+            collect_expr_idents(inner, out);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                collect_expr_idents(arg, out);
+            }
+        }
+        Expr::CallIndirect { func_expr, args } => {
+            collect_expr_idents(func_expr, out);
+            for arg in args {
+                collect_expr_idents(arg, out);
+            }
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_idents(cond, out);
+            collect_expr_idents(then_expr, out);
+            collect_expr_idents(else_expr, out);
+        }
+        Expr::Sizeof(arg) => {
+            if let SizeofArg::Expr(inner) = arg.as_ref() {
+                collect_expr_idents(inner, out);
+            }
+        }
+        Expr::InitList(items) => {
+            for item in items {
+                collect_expr_idents(item, out);
+            }
+        }
+        Expr::DesignatedInit { value, .. } => collect_expr_idents(value, out),
+        Expr::ArrayDesignator { index, value } => {
+            collect_expr_idents(index, out);
+            collect_expr_idents(value, out);
+        }
+        Expr::IntLit(..)
+        | Expr::CharLit(_)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_) => {}
+    }
+}
+
+fn const_array_compound_ptr_init(
+    ctx: &LowerCtx,
+    init: Option<&Expr>,
+) -> Option<(Vec<Expr>, Type, HashSet<String>)> {
+    let Expr::Cast(ty, value) = init? else {
+        return None;
+    };
+    let resolved = resolve_type(ty, ctx);
+    let Type::Array(elem_ty, _) = resolved.unqualified() else {
+        return None;
+    };
+    let elem_ty = resolve_type(elem_ty, ctx);
+    if type_contains_volatile(&elem_ty) || is_aggregate_type(&elem_ty, ctx) {
+        return None;
+    }
+    let Expr::InitList(items) = value.as_ref() else {
+        return None;
+    };
+    if items.iter().any(expr_has_runtime_side_effect) {
+        return None;
+    }
+    let mut deps = HashSet::new();
+    for item in items {
+        collect_expr_idents(item, &mut deps);
+    }
+    Some((items.clone(), elem_ty, deps))
+}
+
+fn expr_uses_alias_only_as_const_index(name: &str, expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(ident) => ident != name,
+        Expr::Index(lhs, rhs) => {
+            if matches!(lhs.as_ref(), Expr::Ident(ident) if ident == name) {
+                return const_i64_expr(rhs).is_some();
+            }
+            if matches!(rhs.as_ref(), Expr::Ident(ident) if ident == name) {
+                return const_i64_expr(lhs).is_some();
+            }
+            expr_uses_alias_only_as_const_index(name, lhs)
+                && expr_uses_alias_only_as_const_index(name, rhs)
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf(operand)
+        | Expr::Deref(operand)
+        | Expr::Cast(_, operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand)
+        | Expr::PreInc(operand)
+        | Expr::PreDec(operand)
+        | Expr::PostInc(operand)
+        | Expr::PostDec(operand) => expr_uses_alias_only_as_const_index(name, operand),
+        Expr::Binary { lhs, rhs, .. } | Expr::Comma(lhs, rhs) => {
+            expr_uses_alias_only_as_const_index(name, lhs)
+                && expr_uses_alias_only_as_const_index(name, rhs)
+        }
+        Expr::Assign { target, value } | Expr::CompoundAssign { target, value, .. } => {
+            expr_uses_alias_only_as_const_index(name, target)
+                && expr_uses_alias_only_as_const_index(name, value)
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => {
+            expr_uses_alias_only_as_const_index(name, base)
+        }
+        Expr::Call { args, .. } => args
+            .iter()
+            .all(|arg| expr_uses_alias_only_as_const_index(name, arg)),
+        Expr::CallIndirect { func_expr, args } => {
+            expr_uses_alias_only_as_const_index(name, func_expr)
+                && args
+                    .iter()
+                    .all(|arg| expr_uses_alias_only_as_const_index(name, arg))
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_alias_only_as_const_index(name, cond)
+                && expr_uses_alias_only_as_const_index(name, then_expr)
+                && expr_uses_alias_only_as_const_index(name, else_expr)
+        }
+        Expr::Sizeof(arg) => match arg.as_ref() {
+            SizeofArg::Expr(inner) => expr_uses_alias_only_as_const_index(name, inner),
+            SizeofArg::Type(_) => true,
+        },
+        Expr::InitList(items) => items
+            .iter()
+            .all(|item| expr_uses_alias_only_as_const_index(name, item)),
+        Expr::DesignatedInit { value, .. } => expr_uses_alias_only_as_const_index(name, value),
+        Expr::ArrayDesignator { index, value } => {
+            expr_uses_alias_only_as_const_index(name, index)
+                && expr_uses_alias_only_as_const_index(name, value)
+        }
+        Expr::IntLit(..)
+        | Expr::CharLit(_)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_) => true,
+    }
+}
+
+fn stmt_uses_alias_only_as_const_index(name: &str, stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Return(expr) => expr
+            .as_ref()
+            .is_none_or(|expr| expr_uses_alias_only_as_const_index(name, expr)),
+        Stmt::Expr(expr) => expr_uses_alias_only_as_const_index(name, expr),
+        Stmt::VarDecl {
+            name: decl_name,
+            init,
+            vla_dim,
+            ..
+        } => {
+            decl_name != name
+                && init
+                    .as_ref()
+                    .is_none_or(|expr| expr_uses_alias_only_as_const_index(name, expr))
+                && vla_dim
+                    .as_ref()
+                    .is_none_or(|expr| expr_uses_alias_only_as_const_index(name, expr))
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            expr_uses_alias_only_as_const_index(name, cond)
+                && then_body
+                    .iter()
+                    .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+                && else_body.as_ref().is_none_or(|body| {
+                    body.iter()
+                        .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+                })
+        }
+        Stmt::While { cond, body } | Stmt::DoWhile { body, cond } => {
+            expr_uses_alias_only_as_const_index(name, cond)
+                && body
+                    .iter()
+                    .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            init.as_ref()
+                .is_none_or(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+                && cond
+                    .as_ref()
+                    .is_none_or(|expr| expr_uses_alias_only_as_const_index(name, expr))
+                && step
+                    .as_ref()
+                    .is_none_or(|expr| expr_uses_alias_only_as_const_index(name, expr))
+                && body
+                    .iter()
+                    .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+        }
+        Stmt::Block(stmts) | Stmt::DeclGroup(stmts) => stmts
+            .iter()
+            .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt)),
+        Stmt::Switch { expr, body } => {
+            expr_uses_alias_only_as_const_index(name, expr)
+                && body
+                    .iter()
+                    .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+        }
+        Stmt::Label(_, inner) => stmt_uses_alias_only_as_const_index(name, inner),
+        Stmt::CaseLabel(expr) => expr_uses_alias_only_as_const_index(name, expr),
+        Stmt::DefaultLabel
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Goto(_)
+        | Stmt::EnumDecl(_)
+        | Stmt::Asm(_) => true,
+    }
+}
+
+fn try_lower_array_literal_alias_decl_only(ctx: &mut LowerCtx, stmt: &Stmt, rest: &[Stmt]) -> bool {
+    let Stmt::VarDecl {
+        name,
+        ty,
+        init,
+        is_static: false,
+        vla_dim: None,
+    } = stmt
+    else {
+        return false;
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let Some(alias) = const_array_compound_ptr_init(ctx, init.as_ref()) else {
+        return false;
+    };
+    let (_, _, deps) = &alias;
+    let assigned_later = assigned_in_stmts(rest);
+    if deps.iter().any(|dep| assigned_later.contains(dep)) {
+        return false;
+    }
+    if !rest
+        .iter()
+        .all(|stmt| stmt_uses_alias_only_as_const_index(name, stmt))
+    {
+        return false;
+    }
+    clear_const_local(ctx, name);
+    ctx.local_types.insert(name.clone(), ty.clone());
+    ctx.const_array_literal_ptrs.insert(name.clone(), alias);
+    true
+}
+
+fn const_fn_ptr_array_callee(ctx: &LowerCtx, array_name: &str, idx: usize) -> Option<String> {
+    ctx.const_fn_ptr_arrays
+        .get(array_name)
+        .and_then(|functions| functions.get(idx))
+        .cloned()
+        .flatten()
+}
+
+fn const_fn_ptr_array_store_target(ctx: &LowerCtx, expr: &Expr) -> Option<(String, usize)> {
+    let (array_name, idx) = const_fn_ptr_array_element(ctx, expr)?;
+    ctx.const_fn_ptr_arrays
+        .contains_key(&array_name)
+        .then_some((array_name, idx))
+}
+
+fn update_const_fn_ptr_array_store(ctx: &mut LowerCtx, target: &Expr, value: &Expr) -> bool {
+    let Some((array_name, idx)) = const_fn_ptr_array_store_target(ctx, target) else {
+        return false;
+    };
+    let callee = resolve_const_function_pointer_expr(ctx, value);
+    if let Some(elements) = ctx.const_fn_ptr_arrays.get_mut(&array_name) {
+        if let Some(slot) = elements.get_mut(idx) {
+            *slot = callee;
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_const_function_pointer_expr(ctx: &LowerCtx, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Ident(name) if ctx.known_functions.contains(name) => Some(name.clone()),
+        Expr::Index(..) => {
+            let (array_name, idx) = const_fn_ptr_array_element(ctx, expr)?;
+            const_fn_ptr_array_callee(ctx, &array_name, idx)
+        }
+        Expr::Deref(inner) => match inner.as_ref() {
+            Expr::Ident(alias_name) => {
+                let (array_name, idx) = ctx.const_fn_ptr_aliases.get(alias_name)?;
+                const_fn_ptr_array_callee(ctx, array_name, *idx)
+            }
+            Expr::AddrOf(target) => resolve_const_function_pointer_expr(ctx, target),
+            Expr::Cast(_, cast_inner) => resolve_const_function_pointer_expr(ctx, cast_inner),
+            other => resolve_const_function_pointer_expr(ctx, other),
+        },
+        Expr::AddrOf(inner) | Expr::Cast(_, inner) => {
+            resolve_const_function_pointer_expr(ctx, inner)
+        }
+        Expr::Comma(_, rhs) => resolve_const_function_pointer_expr(ctx, rhs),
+        _ => None,
+    }
+}
+
+fn simple_direct_call_ret_type(ctx: &LowerCtx, name: &str) -> Option<Type> {
+    let ret_ty = ctx
+        .function_return_types
+        .get(name)
+        .cloned()
+        .or_else(|| ctx.globals.get(name).cloned())?;
+    let resolved = resolve_type_chain(&ret_ty, ctx);
+    if matches!(resolved.unqualified(), Type::Void)
+        || is_struct_type(&ret_ty, ctx)
+        || ty_is_long_long(&ret_ty, ctx)
+        || resolved.is_complex()
+    {
+        return None;
+    }
+    Some(ret_ty)
+}
+
+fn const_local_float_bits_expr(ctx: &LowerCtx, expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::FloatLit(value) => Some((*value as f32).to_bits()),
+        Expr::Ident(name) => ctx.const_float_locals.get(name).copied(),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => Some(const_local_float_bits_expr(ctx, operand)? ^ 0x8000_0000),
+        Expr::Cast(ty, inner) if ty.is_float() => const_local_float_bits_expr(ctx, inner)
+            .or_else(|| const_local_i64_expr(ctx, inner).map(|v| (v as f32).to_bits())),
+        Expr::Binary { op, lhs, rhs } => {
+            let lhs = f32::from_bits(const_local_float_bits_expr(ctx, lhs)?);
+            let rhs = f32::from_bits(const_local_float_bits_expr(ctx, rhs)?);
+            let result = match op {
+                BinaryOp::Add => lhs + rhs,
+                BinaryOp::Sub => lhs - rhs,
+                BinaryOp::Mul => lhs * rhs,
+                BinaryOp::Div if rhs != 0.0 => lhs / rhs,
+                _ => return None,
+            };
+            result.is_finite().then_some(result.to_bits())
+        }
+        _ => None,
+    }
+}
+
+fn eval_integer_compound(op: BinaryOp, lhs: i64, rhs: i64, is_unsigned: bool) -> Option<i64> {
+    eval_integer_binary(op, lhs, rhs, is_unsigned)
+}
+
+fn eval_integer_binary(op: BinaryOp, lhs: i64, rhs: i64, is_unsigned: bool) -> Option<i64> {
+    match op {
+        BinaryOp::Add => Some(lhs.wrapping_add(rhs)),
+        BinaryOp::Sub => Some(lhs.wrapping_sub(rhs)),
+        BinaryOp::Mul => Some(lhs.wrapping_mul(rhs)),
+        BinaryOp::Div => {
+            if rhs == 0 {
+                None
+            } else if is_unsigned {
+                Some(((lhs as u32).wrapping_div(rhs as u32)) as i64)
+            } else {
+                Some(((lhs as i32).wrapping_div(rhs as i32)) as i64)
+            }
+        }
+        BinaryOp::Mod => {
+            if rhs == 0 {
+                None
+            } else if is_unsigned {
+                Some(((lhs as u32).wrapping_rem(rhs as u32)) as i64)
+            } else {
+                Some(((lhs as i32).wrapping_rem(rhs as i32)) as i64)
+            }
+        }
+        BinaryOp::BitAnd => Some(lhs & rhs),
+        BinaryOp::BitOr => Some(lhs | rhs),
+        BinaryOp::BitXor => Some(lhs ^ rhs),
+        BinaryOp::LogAnd => Some(i64::from(lhs != 0 && rhs != 0)),
+        BinaryOp::LogOr => Some(i64::from(lhs != 0 || rhs != 0)),
+        BinaryOp::Shl => Some(lhs.wrapping_shl(rhs as u32)),
+        BinaryOp::Shr => {
+            if is_unsigned {
+                Some(((lhs as u32) >> (rhs as u32)) as i64)
+            } else {
+                Some(((lhs as i32) >> (rhs as u32)) as i64)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn emit_compare_for_condition(
@@ -5260,6 +6759,10 @@ fn lower_if(
     then_body: &[Stmt],
     else_body: Option<&[Stmt]>,
 ) -> Result<()> {
+    let mut assigned = assigned_in_stmts(then_body);
+    if let Some(else_stmts) = else_body {
+        assigned.extend(assigned_in_stmts(else_stmts));
+    }
     if let Expr::IntLit(v, _) | Expr::CharLit(v) = cond {
         let selected = if *v != 0 { Some(then_body) } else { else_body };
         if let Some(body) = selected {
@@ -5269,13 +6772,27 @@ fn lower_if(
             }
             ctx.restore_scope(snap);
         }
+        invalidate_const_locals(ctx, &assigned);
         return Ok(());
+    }
+
+    if else_body.is_none() {
+        if let Some(target) = single_loop_branch_target(ctx, then_body)? {
+            lower_branch_if_true(ctx, cond, target)?;
+            invalidate_const_locals(ctx, &assigned);
+            return Ok(());
+        }
     }
 
     // C99 6.8.4/3: each selection-statement substatement is itself a
     // block, so declarations in `then_body` / `else_body` must not leak
     // bindings into the enclosing scope.
     if let Some(else_stmts) = else_body {
+        if try_lower_shared_comparison_if(ctx, cond, then_body, else_stmts)? {
+            invalidate_const_locals(ctx, &assigned);
+            return Ok(());
+        }
+
         let lbl_else = ctx.alloc_label();
         let lbl_end = ctx.alloc_label();
         // Branch to else when condition is zero (not nonzero).
@@ -5303,15 +6820,211 @@ fn lower_if(
         ctx.restore_scope(snap_then);
         ctx.emit(IrOp::Label(lbl_end));
     }
+    invalidate_const_locals(ctx, &assigned);
     Ok(())
+}
+
+fn single_loop_branch_target(ctx: &LowerCtx, body: &[Stmt]) -> Result<Option<Label>> {
+    let [stmt] = body else {
+        return Ok(None);
+    };
+    match stmt {
+        Stmt::Break => {
+            let lc = ctx
+                .loop_stack
+                .last()
+                .ok_or_else(|| Error::NotImplemented("break outside loop or switch".into()))?;
+            Ok(Some(lc.break_label))
+        }
+        Stmt::Continue => {
+            let lbl = ctx
+                .loop_stack
+                .iter()
+                .rev()
+                .find_map(|lc| lc.continue_label)
+                .ok_or_else(|| Error::NotImplemented("continue outside loop".into()))?;
+            Ok(Some(lbl))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn try_lower_shared_comparison_if(
+    ctx: &mut LowerCtx,
+    cond: &Expr,
+    then_body: &[Stmt],
+    else_body: &[Stmt],
+) -> Result<bool> {
+    let Expr::Binary {
+        op: first_op,
+        lhs: first_lhs,
+        rhs: first_rhs,
+    } = cond
+    else {
+        return Ok(false);
+    };
+    if *first_op != BinaryOp::Eq {
+        return Ok(false);
+    }
+    let [Stmt::If {
+        cond: nested_cond,
+        then_body: nested_then,
+        else_body: nested_else,
+    }] = else_body
+    else {
+        return Ok(false);
+    };
+    let Expr::Binary {
+        op: nested_op,
+        lhs: nested_lhs,
+        rhs: nested_rhs,
+    } = nested_cond
+    else {
+        return Ok(false);
+    };
+    if !matches!(
+        nested_op,
+        BinaryOp::Lt | BinaryOp::Gt | BinaryOp::Le | BinaryOp::Ge
+    ) || first_lhs.as_ref() != nested_lhs.as_ref()
+        || first_rhs.as_ref() != nested_rhs.as_ref()
+        || !expr_reusable_for_comparison(first_lhs, ctx)
+        || !expr_reusable_for_comparison(first_rhs, ctx)
+    {
+        return Ok(false);
+    }
+
+    let lhs_ty = expr_type(first_lhs, ctx).map(|t| resolve_type(&t, ctx));
+    let rhs_ty = expr_type(first_rhs, ctx).map(|t| resolve_type(&t, ctx));
+    let unsupported = lhs_ty
+        .as_ref()
+        .is_some_and(|t| t.is_float() || t.is_complex() || ty_is_long_long(t, ctx))
+        || rhs_ty
+            .as_ref()
+            .is_some_and(|t| t.is_float() || t.is_complex() || ty_is_long_long(t, ctx));
+    if unsupported {
+        return Ok(false);
+    }
+
+    let l = lower_expr(ctx, first_lhs)?;
+    let r = lower_expr(ctx, first_rhs)?;
+    let is_unsigned = binary_common_is_unsigned(ctx, first_lhs, first_rhs);
+    let lbl_else = ctx.alloc_label();
+    let lbl_end = ctx.alloc_label();
+    let cond = emit_compare_for_branch(ctx, *first_op, l, r, is_unsigned, false);
+    ctx.emit(IrOp::BranchCond(cond, lbl_else));
+
+    let snap_then = ctx.snapshot_scope();
+    for s in then_body {
+        lower_stmt(ctx, s)?;
+    }
+    ctx.restore_scope(snap_then);
+    ctx.emit(IrOp::Branch(lbl_end));
+
+    ctx.emit(IrOp::Label(lbl_else));
+    lower_if_from_existing_comparison(ctx, *nested_op, nested_then, nested_else.as_deref())?;
+    ctx.emit(IrOp::Label(lbl_end));
+    Ok(true)
+}
+
+fn lower_if_from_existing_comparison(
+    ctx: &mut LowerCtx,
+    op: BinaryOp,
+    then_body: &[Stmt],
+    else_body: Option<&[Stmt]>,
+) -> Result<()> {
+    if let Some(else_stmts) = else_body {
+        let lbl_else = ctx.alloc_label();
+        let lbl_end = ctx.alloc_label();
+        ctx.emit(IrOp::BranchCond(
+            comparison_branch_cond(op, false),
+            lbl_else,
+        ));
+        let snap_then = ctx.snapshot_scope();
+        for s in then_body {
+            lower_stmt(ctx, s)?;
+        }
+        ctx.restore_scope(snap_then);
+        ctx.emit(IrOp::Branch(lbl_end));
+        ctx.emit(IrOp::Label(lbl_else));
+        let snap_else = ctx.snapshot_scope();
+        for s in else_stmts {
+            lower_stmt(ctx, s)?;
+        }
+        ctx.restore_scope(snap_else);
+        ctx.emit(IrOp::Label(lbl_end));
+    } else {
+        let lbl_end = ctx.alloc_label();
+        ctx.emit(IrOp::BranchCond(comparison_branch_cond(op, false), lbl_end));
+        let snap_then = ctx.snapshot_scope();
+        for s in then_body {
+            lower_stmt(ctx, s)?;
+        }
+        ctx.restore_scope(snap_then);
+        ctx.emit(IrOp::Label(lbl_end));
+    }
+    Ok(())
+}
+
+fn expr_reusable_for_comparison(expr: &Expr, ctx: &LowerCtx) -> bool {
+    if expr_type(expr, ctx)
+        .map(|ty| resolve_type(&ty, ctx).is_volatile())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    match expr {
+        Expr::IntLit(..)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::CharLit(_)
+        | Expr::Ident(_)
+        | Expr::Sizeof(_) => true,
+        Expr::Unary { operand, .. }
+        | Expr::Cast(_, operand)
+        | Expr::Deref(operand)
+        | Expr::AddrOf(operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => expr_reusable_for_comparison(operand, ctx),
+        Expr::Binary { lhs, rhs, .. } | Expr::Index(lhs, rhs) => {
+            expr_reusable_for_comparison(lhs, ctx) && expr_reusable_for_comparison(rhs, ctx)
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => expr_reusable_for_comparison(base, ctx),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_reusable_for_comparison(cond, ctx)
+                && expr_reusable_for_comparison(then_expr, ctx)
+                && expr_reusable_for_comparison(else_expr, ctx)
+        }
+        Expr::Call { .. }
+        | Expr::CallIndirect { .. }
+        | Expr::Assign { .. }
+        | Expr::PreInc(_)
+        | Expr::PreDec(_)
+        | Expr::PostInc(_)
+        | Expr::PostDec(_)
+        | Expr::CompoundAssign { .. }
+        | Expr::InitList(_)
+        | Expr::Comma(_, _)
+        | Expr::DesignatedInit { .. }
+        | Expr::ArrayDesignator { .. } => false,
+    }
 }
 
 fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
     let continue_label = ctx.alloc_label();
     let break_label = ctx.alloc_label();
+    let mut assigned = assigned_in_stmts(body);
+    collect_assigned_expr(cond, &mut assigned);
+    invalidate_const_locals(ctx, &assigned);
 
     ctx.emit(IrOp::Label(continue_label));
     lower_branch_if_false(ctx, cond, break_label)?;
+    invalidate_const_locals(ctx, &assigned);
 
     ctx.loop_stack.push(LoopContext {
         break_label,
@@ -5319,7 +7032,10 @@ fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
     });
     // C99 6.8.5/5: the loop body is its own block.
     let snap = ctx.snapshot_scope();
-    for s in body {
+    for (idx, s) in body.iter().enumerate() {
+        if try_lower_array_literal_alias_decl_only(ctx, s, &body[idx + 1..]) {
+            continue;
+        }
         lower_stmt(ctx, s)?;
     }
     ctx.restore_scope(snap);
@@ -5327,6 +7043,7 @@ fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
 
     ctx.emit(IrOp::Branch(continue_label));
     ctx.emit(IrOp::Label(break_label));
+    invalidate_const_locals(ctx, &assigned);
     Ok(())
 }
 
@@ -5345,6 +7062,14 @@ fn lower_for(
     if let Some(init_stmt) = init {
         lower_stmt(ctx, init_stmt)?;
     }
+    let mut assigned = assigned_in_stmts(body);
+    if let Some(step_expr) = step {
+        collect_assigned_expr(step_expr, &mut assigned);
+    }
+    if let Some(cond_expr) = cond {
+        collect_assigned_expr(cond_expr, &mut assigned);
+    }
+    invalidate_const_locals(ctx, &assigned);
 
     // C99 6.8.6.2: a `continue` inside a `for` must jump to the
     // post-expression (step), then fall through to the condition test.
@@ -5367,7 +7092,10 @@ fn lower_for(
     });
     // The loop body is itself a nested block.
     let snap_body = ctx.snapshot_scope();
-    for s in body {
+    for (idx, s) in body.iter().enumerate() {
+        if try_lower_array_literal_alias_decl_only(ctx, s, &body[idx + 1..]) {
+            continue;
+        }
         lower_stmt(ctx, s)?;
     }
     ctx.restore_scope(snap_body);
@@ -5380,6 +7108,7 @@ fn lower_for(
     ctx.emit(IrOp::Branch(top_label));
     ctx.emit(IrOp::Label(break_label));
     ctx.restore_scope(snap_for);
+    invalidate_const_locals(ctx, &assigned);
     Ok(())
 }
 
@@ -5389,6 +7118,9 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
     let top_label = ctx.alloc_label();
     let continue_label = ctx.alloc_label();
     let break_label = ctx.alloc_label();
+    let mut assigned = assigned_in_stmts(body);
+    collect_assigned_expr(cond, &mut assigned);
+    invalidate_const_locals(ctx, &assigned);
 
     ctx.emit(IrOp::Label(top_label));
 
@@ -5407,6 +7139,7 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
     ctx.emit(IrOp::Label(continue_label));
     lower_branch_if_true(ctx, cond, top_label)?;
     ctx.emit(IrOp::Label(break_label));
+    invalidate_const_locals(ctx, &assigned);
     Ok(())
 }
 
@@ -5577,6 +7310,7 @@ fn lower_inc_dec_64(
     match operand {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
+                clear_const_local(ctx, name);
                 let old_val = match storage {
                     LocalStorage::Stack(offset) => {
                         let dst = ctx.alloc_vreg_pair();
@@ -5664,6 +7398,13 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
     match operand {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
+                let folded_const = ctx.const_locals.get(name).copied().map(|old| {
+                    if is_inc {
+                        old.wrapping_add(stride)
+                    } else {
+                        old.wrapping_sub(stride)
+                    }
+                });
                 let old_val = match &storage {
                     LocalStorage::Reg(vreg) => {
                         let dst = ctx.alloc_vreg();
@@ -5722,6 +7463,17 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
                         ctx.emit(IrOp::StoreGlobal(new_val, sym.clone()));
                     }
                 }
+                if let Some(value) = folded_const {
+                    let value = local_ty
+                        .as_ref()
+                        .map_or(value, |ty| const_int_to_type(ctx, value, ty));
+                    ctx.const_locals.insert(name.clone(), value);
+                    ctx.const_float_locals.remove(name);
+                    ctx.const_bitfield_locals
+                        .retain(|(base, _), _| base != name);
+                } else {
+                    clear_const_local(ctx, name);
+                }
                 if is_pre {
                     Ok(new_val)
                 } else {
@@ -5761,6 +7513,7 @@ fn lower_inc_dec(ctx: &mut LowerCtx, operand: &Expr, is_inc: bool, is_pre: bool)
             }
         }
         Expr::Deref(_) | Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
+            clear_all_const_locals(ctx);
             let addr = lower_lvalue_addr(ctx, operand)?;
             let old_val = if let Some(ref ty) = operand_ty {
                 if is_byte_scalar(ty, ctx) {
@@ -5998,6 +7751,42 @@ fn lower_compound_assign(
     match target {
         Expr::Ident(name) => {
             if let Some(storage) = ctx.locals.get(name).cloned() {
+                if !target_is_float && !target_is_64 {
+                    if let (Some(lhs_const), Some(rhs_const)) = (
+                        ctx.const_locals.get(name).copied(),
+                        const_local_i64_expr(ctx, value),
+                    ) {
+                        if let Some(folded) =
+                            eval_integer_compound(op, lhs_const, rhs_const, is_unsigned)
+                        {
+                            let result = ctx.alloc_vreg();
+                            ctx.emit(IrOp::LoadImm(result, folded));
+                            let mut result = result;
+                            if let Some(ref ty) = target_ty {
+                                result = coerce_vreg(ctx, result, ty);
+                            }
+                            match storage {
+                                LocalStorage::Stack(offset) => {
+                                    ctx.emit(IrOp::Store(result, 0, offset as i32));
+                                }
+                                LocalStorage::Reg(vreg) => {
+                                    ctx.emit(IrOp::Copy(vreg, result));
+                                }
+                                LocalStorage::Static(ref sym) => {
+                                    ctx.emit(IrOp::StoreGlobal(result, sym.clone()));
+                                }
+                            }
+                            let folded = target_ty
+                                .as_ref()
+                                .map_or(folded, |ty| const_int_to_type(ctx, folded, ty));
+                            ctx.const_locals.insert(name.clone(), folded);
+                            ctx.const_float_locals.remove(name);
+                            ctx.const_bitfield_locals
+                                .retain(|(base, _), _| base != name);
+                            return Ok(result);
+                        }
+                    }
+                }
                 let lhs = match storage {
                     LocalStorage::Stack(offset) => {
                         let dst = if target_is_float {
@@ -6052,6 +7841,7 @@ fn lower_compound_assign(
                         ctx.emit(IrOp::StoreGlobal(result, sym.clone()));
                     }
                 }
+                clear_const_local(ctx, name);
                 Ok(result)
             } else if ctx.globals.contains_key(name) {
                 // Compound assignment to a global variable.
@@ -6083,8 +7873,28 @@ fn lower_compound_assign(
             }
         }
         Expr::Deref(_) | Expr::Index(..) | Expr::Member(..) | Expr::Arrow(..) => {
+            let folded_bitfield = member_bitfield_info(target, ctx).and_then(|info| {
+                let key = direct_local_member_key(target)?;
+                let lhs_const = ctx.const_bitfield_locals.get(&key).copied()?;
+                let rhs_const = const_local_i64_expr(ctx, value)?;
+                let folded = eval_integer_compound(op, lhs_const, rhs_const, is_unsigned)?;
+                Some((key, const_int_to_bitfield(folded, &info), info))
+            });
+            if folded_bitfield.is_some() {
+                ctx.const_locals.clear();
+                ctx.const_float_locals.clear();
+            } else {
+                clear_all_const_locals(ctx);
+            }
             let addr = lower_lvalue_addr(ctx, target)?;
             let bitfield = member_bitfield_info(target, ctx);
+            if let Some((key, folded, ref info)) = folded_bitfield {
+                let result = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(result, folded));
+                emit_bitfield_store(ctx, addr, result, info);
+                ctx.const_bitfield_locals.insert(key, folded);
+                return Ok(result);
+            }
             let lhs = if let Some(ref ty) = target_ty {
                 if let Some(ref info) = bitfield {
                     emit_bitfield_load(ctx, addr, info)
@@ -6151,6 +7961,7 @@ fn lower_compound_assign(
             Ok(result)
         }
         _ => {
+            clear_all_const_locals(ctx);
             let addr = lower_lvalue_addr(ctx, target)?;
             let lhs = if target_is_float {
                 ctx.alloc_vreg_float()
@@ -6308,19 +8119,23 @@ fn lower_aggregate_init(
         return Ok(());
     }
 
-    // Aggregate: zero-fill every word first so holes between designators
-    // (`int a[5] = {[2]=7};` leaves a[0..2] and a[3..] at 0) are set.
-    let zero = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
-    for w in 0..num_words {
-        emit_frame_slot_store_indirect(ctx, slot_base + w, zero);
-    }
-
     // Resolve struct-field metadata once (used for `.field = v` designators).
     let resolved_ty = resolve_type(ty, ctx);
     let resolved_pack = aggregate_pack(&resolved_ty, ctx);
     let struct_fields: Option<Vec<(String, Type)>> =
         resolve_struct_fields(&resolved_ty, ctx).map(|f| f.to_vec());
+
+    // Aggregate: zero-fill every word first so holes between designators
+    // (`int a[5] = {[2]=7};` leaves a[0..2] and a[3..] at 0) are set.
+    // Fully covered full-word arrays do not need that defensive fill:
+    // each element store overwrites the whole object.
+    if !full_word_array_init_covers_all(ctx, items, &resolved_ty) {
+        let zero = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(zero, 0));
+        for w in 0..num_words {
+            emit_frame_slot_store_indirect(ctx, slot_base + w, zero);
+        }
+    }
 
     // Byte-packed narrow-element arrays (any dimensionality) where the
     // leaf scalar is `char` (1 byte) or `short` (2 bytes).  These pack
@@ -7654,7 +9469,10 @@ fn lower_ternary(
     then_expr: &Expr,
     else_expr: &Expr,
 ) -> Result<VReg> {
-    let cond_val = lower_expr(ctx, cond)?;
+    let mut branch_assigned = HashSet::new();
+    collect_assigned_expr(then_expr, &mut branch_assigned);
+    collect_assigned_expr(else_expr, &mut branch_assigned);
+
     let result_ty = ternary_scalar_result_type(ctx, then_expr, else_expr);
     let result_is_64 = result_ty.as_ref().is_some_and(|t| ty_is_long_long(t, ctx));
     let result = if result_is_64 {
@@ -7664,11 +9482,23 @@ fn lower_ternary(
     } else {
         ctx.alloc_vreg()
     };
+
+    if let Some(cond_value) = const_condition_i64_expr(ctx, cond) {
+        let chosen = if cond_value != 0 {
+            then_expr
+        } else {
+            else_expr
+        };
+        return lower_ternary_arm(ctx, chosen, result_ty.as_ref(), result_is_64);
+    }
+
     let else_label = ctx.alloc_label();
     let end_label = ctx.alloc_label();
 
-    lower_compare_scalar_to_zero(ctx, cond_val);
-    ctx.emit(IrOp::BranchCond(Cond::Eq, else_label));
+    lower_branch_if_false(ctx, cond, else_label)?;
+    let base_const_locals = ctx.const_locals.clone();
+    let base_const_float_locals = ctx.const_float_locals.clone();
+    let base_const_bitfield_locals = ctx.const_bitfield_locals.clone();
 
     // Then branch.
     let then_val = lower_ternary_arm(ctx, then_expr, result_ty.as_ref(), result_is_64)?;
@@ -7678,6 +9508,9 @@ fn lower_ternary(
         ctx.emit(IrOp::Copy(result, then_val));
     }
     ctx.emit(IrOp::Branch(end_label));
+    ctx.const_locals = base_const_locals.clone();
+    ctx.const_float_locals = base_const_float_locals.clone();
+    ctx.const_bitfield_locals = base_const_bitfield_locals.clone();
 
     // Else branch.
     ctx.emit(IrOp::Label(else_label));
@@ -7688,6 +9521,10 @@ fn lower_ternary(
         ctx.emit(IrOp::Copy(result, else_val));
     }
     ctx.emit(IrOp::Label(end_label));
+    ctx.const_locals = base_const_locals;
+    ctx.const_float_locals = base_const_float_locals;
+    ctx.const_bitfield_locals = base_const_bitfield_locals;
+    invalidate_const_locals(ctx, &branch_assigned);
 
     Ok(result)
 }
@@ -7869,6 +9706,86 @@ fn emit_struct_copy_exact(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, by
 
 /// Lower an expression that produces a struct value, returning the address
 /// of the struct on the stack rather than loading a single word.
+fn lower_struct_return_call_into_frame(
+    ctx: &mut LowerCtx,
+    expr: &Expr,
+    storage_slot: u32,
+    target_words: u32,
+) -> Result<bool> {
+    match expr {
+        Expr::Call { name, args } => {
+            let ret_ty = ctx.function_return_types.get(name).cloned().or_else(|| {
+                ctx.local_types
+                    .get(name)
+                    .or_else(|| ctx.globals.get(name))
+                    .and_then(function_ptr_ret_type)
+            });
+            if !ret_ty.as_ref().is_some_and(|t| is_struct_type(t, ctx)) {
+                return Ok(false);
+            }
+            let ret_words = ret_ty
+                .as_ref()
+                .map_or(target_words, |ty| type_size_words(ty, ctx).max(1));
+            if ret_words != target_words {
+                return Ok(false);
+            }
+            let param_tys_owned: Option<Vec<Type>> = lookup_callee_param_types(ctx, name)
+                .map(|p| p.to_vec())
+                .or_else(|| {
+                    expr_function_ptr_param_types(&Expr::Ident(name.clone()), ctx)
+                        .map(|p| p.to_vec())
+                });
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
+            let dst_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+            let callee_ty = ctx.local_types.get(name).or_else(|| ctx.globals.get(name));
+            if callee_ty.is_some_and(|t| is_function_ptr_type(t, ctx)) {
+                let addr = lower_expr(ctx, &Expr::Ident(name.clone()))?;
+                ctx.emit(IrOp::CallIndirectStruct {
+                    addr,
+                    args: arg_vregs,
+                    dst_addr,
+                    num_words: target_words,
+                });
+            } else {
+                ctx.emit(IrOp::CallStruct {
+                    name: name.clone(),
+                    args: arg_vregs,
+                    dst_addr,
+                    num_words: target_words,
+                });
+            }
+            Ok(true)
+        }
+        Expr::CallIndirect { func_expr, args } => {
+            let ret_ty = expr_function_ptr_ret_type(func_expr, ctx);
+            if !ret_ty.as_ref().is_some_and(|t| is_struct_type(t, ctx)) {
+                return Ok(false);
+            }
+            let ret_words = ret_ty
+                .as_ref()
+                .map_or(target_words, |ty| type_size_words(ty, ctx).max(1));
+            if ret_words != target_words {
+                return Ok(false);
+            }
+            let fn_addr = lower_expr(ctx, func_expr)?;
+            let param_tys_owned: Option<Vec<Type>> =
+                expr_function_ptr_param_types(func_expr, ctx).map(|p| p.to_vec());
+            let arg_vregs = lower_call_args_with_params(ctx, args, param_tys_owned.as_deref())?;
+            let dst_addr = ctx.alloc_vreg_ptr();
+            ctx.emit(IrOp::FrameAddr(dst_addr, storage_slot as i32));
+            ctx.emit(IrOp::CallIndirectStruct {
+                addr: fn_addr,
+                args: arg_vregs,
+                dst_addr,
+                num_words: target_words,
+            });
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
     match expr {
         Expr::Ident(_) | Expr::Member(..) | Expr::Arrow(..) | Expr::Deref(..) | Expr::Index(..) => {
@@ -8409,6 +10326,21 @@ mod tests {
         .ops
     }
 
+    fn returned_load_imm(ops: &[IrOp]) -> Option<i64> {
+        let mut ret = ops.iter().find_map(|op| match op {
+            IrOp::Ret(Some(v)) => Some(*v),
+            _ => None,
+        })?;
+        for op in ops.iter().rev() {
+            match op {
+                IrOp::LoadImm(v, imm) if *v == ret => return Some(*imm),
+                IrOp::Copy(dst, src) if *dst == ret => ret = *src,
+                _ => {}
+            }
+        }
+        None
+    }
+
     #[test]
     fn lower_return_42() {
         let unit = parse::parse("int main() { return 42; }").unwrap();
@@ -8441,6 +10373,162 @@ mod tests {
         // Should contain at least one Add and a Ret
         assert!(ops.iter().any(|op| matches!(op, IrOp::Add(_, _, _))));
         assert!(ops.iter().any(|op| matches!(op, IrOp::Ret(Some(_)))));
+    }
+
+    #[test]
+    fn lowers_masked_ull_byte_extract_without_generic_64bit_shift() {
+        let src = "int f(unsigned long long v, int i) {
+                       return (unsigned char)((v >> (i * 8)) & 0xFFULL);
+                   }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::UShr64(..) | IrOp::Shr64(..))),
+            "masked byte extract should avoid the generic 64-bit shift: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::ExtractByte64(..))),
+            "masked byte extract should lower to the dedicated byte-extract op: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_const_local_explicit_unsigned_short_cast_truncates() {
+        let src = "int f(void) { unsigned int full = 0x12345; unsigned short s = (unsigned short)full; return (int)s; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(returned_load_imm(&ops), Some(0x2345), "{ops:?}");
+    }
+
+    #[test]
+    fn lower_const_local_implicit_unsigned_short_assignment_truncates() {
+        let src =
+            "int f(void) { unsigned int full = 0x12345; unsigned short s = full; return (int)s; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(returned_load_imm(&ops), Some(0x2345), "{ops:?}");
+    }
+
+    #[test]
+    fn lower_const_local_assignment_update_to_unsigned_short_truncates() {
+        let src = "int f(void) { unsigned short s = 0; unsigned int full = 0x12345; s = full; return (int)s; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(returned_load_imm(&ops), Some(0x2345), "{ops:?}");
+    }
+
+    #[test]
+    fn lower_const_local_signed_short_assignment_sign_extends() {
+        let src = "int f(void) { short s = 0x8001; return (int)s; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(returned_load_imm(&ops), Some(-32767), "{ops:?}");
+    }
+
+    #[test]
+    fn lower_const_bool_logical_locals_fold() {
+        let src = "int f(void) { _Bool a = 1, b = 0; _Bool c = a && !b; return (int)c; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(returned_load_imm(&ops), Some(1), "{ops:?}");
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::Branch(_) | IrOp::BranchCond(..))),
+            "constant logical bool locals should not lower to short-circuit branches: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_const_bool_cast_index_normalizes_to_one() {
+        let src = "int f(void) { int arr[2] = {0x10, 0x20}; return arr[(_Bool)42]; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 1))),
+            "constant _Bool cast should normalize nonzero values to 1: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::LoadImm(_, 42) | IrOp::BranchCond(..))),
+            "constant _Bool cast should not leave the raw value or runtime bool branch: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_const_float_bool_cast_normalizes_to_one() {
+        let src = "int f(void) { return (_Bool)3.14f; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(returned_load_imm(&ops), Some(1), "{ops:?}");
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::BranchCond(..))),
+            "constant float-to-_Bool cast should not lower to a runtime branch: {ops:?}"
+        );
     }
 
     #[test]
@@ -8500,6 +10588,54 @@ mod tests {
     }
 
     #[test]
+    fn lower_if_float_compare_branches_directly() {
+        let src = "int f(float x) { if (x > 1.0f) return 0; return 1; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::FCmp(_, _))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::BranchCond(_, _))));
+        let fcmp_idx = ops
+            .iter()
+            .position(|op| matches!(op, IrOp::FCmp(_, _)))
+            .unwrap();
+        assert!(
+            matches!(ops.get(fcmp_idx + 1), Some(IrOp::BranchCond(_, _))),
+            "float comparison in branch context should branch from flags: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_else_if_reuses_same_comparison_operands() {
+        let src = "int f(int mid) { int arr[7] = {2,5,8,13,21,34,55}; if (arr[mid] == 13) return 1; else if (arr[mid] < 13) return 2; return 3; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        let indirect_loads = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::Load(_, base, _) if *base != 0))
+            .count();
+        assert_eq!(
+            indirect_loads, 1,
+            "shared else-if comparison should not reload arr[mid]: {ops:?}"
+        );
+    }
+
+    #[test]
     fn lower_while_loop() {
         let src = "int f(int x) { while (x) { x = x - 1; } return x; }";
         let unit = parse::parse(src).unwrap();
@@ -8531,7 +10667,10 @@ mod tests {
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 5))));
         assert!(ops.iter().any(|op| matches!(op, IrOp::Store(_, _, 0))));
-        assert!(ops.iter().any(|op| matches!(op, IrOp::Load(_, _, 0))));
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::Load(_, _, 0))),
+            "constant scalar local should return from the tracked value without a reload: {ops:?}"
+        );
     }
 
     #[test]
@@ -8621,6 +10760,107 @@ mod tests {
         // Should have branches for the ternary.
         assert!(ops.iter().any(|op| matches!(op, IrOp::BranchCond(_, _))));
         assert!(ops.iter().any(|op| matches!(op, IrOp::Branch(_))));
+        let cmp_count = ops
+            .iter()
+            .filter(|op| matches!(op, IrOp::Cmp(_, _)))
+            .count();
+        assert_eq!(
+            cmp_count, 1,
+            "ternary comparison condition should branch directly: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_return_ternary_avoids_result_spill() {
+        let src = "int f(int x) { return x == 7 ? 0x55 : 0xaa; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert_eq!(
+            ops.iter().filter(|op| matches!(op, IrOp::Ret(_))).count(),
+            2,
+            "return ternary should lower to direct returns: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::Store(_, 0, _))),
+            "return ternary should not spill a synthetic result slot: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_ternary_discards_untaken_branch_constants() {
+        let src = "int f(void) { int a = 0, b = 0, c = 0; int x = 5; (x > 3) ? (a = x, b = x * 2) : (c = x * 3); return a + b + c; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            !ops.windows(2).any(|window| matches!(
+                window,
+                [IrOp::LoadImm(v, 30), IrOp::Ret(Some(r))] if v == r
+            )),
+            "ternary branch assignments must not fold following return to 30: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                IrOp::Branch(_) | IrOp::BranchCond(_, _) | IrOp::Label(_)
+            )),
+            "constant ternary condition should lower only the taken arm: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_array_address_equivalence_folds_branch_condition() {
+        let src = "int f(void) { int arr[4]; return (&arr[2] == arr + 2) ? 0x55 : 0xaa; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::Cmp(_, _))),
+            "equivalent array address comparison should fold before IR compare: {ops:?}"
+        );
+        assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 0x55))));
+    }
+
+    #[test]
+    fn lower_equivalent_array_lvalue_comparison_folds_branch_condition() {
+        let src = "int f(void) { int arr[4]; return (arr[2] == *(arr + 2) && *(arr + 3) == 3[arr]) ? 0x55 : 0xaa; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::Cmp(_, _))),
+            "equivalent scalar array lvalue comparisons should fold before IR compare: {ops:?}"
+        );
+        assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 0x55))));
     }
 
     #[test]
@@ -8642,7 +10882,7 @@ mod tests {
 
     #[test]
     fn lower_compound_assign() {
-        let src = "int f() { int x = 10; x += 5; return x; }";
+        let src = "int f(int y) { int x = 10; x += y; return x; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(
             &unit.functions[0],
@@ -8662,6 +10902,27 @@ mod tests {
         assert!(
             store_count >= 2,
             "expected at least 2 stores (init + compound)"
+        );
+    }
+
+    #[test]
+    fn lower_const_local_compound_assign_chain_folds() {
+        let src = "int f(void) { int x = 100; x /= 5; x %= 7; x &= 15; x |= 16; x ^= 4; x >>= 1; return x; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 9))));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::Div(..) | IrOp::Mod(..))),
+            "constant compound chain should not emit runtime div/mod IR: {ops:?}"
         );
     }
 
@@ -8852,8 +11113,8 @@ mod tests {
             .filter(|op| matches!(op, IrOp::Branch(_)))
             .count();
         assert!(
-            branch_count >= 2,
-            "expected at least 2 unconditional branches (break + loop)"
+            branch_count <= 1,
+            "if-break should branch directly to the loop exit without a separate unconditional break: {ops:?}"
         );
     }
 
@@ -8875,8 +11136,8 @@ mod tests {
             .filter(|op| matches!(op, IrOp::Branch(_)))
             .count();
         assert!(
-            branch_count >= 2,
-            "expected at least 2 unconditional branches (continue + loop)"
+            branch_count <= 1,
+            "if-continue should branch directly to the continue label without a separate unconditional continue: {ops:?}"
         );
     }
 
@@ -8941,7 +11202,11 @@ mod tests {
             .iter()
             .filter(|op| matches!(op, IrOp::Branch(_)))
             .count();
-        assert!(branch_count >= 1, "expected at least 1 branch for break");
+        assert_eq!(
+            branch_count, 0,
+            "if-break in do-while should lower to a direct conditional exit: {ops:?}"
+        );
+        assert!(ops.iter().any(|op| matches!(op, IrOp::BranchCond(..))));
     }
 
     #[test]
@@ -9732,6 +11997,33 @@ mod tests {
     }
 
     #[test]
+    fn lower_full_word_array_init_elides_zero_fill() {
+        let src = "int f(void) { int m[2][2] = {{1, 2}, {3, 4}}; return m[1][1]; }";
+        let unit = parse::parse(src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        let zero_stores = result
+            .ops
+            .windows(2)
+            .filter(|w| {
+                matches!(w[0], IrOp::LoadImm(_, 0))
+                    && matches!(w[1], IrOp::Store(_, base, 0) if base != 0)
+            })
+            .count();
+        assert_eq!(
+            zero_stores, 0,
+            "fully covered full-word array init should not zero-fill first: {:?}",
+            result.ops
+        );
+    }
+
+    #[test]
     fn lower_large_static_template_copy_materializes_word_addresses() {
         let src = "int f(void) { int arr[100] = {0}; return arr[25]; }";
         let unit = parse::parse(src).unwrap();
@@ -10012,6 +12304,70 @@ mod tests {
         assert!(ops
             .iter()
             .any(|op| matches!(op, IrOp::Call(_, ref n, ref args) if n == "g" && args.len() == 2)));
+    }
+
+    #[test]
+    fn lower_struct_compound_literal_argument_passes_all_words() {
+        let src = "struct cl_pair { int a; int b; }; static int cl_sum(struct cl_pair p) { return p.a + p.b; } int test_main(void) { return cl_sum((struct cl_pair){10, 20}); }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let ops = lower_function_with_known(
+            unit.functions
+                .iter()
+                .find(|f| f.name == "test_main")
+                .unwrap(),
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        let args = ops
+            .iter()
+            .find_map(|op| match op {
+                IrOp::Call(_, name, args) if name == "cl_sum" => Some(args.clone()),
+                _ => None,
+            })
+            .expect("expected call to cl_sum");
+        assert_eq!(
+            args.len(),
+            2,
+            "struct argument should flatten to two words: {ops:?}"
+        );
+
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::Load(dst, base, 0) if *dst == args[0] && *base != 0)),
+            "first struct word should be loaded from byte offset 0: {ops:?}"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::Load(dst, base, 4) if *dst == args[1] && *base != 0)),
+            "second struct word should be loaded from byte offset 4: {ops:?}"
+        );
     }
 
     #[test]
@@ -10479,6 +12835,25 @@ mod tests {
         .unwrap()
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::LongLongToInt(..))));
+    }
+
+    #[test]
+    fn lower_cast_long_long_to_signed_char_sign_extends() {
+        let src = "int f(long long x) { return (signed char)x; }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::LongLongToInt(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::BitAnd(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Shl(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Shr(..))));
     }
 
     #[test]
@@ -10959,6 +13334,274 @@ mod tests {
         .ops;
         // Should load from the complex variable's imaginary part (offset 1).
         assert!(ops.iter().any(|op| matches!(op, IrOp::Load(..))));
+    }
+
+    #[test]
+    fn lower_complex_accessors_inline_extern_calls() {
+        let src = "int f() { double _Complex z = 2.0 + 3.0 * 1.0fi; return (int)creal(z) + (int)cimag(z); }";
+        let unit = parse::parse(src).unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                IrOp::Call(_, name, _) if name == "creal" || name == "cimag"
+            )),
+            "extern complex accessors should lower inline, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_complex_accessors_preserve_local_definitions() {
+        let src = "double creal(double _Complex z) { return 7.0; } int f() { double _Complex z; return (int)creal(z); }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let f = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let ops = lower_function_with_known(
+            f,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::Call(_, name, _) if name == "creal")),
+            "same-translation-unit creal definition must remain callable, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_const_function_pointer_array_calls_direct() {
+        let src = "static int cplx_fn1(void) { return 10; } static int cplx_fn2(void) { return 20; } int test_main(void) { int (*arr[2])(void) = {cplx_fn1, cplx_fn2}; int (*(*pp))(void) = &arr[0]; return (*pp)() + arr[1](); }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let test_main = unit
+            .functions
+            .iter()
+            .find(|f| f.name == "test_main")
+            .unwrap();
+        let ops = lower_function_with_known(
+            test_main,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::Call(_, name, args) if name == "cplx_fn1" && args.is_empty())),
+            "(*pp)() should resolve to a direct cplx_fn1 call, got: {ops:?}"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::Call(_, name, args) if name == "cplx_fn2" && args.is_empty())),
+            "arr[1]() should resolve to a direct cplx_fn2 call, got: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::CallIndirect(_, _, _))),
+            "constant function pointer array calls should not stay indirect, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_assigned_function_pointer_array_call_direct() {
+        let src = "static int *cpd_fn1(void) { static int x; return &x; } int test_main(void) { int *(*arr[1])(void); arr[0] = cpd_fn1; return *arr[0](); }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let test_main = unit
+            .functions
+            .iter()
+            .find(|f| f.name == "test_main")
+            .unwrap();
+        let ops = lower_function_with_known(
+            test_main,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(
+                |op| matches!(op, IrOp::Call(_, name, args) if name == "cpd_fn1" && args.is_empty())
+            ),
+            "assigned function-pointer array call should resolve direct, got: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::CallIndirect(_, _, _))),
+            "assigned function-pointer array call should not stay indirect, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_scalar_compound_literal_pointer_deref_folds_value() {
+        let src = "int test_main(void) { int *p = &(int){0x42}; return *p; }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let ops = lower_function_with_known(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 0x42))),
+            "constant compound literal pointee should load as an immediate, got: {ops:?}"
+        );
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::Load(_, base, _) if *base != 0)),
+            "constant compound literal pointee should not require indirect load, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_array_compound_literal_pointer_index_reuses_initializer_expr() {
+        let src = "int test_main(void) { int sum = 0; for (int i = 1; i <= 5; i++) { const int *p = (const int[]){i, i * 2}; sum += p[0]; } return sum; }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let ops = lower_function_with_known(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, IrOp::Load(_, base, _) if *base != 0)),
+            "p[0] from a side-effect-free array compound literal should not require an indirect load, got: {ops:?}"
+        );
     }
 
     #[test]

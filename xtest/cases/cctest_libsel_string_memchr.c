@@ -3,6 +3,7 @@
 // test Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x55 */
+/* @exp_ticks 0x25 */
 
 #include <stddef.h>
 #include <stdint.h>

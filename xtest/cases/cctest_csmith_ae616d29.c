@@ -3,6 +3,7 @@
 // Copyright (c) 2026 Jakob Kastelic
 
 /* @expect 0x264f865a */
+/* @exp_ticks 0x36fe */
 
 #include <float.h>
 #include <iso646.h>

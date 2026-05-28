@@ -165,6 +165,8 @@ pub enum IrOp {
     /// Hardware loop: LCNTR = count, DO end_label UNTIL LCE.
     /// The body follows immediately and ends at `end_label`.
     HardwareLoop { count: i64, end_label: Label },
+    /// Hardware loop with a runtime count held in a vreg.
+    HardwareLoopReg { count: VReg, end_label: Label },
     /// dst = current stack pointer (save for VLA restore)
     StackSave(VReg),
     /// Restore stack pointer from saved value (VLA scope exit)
@@ -225,6 +227,8 @@ pub enum IrOp {
     Shr64(VReg, VReg, VReg),
     /// dst = lhs >> rhs (64-bit logical right shift, rhs is 32-bit count)
     UShr64(VReg, VReg, VReg),
+    /// dst = (src >> (byte_index * 8)) & 0xff, where src is 64-bit.
+    ExtractByte64(VReg, VReg, VReg),
     /// dst = -src (64-bit negate)
     Neg64(VReg, VReg),
     /// dst = ~src (64-bit bitwise NOT)
@@ -403,6 +407,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             | IrOp::Label(_)
             | IrOp::HardwareLoop { .. }
             | IrOp::Nop => {}
+            IrOp::HardwareLoopReg { count, .. } => record_used(*count, &mut used),
 
             // ---- 64-bit ops: lo halves are pair anchors. -------
             IrOp::LoadImm64(lo, _) => record_anchor(*lo, &mut anchors, &mut used),
@@ -433,6 +438,11 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
                 record_anchor(*a, &mut anchors, &mut used);
                 record_anchor(*b, &mut anchors, &mut used);
                 record_used(*c, &mut used);
+            }
+            IrOp::ExtractByte64(dst, src, byte_index) => {
+                record_used(*dst, &mut used);
+                record_anchor(*src, &mut anchors, &mut used);
+                record_used(*byte_index, &mut used);
             }
             // base is a 32-bit address, dst/src is the 64-bit pair.
             IrOp::Load64(dst, base, _) => {
@@ -676,6 +686,10 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
                 count: *count,
                 end_label: *end_label,
             },
+            IrOp::HardwareLoopReg { count, end_label } => IrOp::HardwareLoopReg {
+                count: apply(*count),
+                end_label: *end_label,
+            },
             IrOp::StackSave(d) => IrOp::StackSave(apply(*d)),
             IrOp::StackRestore(d) => IrOp::StackRestore(apply(*d)),
             IrOp::StackAlloc(a, b) => IrOp::StackAlloc(apply(*a), apply(*b)),
@@ -698,6 +712,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             IrOp::Shl64(a, b, c) => IrOp::Shl64(apply(*a), apply(*b), apply(*c)),
             IrOp::Shr64(a, b, c) => IrOp::Shr64(apply(*a), apply(*b), apply(*c)),
             IrOp::UShr64(a, b, c) => IrOp::UShr64(apply(*a), apply(*b), apply(*c)),
+            IrOp::ExtractByte64(a, b, c) => IrOp::ExtractByte64(apply(*a), apply(*b), apply(*c)),
             IrOp::Neg64(a, b) => IrOp::Neg64(apply(*a), apply(*b)),
             IrOp::BitNot64(a, b) => IrOp::BitNot64(apply(*a), apply(*b)),
             IrOp::Cmp64(a, b) => IrOp::Cmp64(apply(*a), apply(*b)),

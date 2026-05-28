@@ -22,16 +22,11 @@
 #define HUGE_VAL  ((double)HUGE_VALF)
 #define INFINITY  HUGE_VALF
 #define NAN       (0.0f / 0.0f)
-static int _libsel_isnanf(float x) { return x != x; }
-static int _libsel_isinff(float x) { return !_libsel_isnanf(x) && x * 0.5f == x && x != 0.0f; }
-static int _libsel_signbitf(float x) {
-    union { float f; unsigned u; } _v; _v.f = x;
-    return (int)(_v.u >> 31);
-}
-#define isnan(x)      _libsel_isnanf((float)(x))
-#define isinf(x)      _libsel_isinff((float)(x))
+#define _LIBSEL_FLOAT_BITS(x) (((union { float f; unsigned u; }){ .f = (float)(x) }).u)
+#define isnan(x)      ((_LIBSEL_FLOAT_BITS(x) & 0x7fffffffu) > 0x7f800000u)
+#define isinf(x)      ((_LIBSEL_FLOAT_BITS(x) & 0x7fffffffu) == 0x7f800000u)
 #define isfinite(x)   (!isnan(x) && !isinf(x))
-#define signbit(x)    _libsel_signbitf((float)(x))
+#define signbit(x)    ((int)(_LIBSEL_FLOAT_BITS(x) >> 31))
 #define fpclassify(x) (isnan(x) ? FP_NAN : \
                        isinf(x) ? FP_INFINITE : \
                        (x) == 0.0f ? FP_ZERO : FP_NORMAL)
