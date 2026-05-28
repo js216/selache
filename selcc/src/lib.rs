@@ -4223,8 +4223,16 @@ fn single_use_pure_local_candidates(
     let mut assigned = std::collections::HashSet::new();
     let mut address_taken = std::collections::HashSet::new();
     let mut decl_counts: HashMap<String, u32> = HashMap::new();
+    // Names mentioned in positions the header-only substitution cannot
+    // reach (nested control-flow bodies, sibling blocks). Substitution
+    // only rewrites same-level statement headers, so a local with any
+    // use in such a position must not be a candidate: removing its init
+    // after substituting only the reachable uses would orphan the
+    // unreachable read, leaving it to load an uninitialised stack slot.
+    let mut unreachable_mentions = std::collections::HashSet::new();
     for stmt in stmts {
         collect_same_level_local_facts(stmt, &mut uses, &mut assigned, &mut address_taken);
+        collect_unreachable_mentions(stmt, &mut unreachable_mentions);
         if let ast::Stmt::VarDecl { name, .. } = stmt {
             *decl_counts.entry(name.clone()).or_insert(0) += 1;
         }
@@ -4253,6 +4261,7 @@ fn single_use_pure_local_candidates(
             || (use_count != 1 && !(const_int_init && use_count >= 2))
             || assigned.contains(name)
             || address_taken.contains(name)
+            || unreachable_mentions.contains(name)
             || !expr_side_effect_free(init)
             || expr_mentions_name(init, name)
             || local_names
@@ -4422,6 +4431,145 @@ fn collect_same_level_local_facts(
         }
         ast::Stmt::Label(_, inner) => {
             collect_same_level_local_facts(inner, uses, assigned, address_taken);
+        }
+        ast::Stmt::Return(None)
+        | ast::Stmt::DefaultLabel
+        | ast::Stmt::Break
+        | ast::Stmt::Continue
+        | ast::Stmt::Goto(_)
+        | ast::Stmt::Asm(_)
+        | ast::Stmt::EnumDecl(_) => {}
+    }
+}
+
+/// Collect identifiers that appear in positions the header-only
+/// single-use substitution does NOT rewrite for a top-level statement:
+/// nested control-flow bodies (`if`/loop/`switch` bodies) and the
+/// contents of sibling blocks. `substitute_single_use_pure_locals`
+/// only rewrites same-level statement *headers* (and recurses through
+/// `for`-init / labeled-statement headers), so a local read in any of
+/// these positions cannot be substituted there. Removing its
+/// initializer after substituting only the reachable uses would orphan
+/// such a read, which would then load an uninitialised stack slot.
+fn collect_unreachable_mentions(stmt: &ast::Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        ast::Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for stmt in then_body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+            if let Some(body) = else_body {
+                for stmt in body {
+                    collect_stmt_all_ident_mentions(stmt, out);
+                }
+            }
+        }
+        ast::Stmt::While { body, .. }
+        | ast::Stmt::DoWhile { body, .. }
+        | ast::Stmt::Switch { body, .. } => {
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::For { init, body, .. } => {
+            // The for-init header is reachable by substitution, but any
+            // unreachable mentions *within* it (e.g. a nested block) are
+            // not; recurse so they are still disqualified.
+            if let Some(init) = init {
+                collect_unreachable_mentions(init, out);
+            }
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::Block(body) | ast::Stmt::DeclGroup(body) => {
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::Label(_, inner) => collect_unreachable_mentions(inner, out),
+        _ => {}
+    }
+}
+
+/// Insert every identifier mentioned anywhere in `stmt` (reads, write
+/// targets, address-of operands, nested statements) into `out`.
+fn collect_stmt_all_ident_mentions(stmt: &ast::Stmt, out: &mut std::collections::HashSet<String>) {
+    fn mention(expr: &ast::Expr, out: &mut std::collections::HashSet<String>) {
+        let mut m: HashMap<String, u32> = HashMap::new();
+        count_expr_ident_uses(expr, &mut m);
+        for name in m.into_keys() {
+            out.insert(name);
+        }
+    }
+    match stmt {
+        ast::Stmt::Return(Some(expr)) | ast::Stmt::Expr(expr) | ast::Stmt::CaseLabel(expr) => {
+            mention(expr, out);
+        }
+        ast::Stmt::VarDecl { init, vla_dim, .. } => {
+            if let Some(expr) = init {
+                mention(expr, out);
+            }
+            if let Some(expr) = vla_dim {
+                mention(expr, out);
+            }
+        }
+        ast::Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            mention(cond, out);
+            for stmt in then_body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+            if let Some(body) = else_body {
+                for stmt in body {
+                    collect_stmt_all_ident_mentions(stmt, out);
+                }
+            }
+        }
+        ast::Stmt::While { cond, body } | ast::Stmt::DoWhile { cond, body } => {
+            mention(cond, out);
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(init) = init {
+                collect_stmt_all_ident_mentions(init, out);
+            }
+            if let Some(expr) = cond {
+                mention(expr, out);
+            }
+            if let Some(expr) = step {
+                mention(expr, out);
+            }
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::Block(body) | ast::Stmt::DeclGroup(body) => {
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::Switch { expr, body } => {
+            mention(expr, out);
+            for stmt in body {
+                collect_stmt_all_ident_mentions(stmt, out);
+            }
+        }
+        ast::Stmt::Label(_, inner) => {
+            collect_stmt_all_ident_mentions(inner, out);
         }
         ast::Stmt::Return(None)
         | ast::Stmt::DefaultLabel

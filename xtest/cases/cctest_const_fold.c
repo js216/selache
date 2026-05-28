@@ -1,24 +1,16 @@
 // SPDX-License-Identifier: MIT
-// cctest_const_fold.c --- cctest case const_fold
 // Copyright (c) 2026 Jakob Kastelic
-
-/* @expect 0x50 */
-/* @exp_ticks 0xe */
-
-#include <float.h>
-#include <iso646.h>
-#include <limits.h>
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
+/* @expect 0x379c */
+/* @exp_ticks 0x3f8a */
 
 int test_main(void)
 {
-   const int a = 2 + 3;     /* 5 */
-   const int b = a * 4;     /* 20 */
-   const int c = b - a + 5; /* 20 */
-   return c * 4;            /* 80 = 0x50 */
+   unsigned int acc = 0;
+
+   for (unsigned int i = 0; i < 5000U; ++i) {
+      unsigned int folded = (12U * 34U) + (56U << 3) - (144U / 3U);
+      acc += folded + (i & 15U);
+   }
+
+   return (int)(acc & 0xffffU);
 }
