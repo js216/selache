@@ -157,6 +157,8 @@ pub enum MulOp {
     TrncMrbReg { rn: u16 },
     /// MRF = Rx * Ry (UUF)
     MrfMulUuf { rx: u16, ry: u16 },
+    /// MRF = Rx * Ry (UUI, unsigned integer)
+    MrfMulUui { rx: u16, ry: u16 },
     /// Fn = Fx * Fy (floating-point multiply)
     FMul { rn: u16, rx: u16, ry: u16 },
     /// Rn = MR0F (read MR register field)
@@ -978,6 +980,7 @@ fn encode_mul(op: &MulOp) -> Result<u32, EncodeError> {
         MulOp::MrfMulSsi { rx, ry } => (0x74, 0, rx, ry),
         MulOp::MrfMulSsf { rx, ry } => (0x7C, 0, rx, ry),
         MulOp::MrfMulUuf { rx, ry } => (0x4C, 0, rx, ry),
+        MulOp::MrfMulUui { rx, ry } => (0x44, 0, rx, ry),
         // mrb = Rx * Ry family.
         MulOp::MrbMulSsf { rx, ry } => (0x7E, 0, rx, ry),
         // Rn = mrf + Rx*Ry and accumulator-MAC variants.

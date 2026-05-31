@@ -20,8 +20,12 @@
 //   __divrem_u32. / __divrem_s32.
 //     In:  R4 = dividend,  R8 = divisor
 //     Out: R0 = quotient,  R1 = remainder
-//     Clobbers: R0, R1, R4, R5, R6, R8, R12
+//     Clobbers: R0, R1, R3, R4, R5, R6, R8
 //               (+ BTF, M7, M14, I12, LCNTR, ASTAT).
+//     Scratch is confined to caller-saved data registers (R3/R5/R6) plus
+//     the R4/R8 argument registers, so selcc's CALLEE_SAVED set (R8-R15,
+//     of which only the R8 argument is touched) survives the call. The
+//     selcc isel lowers `/` and `%` straight to these helpers.
 //
 //   __divrem_u64. / __divrem_s64.
 //     In:  R12:R13 = dividend low:high
@@ -73,14 +77,43 @@ __divrem_u32.:
       R8 = PASS R8;                    // test divisor's bit 31
       IF LT JUMP .u32_big_divisor;
 
+      // Fast path: dividend < divisor -> quotient 0, remainder = dividend.
+      // `R4 - R8` sets AC = 1 when there is no borrow (R4 >= R8); AC = 0
+      // means R4 < R8, so the 32-iteration shift/subtract loop can be
+      // skipped entirely. This collapses the very common small-value case
+      // (e.g. a uint16 dividend divided by a larger divisor) to a few
+      // instructions. R8 < 0x80000000 here, so the subtract cannot wrap.
+      R3 = R4 - R8;
+      IF AC JUMP .u32_div_loop;
+      R1 = R4;                         // remainder = dividend
+      R0 = 0;                          // quotient = 0
+      R2 = DM(M6, I7);
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+
+.u32_div_loop:
       R0 = 0;                          // quotient
       R1 = 0;                          // remainder
-      LCNTR = 32, DO .u32_loop_end UNTIL LCE;
+      // Leading-zero loop reduction: only the significant bits of the
+      // dividend need shifting in; the top `LEFTZ(R4)` bits are zero and
+      // would shift 0 into a still-zero remainder (remainder < divisor),
+      // contributing only zero quotient bits. Pre-shift the dividend so its
+      // most-significant set bit is at bit 31, then iterate exactly
+      // nbits = 32 - LEFTZ(R4) times. Reaching here implies R4 >= R8 >= 1, so
+      // R4 != 0, LEFTZ(R4) <= 31 and nbits >= 1 (a zero LCNTR would loop 2**32
+      // times -- see SHARC+ CPR 4-40). LEFTZ semantics: SHARC+ CPR 24-13.
+      R5 = LEFTZ R4;                   // count leading zeros of dividend
+      R6 = 32;
+      R6 = R6 - R5;                    // nbits = 32 - lz  (>= 1)
+      R4 = LSHIFT R4 BY R5;            // normalize: MSB-set bit to bit 31
+      LCNTR = R6, DO .u32_loop_end UNTIL LCE;
             R4 = R4 + R4;              // dividend << 1 (AC = old bit31)
             R1 = R1 + R1 + CI;         // remainder << 1 | old bit31
             R0 = R0 + R0;              // quotient << 1 (AC discarded)
-            R12 = R1 - R8;             // trial remainder - divisor
-            IF AC R1 = R12;            // commit if no borrow
+            R3 = R1 - R8;              // trial remainder - divisor
+            IF AC R1 = R3;             // commit if no borrow
 .u32_loop_end:
             IF AC R0 = BSET R0 BY 0;   // and set a new quotient bit
       R2 = DM(M6, I7);
@@ -91,10 +124,14 @@ __divrem_u32.:
 
 .u32_big_divisor:
       // R8 >= 0x80000000: quotient is 0 iff R4 < R8, else 1.
-      R12 = R4 - R8;
+      // Set up the defaults BEFORE the trial subtract: a `Rn = 0` load and
+      // any non-arithmetic op clears AC, so the AC-setting `R4 - R8` must be
+      // the instruction immediately preceding the `IF AC` tests (otherwise
+      // AC reads back 0 and the dividend>=divisor case wrongly returns q=0).
       R1 = R4;                         // default: remainder = dividend
       R0 = 0;                          // default: quotient = 0
-      IF AC R1 = R12;
+      R3 = R4 - R8;                    // AC = 1 when R4 >= R8 (no borrow)
+      IF AC R1 = R3;
       IF AC R0 = BSET R0 BY 0;
       R2 = DM(M6, I7);
       I12 = DM(M7, I6);
@@ -127,10 +164,13 @@ __divrem_s32.:
 
       DM(I7, M7) = R2;                 // spill caller's R2
 
-      R5 = R4;
-      R5 = ASHIFT R5 BY -31;           // dividend sign mask
-      R6 = R8;
-      R6 = ASHIFT R6 BY -31;           // divisor sign mask
+      // Sign masks (0 or -1). NOTE: the immediate-count shifter form
+      // `Rn = ASHIFT Rn BY -31` is miscompiled on this target and hangs the
+      // core, so use the register-count form (`ASHIFT Rn BY Rm`), which is
+      // the same instruction selcc emits for `>> 31` and is known good.
+      R3 = -31;                        // shift count for arithmetic >> 31
+      R5 = ASHIFT R4 BY R3;            // dividend sign mask
+      R6 = ASHIFT R8 BY R3;            // divisor sign mask
       R6 = R6 XOR R5;                  // quotient sign mask
 
       // abs(R4) if dividend was negative.
@@ -147,23 +187,43 @@ __divrem_s32.:
       // --- Inline unsigned 32-bit divmod (R4/R8 -> R0/R1). ---
       R8 = PASS R8;
       IF LT JUMP .s32_big_divisor;
+      // Fast path: |dividend| < |divisor| -> quotient 0, remainder = |dividend|.
+      // Sign fixups below still apply correctly (negating 0 stays 0, and the
+      // remainder takes the dividend's sign).
+      R3 = R4 - R8;
+      IF AC JUMP .s32_div_loop;
+      R0 = 0;
+      R1 = R4;
+      JUMP .s32_fixup_signs;
+.s32_div_loop:
+      // Leading-zero loop reduction (see __divrem_u32). R5/R6 hold the sign
+      // masks across the loop, so the lz/nbits scratch lives in R3 (a loop-
+      // body scratch that is not read until after LCNTR is loaded). Reaching
+      // here implies |R4| >= |R8| >= 1, so R4 != 0 and nbits >= 1.
+      R3 = LEFTZ R4;                   // count leading zeros of |dividend|
+      R4 = LSHIFT R4 BY R3;            // normalize MSB-set bit to bit 31
+      R0 = 32;
+      R0 = R0 - R3;                    // nbits = 32 - lz  (>= 1)
+      R3 = R0;                         // hold nbits for LCNTR
       R0 = 0;
       R1 = 0;
-      LCNTR = 32, DO .s32_loop_end UNTIL LCE;
+      LCNTR = R3, DO .s32_loop_end UNTIL LCE;
             R4 = R4 + R4;
             R1 = R1 + R1 + CI;
             R0 = R0 + R0;
-            R12 = R1 - R8;
-            IF AC R1 = R12;
+            R3 = R1 - R8;
+            IF AC R1 = R3;
 .s32_loop_end:
             IF AC R0 = BSET R0 BY 0;
       JUMP .s32_fixup_signs;
 
 .s32_big_divisor:
-      R12 = R4 - R8;
+      // Defaults BEFORE the trial subtract: `Rn = 0` clears AC, so the
+      // AC-setting subtract must immediately precede the `IF AC` tests.
       R1 = R4;
       R0 = 0;
-      IF AC R1 = R12;
+      R3 = R4 - R8;
+      IF AC R1 = R3;
       IF AC R0 = BSET R0 BY 0;
       // fall through
 
@@ -208,6 +268,66 @@ __divrem_s32.:
 __divrem_u64.:
       DM(I7, M7) = R2;
 
+      // Fast path: dividend (R13:R12) < divisor (R15:R14) -> quotient 0,
+      // remainder = dividend. A 64-bit subtract-with-borrow leaves AC = 1
+      // when dividend >= divisor (no borrow); AC = 0 means dividend is the
+      // smaller value, so the full 64-iteration divide can be skipped.
+      // This collapses the common "small value / larger value" case
+      // (e.g. 2 / 0xFFFFFFFB) to a handful of instructions.
+      R4 = R12 - R14;
+      R8 = R13 - R15 + CI - 1;
+      IF AC JUMP .u64_normal;
+      R14 = R12;
+      R15 = R13;
+      R12 = 0;
+      R13 = 0;
+      R2 = DM(M6, I7);
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+
+.u64_normal:
+      // Both operands fit in 32 bits -> reuse the proven shift/subtract
+      // loop body but only 32 iterations with the dividend pre-positioned
+      // in the high word, so its 32 significant bits are consumed (the
+      // top-32 zero iterations of the full loop are skipped). Reaching
+      // here means dividend >= divisor.
+      R4 = R13 OR R15;
+      IF NE JUMP .u64_full;
+      // Leading-zero loop reduction for the 32-bit-operand case. Only R5/R6
+      // are off-limits inside __divrem_u64 (not in its clobber set); use the
+      // loop's own scratch R4/R8 for lz/nbits since they are not read until
+      // after LCNTR is loaded. Reaching here means dividend (R12) >= divisor
+      // (R14) >= 1, so R12 != 0, LEFTZ(R12) <= 31 and nbits >= 1.
+      R4 = LEFTZ R12;            // leading zeros of 32-bit dividend
+      R13 = LSHIFT R12 BY R4;    // normalize dividend into high word, MSB@bit63
+      R8 = 32;
+      R8 = R8 - R4;              // nbits = 32 - lz  (>= 1)
+      R12 = 0;                   // quotient accumulator
+      R0 = 0;
+      R1 = 0;
+      LCNTR = R8, DO .u64_b32_end UNTIL LCE;
+            R12 = R12 + R12;
+            R13 = R13 + R13 + CI;
+            R0  = R0  + R0  + CI;
+            R1  = R1  + R1  + CI;
+            R4  = R0  - R14;
+            R8  = R1  - R15 + CI - 1;
+            IF AC R0 = R4;
+            IF AC R1 = R8;
+.u64_b32_end:
+            IF AC R12 = BSET R12 BY 0;
+      R14 = R0;                  // remainder low
+      R15 = R1;                  // remainder high (zero for 32-bit divisor)
+      R13 = 0;                   // quotient fits in 32 bits
+      R2 = DM(M6, I7);
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+
+.u64_full:
       R15 = PASS R15;
       IF LT JUMP .u64_big_divisor;
 
@@ -293,10 +413,12 @@ __divrem_u64.:
 __divrem_s64.:
       DM(I7, M7) = R2;
 
-      R8 = R13;
-      R8 = ASHIFT R8 BY -31;           // dividend sign
-      R4 = R15;
-      R4 = ASHIFT R4 BY -31;
+      // Sign masks via the register-count shifter form; the immediate-count
+      // `ASHIFT BY -31` is miscompiled on this target and hangs the core
+      // (see __divrem_s32).
+      R0 = -31;
+      R8 = ASHIFT R13 BY R0;           // dividend sign
+      R4 = ASHIFT R15 BY R0;           // divisor sign
       R4 = R4 XOR R8;                  // quotient sign
       DM(I7, M7) = R8;
       DM(I7, M7) = R4;
@@ -448,8 +570,10 @@ ___shl64.:
 // frame-link slot, so any argument passed in R2 would be silently
 // reinterpreted as the saved frame link by the wrapper's epilogue.
 
-// Signed 64-bit public wrappers are implemented in div32.c.
+// Signed 64-bit public wrappers (selcc divmod ABI), routed through the
+// assembly __divrem_s64 so they are immune to compiler miscompiles.
 .SECTION/PM seg_pmco_div64_asm;
+
 
 .___div64_asm.:
       DM(I7, M7) = R8;
@@ -487,6 +611,7 @@ ___shl64.:
       NOP;
 .___div64_asm..end:
       .type .___div64_asm.,STT_FUNC;
+
 
 .___mod64_asm.:
       DM(I7, M7) = R8;
@@ -631,15 +756,19 @@ ___div32.:
 
       .GLOBAL ___mod32.;
 ___mod32.:
-      DM(I7, M7) = R2;
+      DM(I7, M7) = R2;                 // caller's R2
+      DM(I7, M7) = R9;                 // R9 holds the dividend sign across loop
 
-      R0 = R4;
-      R0 = ASHIFT R0 BY -31;
-      R1 = R8;
-      R1 = ASHIFT R1 BY -31;
-      DM(I7, M7) = R0;
-      R1 = R1 XOR R0;
-      DM(I7, M7) = R1;
+      // Only the dividend's sign matters for C modulo (the quotient is
+      // discarded; sign(remainder) == sign(dividend)). Keep it in R9, which
+      // the unsigned shift/subtract core below does not clobber, so no stack
+      // reload of the mask is needed.
+      //
+      // The sign mask (0 or -1) is computed with the register-count shifter
+      // form `ASHIFT Rx BY Rm`; the immediate-count form `ASHIFT Rx BY -31`
+      // is miscompiled on this target and hangs the core (see __divrem_s32).
+      R3 = -31;
+      R9 = ASHIFT R4 BY R3;            // dividend sign mask
 
       R4 = PASS R4;
       IF GE JUMP .mod32_abs_div_done;
@@ -652,39 +781,51 @@ ___mod32.:
 
       R8 = PASS R8;
       IF LT JUMP .mod32_big_divisor;
+      // Fast path: |dividend| < |divisor| -> remainder = |dividend|.
+      R3 = R4 - R8;
+      IF AC JUMP .mod32_div_loop;
+      R1 = R4;
+      JUMP .mod32_fixup_signs;
+.mod32_div_loop:
       R0 = 0;
       R1 = 0;
-      LCNTR = 32, DO .mod32_loop_end UNTIL LCE;
+      // Leading-zero loop reduction (see __divrem_u32). R9 holds the dividend
+      // sign mask across the loop; R5/R6 are free scratch here. Reaching here
+      // implies |R4| >= |R8| >= 1, so R4 != 0 and nbits >= 1.
+      R5 = LEFTZ R4;
+      R6 = 32;
+      R6 = R6 - R5;                    // nbits = 32 - lz  (>= 1)
+      R4 = LSHIFT R4 BY R5;            // normalize MSB-set bit to bit 31
+      LCNTR = R6, DO .mod32_loop_end UNTIL LCE;
             R4 = R4 + R4;
             R1 = R1 + R1 + CI;
             R0 = R0 + R0;
-            R12 = R1 - R8;
-            IF AC R1 = R12;
+            R3 = R1 - R8;
+            IF AC R1 = R3;
 .mod32_loop_end:
             IF AC R0 = BSET R0 BY 0;
       JUMP .mod32_fixup_signs;
 
 .mod32_big_divisor:
-      R12 = R4 - R8;
-      R1 = R4;
-      R0 = 0;
-      IF AC R1 = R12;
-      IF AC R0 = BSET R0 BY 0;
+      // |divisor| >= 0x80000000: quotient is 0 or 1, remainder is |dividend|
+      // (q=0) or |dividend|-|divisor| (q=1). Set the default BEFORE the trial
+      // subtract: a register move (`R1 = R4`) CLEARS AC, so it must not sit
+      // between the AC-setting subtract and the `IF AC` test -- otherwise AC
+      // reads back 0 and |dividend| >= |divisor| (e.g. INT_MIN % INT_MIN)
+      // wrongly keeps the whole dividend instead of dividend-divisor.
+      R1 = R4;                         // default remainder = |dividend|
+      R3 = R4 - R8;                    // AC = 1 when |dividend| >= |divisor|
+      IF AC R1 = R3;
 
 .mod32_fixup_signs:
-      R12 = DM(M6, I7);
-      R8  = DM(2, I7);
-
-      R12 = PASS R12;
-      IF GE JUMP .mod32_q_done;
-      R0 = -R0;
-.mod32_q_done:
-      R8 = PASS R8;
-      IF GE JUMP .mod32_r_done;
-      R1 = -R1;
-.mod32_r_done:
+      // remainder is in R1; move to R0 and apply the dividend's sign.
       R0 = R1;
-      R2 = DM(3, I7);
+      R9 = PASS R9;
+      IF GE JUMP .mod32_r_done;
+      R0 = -R0;
+.mod32_r_done:
+      R9 = DM(1, I7);                  // restore R9
+      R2 = DM(2, I7);                  // restore caller's R2
       I12 = DM(M7, I6);
       JUMP (M14, I12) (DB);
       RFRAME;
@@ -712,14 +853,33 @@ ___umod32.:
       R8 = PASS R8;
       IF LT JUMP .umod32_big_divisor;
 
+      // Fast path: dividend < divisor -> remainder = dividend. `R4 - R8` sets
+      // AC = 1 when R4 >= R8 (no borrow); AC = 0 means R4 < R8. This also
+      // covers dividend == 0, guaranteeing the loop below runs only when
+      // R4 >= R8 >= 1 (so R4 != 0 and the leading-zero nbits is >= 1; a zero
+      // LCNTR would loop 2**32 times).
+      R3 = R4 - R8;
+      IF AC JUMP .umod32_div_loop;
+      R0 = R4;                         // remainder = dividend
+      R2 = DM(M6, I7);
+      I12 = DM(M7, I6);
+      JUMP (M14, I12) (DB);
+      RFRAME;
+      NOP;
+.umod32_div_loop:
       R0 = 0;
       R1 = 0;
-      LCNTR = 32, DO .umod32_loop_end UNTIL LCE;
+      // Leading-zero loop reduction (see __divrem_u32). R5/R6 are free scratch.
+      R5 = LEFTZ R4;
+      R6 = 32;
+      R6 = R6 - R5;                    // nbits = 32 - lz  (>= 1)
+      R4 = LSHIFT R4 BY R5;            // normalize MSB-set bit to bit 31
+      LCNTR = R6, DO .umod32_loop_end UNTIL LCE;
             R4 = R4 + R4;
             R1 = R1 + R1 + CI;
             R0 = R0 + R0;
-            R12 = R1 - R8;
-            IF AC R1 = R12;
+            R3 = R1 - R8;
+            IF AC R1 = R3;
 .umod32_loop_end:
             IF AC R0 = BSET R0 BY 0;
       R0 = R1;
@@ -730,10 +890,13 @@ ___umod32.:
       NOP;
 
 .umod32_big_divisor:
-      R12 = R4 - R8;
+      // `Rn = 0` clears AC, so the AC-setting subtract must immediately
+      // precede the `IF AC` test (dividend>=divisor would otherwise keep the
+      // full dividend instead of dividend-divisor).
       R1 = R4;
       R0 = 0;
-      IF AC R1 = R12;
+      R3 = R4 - R8;
+      IF AC R1 = R3;
       R0 = R1;
       R2 = DM(M6, I7);
       I12 = DM(M7, I6);

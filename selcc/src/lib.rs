@@ -98,9 +98,12 @@ pub fn compile_to_asm(src: &str, filename: &str, opts: &cli::Options) -> Result<
     fold_constant_exprs(&mut unit);
     unroll_transparent_crc_byte_loop(&mut unit);
     strip_transparent_crc_unused_args(&mut unit);
+    inline_guarded_safe_calls(&mut unit);
     inline_simple_static_fns(&mut unit);
     prune_dead_local_assignments(&mut unit);
     fold_constant_exprs(&mut unit);
+    eliminate_self_assignments(&mut unit);
+    promote_readonly_const_aggregate_locals(&mut unit);
     prune_unused_static_fns(&mut unit);
     let module = emit_asm::emit_module(&unit, opts.char_size)?;
     Ok(module.text)
@@ -668,7 +671,46 @@ fn substitute_bool_locals(unit: &mut ast::TranslationUnit) {
 fn substitute_single_use_pure_locals(unit: &mut ast::TranslationUnit) {
     let typedefs: HashMap<String, types::Type> = unit.typedefs.iter().cloned().collect();
     for f in &mut unit.functions {
-        substitute_single_use_pure_locals_in_stmts(&mut f.body, &typedefs);
+        let alias = FuncAliasInfo::for_function(f, &typedefs);
+        substitute_single_use_pure_locals_in_stmts(&mut f.body, &typedefs, &alias);
+    }
+}
+
+/// Function-wide facts used to reason about the legality of substituting a
+/// single-use pure local's initializer into its later use. The substitution
+/// moves the read of the init's operands past any statements between the decl
+/// and the use; that is only sound if nothing in between can write those
+/// operands. Beyond the direct (textual) modification check, two indirect
+/// channels matter:
+///   * a **non-local** operand (a global / file-scope object — anything not in
+///     `locals`) can be written by *any* called function; and
+///   * an operand whose address is taken *anywhere* in the function
+///     (`address_taken`) is aliasable, so a call or a store through a pointer
+///     could write it.
+struct FuncAliasInfo {
+    /// Names that are locals or parameters of this function. Anything an init
+    /// reads that is NOT in this set is treated as non-local (global).
+    locals: std::collections::HashSet<String>,
+    /// Names whose address is taken anywhere in the function body (aliasable).
+    address_taken: std::collections::HashSet<String>,
+}
+
+impl FuncAliasInfo {
+    fn for_function(f: &ast::Function, typedefs: &HashMap<String, types::Type>) -> Self {
+        let mut locals = std::collections::HashSet::new();
+        let mut volatile_locals = std::collections::HashSet::new();
+        collect_local_decl_names(&f.body, typedefs, &mut locals, &mut volatile_locals);
+        for (param_name, _) in &f.params {
+            locals.insert(param_name.clone());
+        }
+        let mut address_taken = std::collections::HashSet::new();
+        for stmt in &f.body {
+            collect_stmt_address_taken_idents(stmt, &mut address_taken);
+        }
+        FuncAliasInfo {
+            locals,
+            address_taken,
+        }
     }
 }
 
@@ -3139,8 +3181,19 @@ fn simplify_const_local_conditions_in_stmts(
                 name,
                 init: Some(init),
                 ty,
+                vla_dim,
                 ..
             } => {
+                // A variable mutated inside the initializer expression
+                // (e.g. `int t = (l = x)`) no longer holds its recorded
+                // constant after this statement; drop those env entries
+                // before recording the declared name.
+                let mut assigned = Vec::new();
+                collect_expr_assigned_names(init, &mut assigned);
+                if let Some(vexpr) = vla_dim {
+                    collect_expr_assigned_names(vexpr, &mut assigned);
+                }
+                clear_changed_const_env(env, assigned);
                 if let Some(replacement) = const_local_replacement_expr(ty, init, typedefs) {
                     env.insert(name.clone(), replacement);
                 } else {
@@ -3156,6 +3209,10 @@ fn simplify_const_local_conditions_in_stmts(
                 else_body,
             } => {
                 replace_ident_condition_with_const(cond, env);
+                // The condition is evaluated before either branch, so any
+                // variable it assigns (e.g. `if ((x = f()) ...)`) no longer
+                // holds its recorded constant inside the branch bodies.
+                clear_changed_const_env(env, expr_assigned_names(cond));
                 let mut then_env = env.clone();
                 simplify_const_local_conditions_in_stmts(then_body, &mut then_env, typedefs);
                 if let Some(body) = else_body {
@@ -3174,6 +3231,9 @@ fn simplify_const_local_conditions_in_stmts(
                 for name in stmt_assigned_names_in_stmts(body) {
                     body_env.remove(&name);
                 }
+                for name in expr_assigned_names(cond) {
+                    body_env.remove(&name);
+                }
                 simplify_const_local_conditions_in_stmts(body, &mut body_env, typedefs);
                 clear_changed_const_env(env, stmt_assigned_names(stmt));
             }
@@ -3188,6 +3248,9 @@ fn simplify_const_local_conditions_in_stmts(
                     loop_changed.extend(stmt_assigned_names(init));
                 }
                 if let Some(expr) = step {
+                    loop_changed.extend(expr_assigned_names(expr));
+                }
+                if let Some(expr) = cond {
                     loop_changed.extend(expr_assigned_names(expr));
                 }
                 if let Some(cond) = cond {
@@ -3214,6 +3277,7 @@ fn simplify_const_local_conditions_in_stmts(
             }
             Stmt::Switch { expr, body } => {
                 replace_ident_condition_with_const(expr, env);
+                clear_changed_const_env(env, expr_assigned_names(expr));
                 let mut body_env = env.clone();
                 simplify_const_local_conditions_in_stmts(body, &mut body_env, typedefs);
                 clear_changed_const_env(env, stmt_assigned_names(stmt));
@@ -3778,8 +3842,9 @@ struct PureLocalCandidate {
 fn substitute_single_use_pure_locals_in_stmts(
     stmts: &mut [ast::Stmt],
     typedefs: &HashMap<String, types::Type>,
+    alias: &FuncAliasInfo,
 ) {
-    let candidates = single_use_pure_local_candidates(stmts, typedefs);
+    let candidates = single_use_pure_local_candidates(stmts, typedefs, alias);
     if !candidates.is_empty() {
         let mut substituted = std::collections::HashSet::new();
         for (idx, stmt) in stmts.iter_mut().enumerate() {
@@ -3806,9 +3871,9 @@ fn substitute_single_use_pure_locals_in_stmts(
                 else_body,
                 ..
             } => {
-                substitute_single_use_pure_locals_in_stmts(then_body, typedefs);
+                substitute_single_use_pure_locals_in_stmts(then_body, typedefs, alias);
                 if let Some(body) = else_body {
-                    substitute_single_use_pure_locals_in_stmts(body, typedefs);
+                    substitute_single_use_pure_locals_in_stmts(body, typedefs, alias);
                 }
             }
             ast::Stmt::While { body, .. }
@@ -3816,21 +3881,23 @@ fn substitute_single_use_pure_locals_in_stmts(
             | ast::Stmt::Block(body)
             | ast::Stmt::DeclGroup(body)
             | ast::Stmt::Switch { body, .. } => {
-                substitute_single_use_pure_locals_in_stmts(body, typedefs);
+                substitute_single_use_pure_locals_in_stmts(body, typedefs, alias);
             }
             ast::Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
                     substitute_single_use_pure_locals_in_stmts(
                         std::slice::from_mut(init.as_mut()),
                         typedefs,
+                        alias,
                     );
                 }
-                substitute_single_use_pure_locals_in_stmts(body, typedefs);
+                substitute_single_use_pure_locals_in_stmts(body, typedefs, alias);
             }
             ast::Stmt::Label(_, inner) => {
                 substitute_single_use_pure_locals_in_stmts(
                     std::slice::from_mut(inner.as_mut()),
                     typedefs,
+                    alias,
                 );
             }
             ast::Stmt::Return(_)
@@ -3843,6 +3910,530 @@ fn substitute_single_use_pure_locals_in_stmts(
             | ast::Stmt::Goto(_)
             | ast::Stmt::Asm(_)
             | ast::Stmt::EnumDecl(_) => {}
+        }
+    }
+}
+
+/// Eliminate no-op self-assignments `x = x` (and `x = (A, x)` where the comma
+/// chain's value is `x`). csmith emits these frequently; for a struct/union
+/// `x` selcc would otherwise emit a multi-word self-copy on every execution.
+/// The store is dropped and replaced by the value expression so any side
+/// effects in the RHS (e.g. a call in `x = (f(), x)`) are preserved. Only
+/// applied when the target lvalue is side-effect-free (so the two evaluations
+/// name the same object) and non-volatile (so removing the write is not
+/// observable).
+fn eliminate_self_assignments(unit: &mut ast::TranslationUnit) {
+    let typedefs: HashMap<String, types::Type> = unit.typedefs.iter().cloned().collect();
+    let mut global_volatile: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for g in &unit.globals {
+        if type_is_volatile(&g.ty, &typedefs) {
+            global_volatile.insert(g.name.clone());
+        }
+    }
+    for f in &mut unit.functions {
+        let mut volatile_names = global_volatile.clone();
+        collect_volatile_local_names(&f.body, &typedefs, &mut volatile_names);
+        for s in &mut f.body {
+            rewrite_self_assigns_stmt(s, &volatile_names);
+        }
+    }
+}
+
+fn collect_volatile_local_names(
+    stmts: &[ast::Stmt],
+    typedefs: &HashMap<String, types::Type>,
+    out: &mut std::collections::HashSet<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::VarDecl { name, ty, .. } if type_is_volatile(ty, typedefs) => {
+                out.insert(name.clone());
+            }
+            ast::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_volatile_local_names(then_body, typedefs, out);
+                if let Some(b) = else_body {
+                    collect_volatile_local_names(b, typedefs, out);
+                }
+            }
+            ast::Stmt::While { body, .. }
+            | ast::Stmt::DoWhile { body, .. }
+            | ast::Stmt::Block(body)
+            | ast::Stmt::DeclGroup(body)
+            | ast::Stmt::Switch { body, .. } => {
+                collect_volatile_local_names(body, typedefs, out);
+            }
+            ast::Stmt::For { init, body, .. } => {
+                if let Some(i) = init {
+                    collect_volatile_local_names(std::slice::from_ref(i.as_ref()), typedefs, out);
+                }
+                collect_volatile_local_names(body, typedefs, out);
+            }
+            ast::Stmt::Label(_, inner) => {
+                collect_volatile_local_names(std::slice::from_ref(inner.as_ref()), typedefs, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The rightmost operand of a comma chain (the value the chain evaluates to).
+fn comma_tail(expr: &ast::Expr) -> &ast::Expr {
+    match expr {
+        ast::Expr::Comma(_, rhs) => comma_tail(rhs),
+        other => other,
+    }
+}
+
+fn self_assign_replacement(expr: &ast::Expr, volatile_names: &std::collections::HashSet<String>) -> bool {
+    if let ast::Expr::Assign { target, value } = expr {
+        if !expr_side_effect_free(target) {
+            return false;
+        }
+        if let Some(root) = lvalue_root_ident_lib(target) {
+            if volatile_names.contains(root) {
+                return false;
+            }
+        }
+        return comma_tail(value) == target.as_ref();
+    }
+    false
+}
+
+fn rewrite_self_assigns_stmt(stmt: &mut ast::Stmt, vol: &std::collections::HashSet<String>) {
+    use ast::Stmt;
+    match stmt {
+        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::CaseLabel(e) => rewrite_self_assigns_expr(e, vol),
+        Stmt::VarDecl { init, vla_dim, .. } => {
+            if let Some(e) = init {
+                rewrite_self_assigns_expr(e, vol);
+            }
+            if let Some(e) = vla_dim {
+                rewrite_self_assigns_expr(e, vol);
+            }
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            rewrite_self_assigns_expr(cond, vol);
+            for s in then_body {
+                rewrite_self_assigns_stmt(s, vol);
+            }
+            if let Some(b) = else_body {
+                for s in b {
+                    rewrite_self_assigns_stmt(s, vol);
+                }
+            }
+        }
+        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => {
+            rewrite_self_assigns_expr(cond, vol);
+            for s in body {
+                rewrite_self_assigns_stmt(s, vol);
+            }
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(i) = init {
+                rewrite_self_assigns_stmt(i, vol);
+            }
+            if let Some(c) = cond {
+                rewrite_self_assigns_expr(c, vol);
+            }
+            if let Some(st) = step {
+                rewrite_self_assigns_expr(st, vol);
+            }
+            for s in body {
+                rewrite_self_assigns_stmt(s, vol);
+            }
+        }
+        Stmt::Switch { expr, body } => {
+            rewrite_self_assigns_expr(expr, vol);
+            for s in body {
+                rewrite_self_assigns_stmt(s, vol);
+            }
+        }
+        Stmt::Block(body) | Stmt::DeclGroup(body) => {
+            for s in body {
+                rewrite_self_assigns_stmt(s, vol);
+            }
+        }
+        Stmt::Label(_, inner) => rewrite_self_assigns_stmt(inner, vol),
+        _ => {}
+    }
+}
+
+fn rewrite_self_assigns_expr(expr: &mut ast::Expr, vol: &std::collections::HashSet<String>) {
+    use ast::Expr;
+    // Recurse into children first.
+    match expr {
+        Expr::Assign { target, value } | Expr::CompoundAssign { target, value, .. } => {
+            rewrite_self_assigns_expr(target, vol);
+            rewrite_self_assigns_expr(value, vol);
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Index(lhs, rhs) | Expr::Comma(lhs, rhs) => {
+            rewrite_self_assigns_expr(lhs, vol);
+            rewrite_self_assigns_expr(rhs, vol);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Deref(operand)
+        | Expr::AddrOf(operand)
+        | Expr::Cast(_, operand)
+        | Expr::PreInc(operand)
+        | Expr::PreDec(operand)
+        | Expr::PostInc(operand)
+        | Expr::PostDec(operand)
+        | Expr::Member(operand, _)
+        | Expr::Arrow(operand, _)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => rewrite_self_assigns_expr(operand, vol),
+        Expr::Call { args, .. } => {
+            for a in args {
+                rewrite_self_assigns_expr(a, vol);
+            }
+        }
+        Expr::CallIndirect { func_expr, args } => {
+            rewrite_self_assigns_expr(func_expr, vol);
+            for a in args {
+                rewrite_self_assigns_expr(a, vol);
+            }
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            rewrite_self_assigns_expr(cond, vol);
+            rewrite_self_assigns_expr(then_expr, vol);
+            rewrite_self_assigns_expr(else_expr, vol);
+        }
+        Expr::InitList(items) => {
+            for e in items {
+                rewrite_self_assigns_expr(e, vol);
+            }
+        }
+        Expr::DesignatedInit { value, .. } => rewrite_self_assigns_expr(value, vol),
+        Expr::ArrayDesignator { index, value } => {
+            rewrite_self_assigns_expr(index, vol);
+            rewrite_self_assigns_expr(value, vol);
+        }
+        _ => {}
+    }
+    // Then transform this node if it is a self-assignment.
+    if self_assign_replacement(expr, vol) {
+        if let Expr::Assign { value, .. } = expr {
+            let v = std::mem::replace(value.as_mut(), Expr::IntLit(0, token::IntSuffix::None));
+            *expr = v;
+        }
+    }
+}
+
+/// Promote a const-initialized local aggregate that is never modified and
+/// whose address never escapes to a `static` local. Such a local is
+/// observably equivalent to `static const` — every automatic instance holds
+/// the same compile-time-constant values — so giving it static storage moves
+/// the initializer to a one-time load-time write in rodata/data instead of
+/// re-materializing it on every call (and, for a loop-local, every iteration).
+/// csmith emits many large const local arrays that are read but never written;
+/// re-initializing them per call/iteration is a dominant cost (e.g. a 12-entry
+/// `union[..]` rebuilt 29x per call).
+///
+/// Safety: only locals that are (1) aggregate with a fully-constant InitList,
+/// (2) never written (no assignment/`++`/`--` to the name or its
+/// elements/members), and (3) never address-escaped (no `&x`, never used bare
+/// so the array can't decay to a writable pointer) are promoted. The escape
+/// analysis treats *any* occurrence of the name other than the base of a
+/// read-only index/member access as unsafe, so a missed escape cannot make a
+/// writable alias point at the now-shared static.
+fn promote_readonly_const_aggregate_locals(unit: &mut ast::TranslationUnit) {
+    let typedefs: HashMap<String, types::Type> = unit.typedefs.iter().cloned().collect();
+    for f in &mut unit.functions {
+        let mut unsafe_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in &f.body {
+            collect_unsafe_aggregate_local_names_stmt(s, &mut unsafe_names);
+        }
+        mark_readonly_const_aggregates_static(&mut f.body, &unsafe_names, &typedefs, false);
+    }
+}
+
+/// Walk statements collecting local names that are unsafe to give static
+/// storage: written, address-taken, or used in any way other than a read-only
+/// index/member access (which would let the array decay to a writable pointer).
+fn collect_unsafe_aggregate_local_names_stmt(
+    stmt: &ast::Stmt,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use ast::Stmt;
+    match stmt {
+        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::CaseLabel(e) => {
+            collect_unsafe_aggregate_names_expr(e, out)
+        }
+        Stmt::VarDecl { init, vla_dim, .. } => {
+            if let Some(e) = init {
+                collect_unsafe_aggregate_names_expr(e, out);
+            }
+            if let Some(e) = vla_dim {
+                collect_unsafe_aggregate_names_expr(e, out);
+            }
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            collect_unsafe_aggregate_names_expr(cond, out);
+            for s in then_body {
+                collect_unsafe_aggregate_local_names_stmt(s, out);
+            }
+            if let Some(b) = else_body {
+                for s in b {
+                    collect_unsafe_aggregate_local_names_stmt(s, out);
+                }
+            }
+        }
+        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => {
+            collect_unsafe_aggregate_names_expr(cond, out);
+            for s in body {
+                collect_unsafe_aggregate_local_names_stmt(s, out);
+            }
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(i) = init {
+                collect_unsafe_aggregate_local_names_stmt(i, out);
+            }
+            if let Some(c) = cond {
+                collect_unsafe_aggregate_names_expr(c, out);
+            }
+            if let Some(st) = step {
+                collect_unsafe_aggregate_names_expr(st, out);
+            }
+            for s in body {
+                collect_unsafe_aggregate_local_names_stmt(s, out);
+            }
+        }
+        Stmt::Switch { expr, body } => {
+            collect_unsafe_aggregate_names_expr(expr, out);
+            for s in body {
+                collect_unsafe_aggregate_local_names_stmt(s, out);
+            }
+        }
+        Stmt::Block(body) | Stmt::DeclGroup(body) => {
+            for s in body {
+                collect_unsafe_aggregate_local_names_stmt(s, out);
+            }
+        }
+        Stmt::Label(_, inner) => collect_unsafe_aggregate_local_names_stmt(inner, out),
+        _ => {}
+    }
+}
+
+/// A name appearing here as the base of a read index/member chain is a safe
+/// read; recurse into index expressions but do not flag the base identifier.
+fn collect_unsafe_aggregate_names_read_base(
+    expr: &ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use ast::Expr;
+    match expr {
+        Expr::Ident(_) => {} // safe: base of a read-only access
+        Expr::Index(base, idx) => {
+            collect_unsafe_aggregate_names_read_base(base, out);
+            collect_unsafe_aggregate_names_expr(idx, out);
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => {
+            collect_unsafe_aggregate_names_read_base(base, out)
+        }
+        other => collect_unsafe_aggregate_names_expr(other, out),
+    }
+}
+
+fn collect_unsafe_aggregate_names_expr(
+    expr: &ast::Expr,
+    out: &mut std::collections::HashSet<String>,
+) {
+    use ast::Expr;
+    match expr {
+        // A bare identifier (not consumed as a read index/member base) lets an
+        // array decay to a pointer, so it could escape and be written.
+        Expr::Ident(name) => {
+            out.insert(name.clone());
+        }
+        Expr::Index(base, idx) => {
+            collect_unsafe_aggregate_names_read_base(base, out);
+            collect_unsafe_aggregate_names_expr(idx, out);
+        }
+        Expr::Member(base, _) | Expr::Arrow(base, _) => {
+            collect_unsafe_aggregate_names_read_base(base, out)
+        }
+        Expr::Assign { target, value } | Expr::CompoundAssign { target, value, .. } => {
+            if let Some(root) = lvalue_root_ident_lib(target) {
+                out.insert(root.clone());
+            }
+            collect_unsafe_aggregate_names_read_base(target, out);
+            collect_unsafe_aggregate_names_expr(value, out);
+        }
+        Expr::PreInc(t) | Expr::PreDec(t) | Expr::PostInc(t) | Expr::PostDec(t) => {
+            if let Some(root) = lvalue_root_ident_lib(t) {
+                out.insert(root.clone());
+            }
+            collect_unsafe_aggregate_names_read_base(t, out);
+        }
+        Expr::AddrOf(inner) => {
+            if let Some(root) = lvalue_root_ident_lib(inner) {
+                out.insert(root.clone());
+            }
+            collect_unsafe_aggregate_names_expr(inner, out);
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Comma(lhs, rhs) => {
+            collect_unsafe_aggregate_names_expr(lhs, out);
+            collect_unsafe_aggregate_names_expr(rhs, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Deref(operand)
+        | Expr::Cast(_, operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => collect_unsafe_aggregate_names_expr(operand, out),
+        Expr::Call { args, .. } => {
+            for a in args {
+                collect_unsafe_aggregate_names_expr(a, out);
+            }
+        }
+        Expr::CallIndirect { func_expr, args } => {
+            collect_unsafe_aggregate_names_expr(func_expr, out);
+            for a in args {
+                collect_unsafe_aggregate_names_expr(a, out);
+            }
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_unsafe_aggregate_names_expr(cond, out);
+            collect_unsafe_aggregate_names_expr(then_expr, out);
+            collect_unsafe_aggregate_names_expr(else_expr, out);
+        }
+        Expr::InitList(items) => {
+            for e in items {
+                collect_unsafe_aggregate_names_expr(e, out);
+            }
+        }
+        Expr::DesignatedInit { value, .. } => collect_unsafe_aggregate_names_expr(value, out),
+        Expr::ArrayDesignator { index, value } => {
+            collect_unsafe_aggregate_names_expr(index, out);
+            collect_unsafe_aggregate_names_expr(value, out);
+        }
+        _ => {}
+    }
+}
+
+fn lvalue_root_ident_lib(expr: &ast::Expr) -> Option<&String> {
+    match expr {
+        ast::Expr::Ident(name) => Some(name),
+        ast::Expr::Member(base, _)
+        | ast::Expr::Arrow(base, _)
+        | ast::Expr::Index(base, _)
+        | ast::Expr::Deref(base) => lvalue_root_ident_lib(base),
+        _ => None,
+    }
+}
+
+/// True if `expr` is a fully compile-time-constant aggregate/scalar initializer
+/// (nested InitLists of constant leaves), so it can be emitted as static data.
+fn is_fully_const_initializer(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::InitList(items) => items.iter().all(is_fully_const_initializer),
+        ast::Expr::DesignatedInit { value, .. } => is_fully_const_initializer(value),
+        ast::Expr::ArrayDesignator { index, value } => {
+            eval_const_int_expr(index).is_some() && is_fully_const_initializer(value)
+        }
+        _ => eval_const_int_expr(expr).is_some() || matches!(expr, ast::Expr::FloatLit(_)),
+    }
+}
+
+fn mark_readonly_const_aggregates_static(
+    stmts: &mut [ast::Stmt],
+    unsafe_names: &std::collections::HashSet<String>,
+    typedefs: &HashMap<String, types::Type>,
+    in_loop: bool,
+) {
+    for stmt in stmts {
+        match stmt {
+            // Only promote aggregates declared inside a loop: those are
+            // re-initialized on every iteration, so giving them static storage
+            // turns an O(iterations) cost into a single load-time write. A
+            // const aggregate at function scope is initialized only once per
+            // call and is better left automatic (small ones still fold to
+            // immediates), so it is not promoted.
+            ast::Stmt::VarDecl {
+                name,
+                ty,
+                init: Some(init),
+                is_static,
+                vla_dim: None,
+            } if in_loop && !*is_static => {
+                let resolved = resolve_optimizer_typedefs(ty, typedefs);
+                let is_aggregate = matches!(
+                    resolved,
+                    types::Type::Array(..) | types::Type::Struct { .. } | types::Type::Union { .. }
+                );
+                if is_aggregate
+                    && matches!(init, ast::Expr::InitList(_))
+                    && is_fully_const_initializer(init)
+                    && !unsafe_names.contains(name)
+                {
+                    *is_static = true;
+                }
+            }
+            ast::Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                mark_readonly_const_aggregates_static(then_body, unsafe_names, typedefs, in_loop);
+                if let Some(b) = else_body {
+                    mark_readonly_const_aggregates_static(b, unsafe_names, typedefs, in_loop);
+                }
+            }
+            ast::Stmt::While { body, .. } | ast::Stmt::DoWhile { body, .. } => {
+                mark_readonly_const_aggregates_static(body, unsafe_names, typedefs, true);
+            }
+            ast::Stmt::Block(body) | ast::Stmt::DeclGroup(body) | ast::Stmt::Switch { body, .. } => {
+                mark_readonly_const_aggregates_static(body, unsafe_names, typedefs, in_loop);
+            }
+            ast::Stmt::For { init, body, .. } => {
+                if let Some(i) = init {
+                    mark_readonly_const_aggregates_static(
+                        std::slice::from_mut(i.as_mut()),
+                        unsafe_names,
+                        typedefs,
+                        in_loop,
+                    );
+                }
+                mark_readonly_const_aggregates_static(body, unsafe_names, typedefs, true);
+            }
+            ast::Stmt::Label(_, inner) => {
+                mark_readonly_const_aggregates_static(
+                    std::slice::from_mut(inner.as_mut()),
+                    unsafe_names,
+                    typedefs,
+                    in_loop,
+                );
+            }
+            _ => {}
         }
     }
 }
@@ -4218,6 +4809,7 @@ fn local_assignment_root(expr: &ast::Expr) -> Option<String> {
 fn single_use_pure_local_candidates(
     stmts: &[ast::Stmt],
     typedefs: &HashMap<String, types::Type>,
+    alias: &FuncAliasInfo,
 ) -> HashMap<String, PureLocalCandidate> {
     let mut uses: HashMap<String, u32> = HashMap::new();
     let mut assigned = std::collections::HashSet::new();
@@ -4270,6 +4862,50 @@ fn single_use_pure_local_candidates(
         {
             continue;
         }
+        // Code-motion legality: substituting the init into its use moves the
+        // evaluation of the init's operands from the declaration point to the
+        // use point. That is only sound if none of the variables the init
+        // reads is modified on any statement strictly between the decl and the
+        // use. (E.g. `int t = a + b; a = b; b = t;` -- the intervening `a = b`
+        // reassigns `a`, so folding `t` into `b = t` yields `b = a + b` with
+        // the WRONG value of `a`.) A const-int init reads no operands at all,
+        // so it can never be invalidated this way; skip the scan for it.
+        if !const_int_init {
+            let mut init_reads: HashMap<String, u32> = HashMap::new();
+            count_expr_ident_uses(init, &mut init_reads);
+            // Direct (textual) modification of an operand between decl and use.
+            if init_reads
+                .keys()
+                .any(|operand| operand_modified_between_decl_and_use(stmts, idx, name, operand))
+            {
+                continue;
+            }
+            // Indirect modification through a call or a store-through-pointer.
+            // The init is already known side-effect-free (no call of its own),
+            // so the only way an operand it reads can change between decl and
+            // use is via aliasing on an intervening statement:
+            //   * a NON-LOCAL operand (global / file-scope: not in `locals`)
+            //     can be written by ANY called function;
+            //   * an operand whose ADDRESS IS TAKEN anywhere in the function is
+            //     aliasable, so a call OR a store through a pointer could write
+            //     it;
+            //   * the init reading memory through a deref / index (a load whose
+            //     object is not a named operand we can track) is likewise
+            //     clobberable by an intervening call or pointer store.
+            // When in doubt, disqualify: correctness beats firing the rewrite.
+            let init_reads_nonlocal = init_reads
+                .keys()
+                .any(|operand| !alias.locals.contains(operand.as_str()));
+            let init_reads_aliasable = init_reads
+                .keys()
+                .any(|operand| alias.address_taken.contains(operand.as_str()));
+            let init_reads_memory = expr_reads_memory(init);
+            if (init_reads_nonlocal || init_reads_aliasable || init_reads_memory)
+                && intervening_call_or_aliasing_store(stmts, idx, name)
+            {
+                continue;
+            }
+        }
         candidates.insert(
             name.clone(),
             PureLocalCandidate {
@@ -4283,6 +4919,266 @@ fn single_use_pure_local_candidates(
         );
     }
     candidates
+}
+
+/// Decide whether `operand` (a variable read by the candidate `name`'s
+/// initializer, declared at `decl_idx`) is modified on any statement that
+/// executes strictly between the candidate's declaration and its single
+/// substitutable use. The single use lives in a same-level statement header
+/// (uses inside nested control-flow bodies disqualify the candidate up front
+/// via `unreachable_mentions`), so the use site is the first same-level
+/// statement after the decl that mentions `name`. Any statement before that
+/// use that assigns, compound-assigns, increments/decrements, or takes the
+/// address of `operand` (possible aliasing) invalidates the code motion.
+///
+/// When the use cannot be located among the same-level headers (it must then
+/// live somewhere the substitution would not reach), be conservative and treat
+/// every intervening statement up to the end of the block as a barrier.
+fn operand_modified_between_decl_and_use(
+    stmts: &[ast::Stmt],
+    decl_idx: usize,
+    name: &str,
+    operand: &str,
+) -> bool {
+    let use_idx = stmts
+        .iter()
+        .enumerate()
+        .skip(decl_idx + 1)
+        .find(|(_, stmt)| stmt_header_mentions_name(stmt, name))
+        .map(|(i, _)| i)
+        .unwrap_or(stmts.len());
+    for stmt in stmts.iter().take(use_idx).skip(decl_idx + 1) {
+        if stmt_modifies_name(stmt, operand) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Locate the candidate `name`'s single substitutable use within `stmts` and
+/// decide whether any statement strictly between its declaration (`decl_idx`)
+/// and that use contains a **function call** or a **store through a pointer**
+/// (`*p = ...`, `p->m = ...`, `a[i] = ...` with an aliased base, or
+/// compound-assign / inc / dec of such an lvalue). Either could write a global,
+/// an address-taken (aliasable) object, or memory loaded by the init, so it is
+/// an aliasing barrier for those classes of operands. As with
+/// `operand_modified_between_decl_and_use`, if the use cannot be located among
+/// the same-level headers we conservatively scan to the end of the block.
+fn intervening_call_or_aliasing_store(stmts: &[ast::Stmt], decl_idx: usize, name: &str) -> bool {
+    let use_idx = stmts
+        .iter()
+        .enumerate()
+        .skip(decl_idx + 1)
+        .find(|(_, stmt)| stmt_header_mentions_name(stmt, name))
+        .map(|(i, _)| i)
+        .unwrap_or(stmts.len());
+    for stmt in stmts.iter().take(use_idx).skip(decl_idx + 1) {
+        if stmt_contains_call_expr(stmt) || stmt_contains_pointer_store(stmt) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if `expr` reads memory through a pointer (`*p`, `p->m`) or an index
+/// (`a[i]`) anywhere inside it. Such a load names no single tracked operand, so
+/// an intervening call or pointer store could clobber the object it reads.
+fn expr_reads_memory(expr: &ast::Expr) -> bool {
+    use ast::Expr;
+    match expr {
+        Expr::Deref(_) | Expr::Arrow(_, _) | Expr::Index(_, _) => true,
+        Expr::Unary { operand, .. }
+        | Expr::Cast(_, operand)
+        | Expr::PreInc(operand)
+        | Expr::PreDec(operand)
+        | Expr::PostInc(operand)
+        | Expr::PostDec(operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand)
+        | Expr::AddrOf(operand)
+        | Expr::Member(operand, _) => expr_reads_memory(operand),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Assign {
+            target: lhs,
+            value: rhs,
+        }
+        | Expr::CompoundAssign {
+            target: lhs,
+            value: rhs,
+            ..
+        }
+        | Expr::Comma(lhs, rhs) => expr_reads_memory(lhs) || expr_reads_memory(rhs),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_reads_memory(cond) || expr_reads_memory(then_expr) || expr_reads_memory(else_expr)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_reads_memory),
+        Expr::CallIndirect { func_expr, args } => {
+            expr_reads_memory(func_expr) || args.iter().any(expr_reads_memory)
+        }
+        Expr::Sizeof(_) => false,
+        Expr::InitList(items) => items.iter().any(expr_reads_memory),
+        Expr::DesignatedInit { value, .. } => expr_reads_memory(value),
+        Expr::ArrayDesignator { index, value } => {
+            expr_reads_memory(index) || expr_reads_memory(value)
+        }
+        Expr::IntLit(..)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::CharLit(_)
+        | Expr::Ident(_) => false,
+    }
+}
+
+/// True if `stmt` contains a store whose lvalue target is reached through a
+/// pointer/index (`*p`, `p->m`, `a[i]`), via assignment, compound assignment,
+/// or pre/post increment/decrement, anywhere including nested bodies. Such a
+/// store may alias a global, an address-taken object, or memory read by an
+/// init, so it is a code-motion barrier for those operand classes.
+fn stmt_contains_pointer_store(stmt: &ast::Stmt) -> bool {
+    use ast::Stmt;
+    match stmt {
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) | Stmt::CaseLabel(expr) => {
+            expr_contains_pointer_store(expr)
+        }
+        Stmt::VarDecl { init, vla_dim, .. } => {
+            init.as_ref().is_some_and(expr_contains_pointer_store)
+                || vla_dim.as_ref().is_some_and(expr_contains_pointer_store)
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            expr_contains_pointer_store(cond)
+                || then_body.iter().any(stmt_contains_pointer_store)
+                || else_body
+                    .as_ref()
+                    .is_some_and(|body| body.iter().any(stmt_contains_pointer_store))
+        }
+        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => {
+            expr_contains_pointer_store(cond) || body.iter().any(stmt_contains_pointer_store)
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            init.as_ref()
+                .is_some_and(|stmt| stmt_contains_pointer_store(stmt))
+                || cond.as_ref().is_some_and(expr_contains_pointer_store)
+                || step.as_ref().is_some_and(expr_contains_pointer_store)
+                || body.iter().any(stmt_contains_pointer_store)
+        }
+        Stmt::Block(body) | Stmt::DeclGroup(body) | Stmt::Switch { body, .. } => {
+            body.iter().any(stmt_contains_pointer_store)
+        }
+        Stmt::Label(_, inner) => stmt_contains_pointer_store(inner),
+        Stmt::Return(None)
+        | Stmt::DefaultLabel
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Goto(_)
+        | Stmt::Asm(_)
+        | Stmt::EnumDecl(_) => false,
+    }
+}
+
+/// True if `expr` performs a store through a pointer/index lvalue anywhere.
+fn expr_contains_pointer_store(expr: &ast::Expr) -> bool {
+    use ast::Expr;
+    let target_is_pointer_lvalue = |target: &ast::Expr| -> bool {
+        matches!(
+            target,
+            Expr::Deref(_) | Expr::Arrow(_, _) | Expr::Index(_, _)
+        )
+    };
+    match expr {
+        Expr::Assign { target, value } => {
+            target_is_pointer_lvalue(target)
+                || expr_contains_pointer_store(target)
+                || expr_contains_pointer_store(value)
+        }
+        Expr::CompoundAssign { target, value, .. } => {
+            target_is_pointer_lvalue(target)
+                || expr_contains_pointer_store(target)
+                || expr_contains_pointer_store(value)
+        }
+        Expr::PreInc(operand)
+        | Expr::PreDec(operand)
+        | Expr::PostInc(operand)
+        | Expr::PostDec(operand) => {
+            target_is_pointer_lvalue(operand) || expr_contains_pointer_store(operand)
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Cast(_, operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand)
+        | Expr::AddrOf(operand)
+        | Expr::Deref(operand)
+        | Expr::Member(operand, _)
+        | Expr::Arrow(operand, _) => expr_contains_pointer_store(operand),
+        Expr::Binary { lhs, rhs, .. } | Expr::Index(lhs, rhs) | Expr::Comma(lhs, rhs) => {
+            expr_contains_pointer_store(lhs) || expr_contains_pointer_store(rhs)
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_contains_pointer_store(cond)
+                || expr_contains_pointer_store(then_expr)
+                || expr_contains_pointer_store(else_expr)
+        }
+        Expr::Call { args, .. } => args.iter().any(expr_contains_pointer_store),
+        Expr::CallIndirect { func_expr, args } => {
+            expr_contains_pointer_store(func_expr) || args.iter().any(expr_contains_pointer_store)
+        }
+        Expr::Sizeof(_) => false,
+        Expr::InitList(items) => items.iter().any(expr_contains_pointer_store),
+        Expr::DesignatedInit { value, .. } => expr_contains_pointer_store(value),
+        Expr::ArrayDesignator { index, value } => {
+            expr_contains_pointer_store(index) || expr_contains_pointer_store(value)
+        }
+        Expr::IntLit(..)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::CharLit(_)
+        | Expr::Ident(_) => false,
+    }
+}
+
+/// True if `name` appears anywhere in `stmt` (header expressions and any
+/// nested bodies). Used to locate a candidate's single use site.
+fn stmt_header_mentions_name(stmt: &ast::Stmt, name: &str) -> bool {
+    let mut mentions = std::collections::HashSet::new();
+    collect_stmt_all_ident_mentions(stmt, &mut mentions);
+    mentions.contains(name)
+}
+
+/// True if executing `stmt` could write to (or alias, via address-of) the
+/// variable `operand`. Covers assignment, compound assignment, pre/post
+/// increment/decrement, and address-taken anywhere inside the statement,
+/// including nested control-flow bodies.
+fn stmt_modifies_name(stmt: &ast::Stmt, operand: &str) -> bool {
+    let mut assigned = Vec::new();
+    collect_stmt_assigned_names(stmt, &mut assigned);
+    if assigned.iter().any(|n| n == operand) {
+        return true;
+    }
+    let mut uses = HashMap::new();
+    let mut assigned_set = std::collections::HashSet::new();
+    let mut address_taken = std::collections::HashSet::new();
+    collect_same_level_local_facts(stmt, &mut uses, &mut assigned_set, &mut address_taken);
+    address_taken.contains(operand)
 }
 
 fn resolve_optimizer_typedefs(
@@ -6065,13 +6961,12 @@ fn eval_const_int_expr(expr: &ast::Expr) -> Option<i64> {
                 BinaryOp::Add => a.wrapping_add(b),
                 BinaryOp::Sub => a.wrapping_sub(b),
                 BinaryOp::Mul => a.wrapping_mul(b),
-                BinaryOp::Div if b != 0 => (a as i32).wrapping_div(b as i32) as i64,
-                BinaryOp::Mod if b != 0 => (a as i32).wrapping_rem(b as i32) as i64,
                 BinaryOp::BitAnd => a & b,
                 BinaryOp::BitOr => a | b,
                 BinaryOp::BitXor => a ^ b,
-                BinaryOp::Shl => (a as u32).wrapping_shl(b as u32) as i32 as i64,
-                BinaryOp::Shr => (a as i32).wrapping_shr(b as u32) as i64,
+                BinaryOp::Shl | BinaryOp::Shr => {
+                    return eval_const_shift(*op, lhs, a, b);
+                }
                 BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::Lt
@@ -6082,7 +6977,9 @@ fn eval_const_int_expr(expr: &ast::Expr) -> Option<i64> {
                 }
                 BinaryOp::LogAnd => i64::from(a != 0 && b != 0),
                 BinaryOp::LogOr => i64::from(a != 0 || b != 0),
-                BinaryOp::Div | BinaryOp::Mod => return None,
+                BinaryOp::Div | BinaryOp::Mod => {
+                    return eval_const_divmod(*op, lhs, rhs, a, b);
+                }
             })
         }
         _ => None,
@@ -6125,13 +7022,12 @@ fn eval_const_int_expr_with_env(
                 BinaryOp::Add => a.wrapping_add(b),
                 BinaryOp::Sub => a.wrapping_sub(b),
                 BinaryOp::Mul => a.wrapping_mul(b),
-                BinaryOp::Div if b != 0 => (a as i32).wrapping_div(b as i32) as i64,
-                BinaryOp::Mod if b != 0 => (a as i32).wrapping_rem(b as i32) as i64,
                 BinaryOp::BitAnd => a & b,
                 BinaryOp::BitOr => a | b,
                 BinaryOp::BitXor => a ^ b,
-                BinaryOp::Shl => (a as u32).wrapping_shl(b as u32) as i32 as i64,
-                BinaryOp::Shr => (a as i32).wrapping_shr(b as u32) as i64,
+                BinaryOp::Shl | BinaryOp::Shr => {
+                    return eval_const_shift(*op, lhs, a, b);
+                }
                 BinaryOp::Eq
                 | BinaryOp::Ne
                 | BinaryOp::Lt
@@ -6142,7 +7038,9 @@ fn eval_const_int_expr_with_env(
                 }
                 BinaryOp::LogAnd => i64::from(a != 0 && b != 0),
                 BinaryOp::LogOr => i64::from(a != 0 || b != 0),
-                BinaryOp::Div | BinaryOp::Mod => return None,
+                BinaryOp::Div | BinaryOp::Mod => {
+                    return eval_const_divmod(*op, lhs, rhs, a, b);
+                }
             })
         }
         _ => None,
@@ -6225,6 +7123,60 @@ fn eval_const_comparison(
         return Some(eval_u32_comparison(op, a as u32, b as u32));
     }
     Some(eval_signed_comparison(op, a, b))
+}
+
+/// Evaluate a constant `/` or `%` with the correct signedness and width
+/// derived from the operand types (C usual arithmetic conversions). The
+/// type-naive default of signed-32 silently mis-folds unsigned division
+/// (e.g. inlined `safe_div_func_uint32_t_u_u` bodies).
+fn eval_const_divmod(
+    op: ast::BinaryOp,
+    lhs: &ast::Expr,
+    rhs: &ast::Expr,
+    a: i64,
+    b: i64,
+) -> Option<i64> {
+    use ast::BinaryOp;
+    if b == 0 {
+        return None;
+    }
+    let common = match (const_int_expr_type(lhs), const_int_expr_type(rhs)) {
+        (Some(l), Some(r)) => Some(types::Type::usual_arithmetic_conversion(&l, &r)),
+        _ => None,
+    };
+    let unsigned = common.as_ref().is_some_and(types::Type::is_unsigned);
+    let long_long = common.as_ref().is_some_and(types::Type::is_long_long);
+    Some(match (op, unsigned, long_long) {
+        (BinaryOp::Div, false, false) => (a as i32).wrapping_div(b as i32) as i64,
+        (BinaryOp::Mod, false, false) => (a as i32).wrapping_rem(b as i32) as i64,
+        (BinaryOp::Div, true, false) => (a as u32).wrapping_div(b as u32) as i64,
+        (BinaryOp::Mod, true, false) => (a as u32).wrapping_rem(b as u32) as i64,
+        (BinaryOp::Div, false, true) => a.wrapping_div(b),
+        (BinaryOp::Mod, false, true) => a.wrapping_rem(b),
+        (BinaryOp::Div, true, true) => (a as u64).wrapping_div(b as u64) as i64,
+        (BinaryOp::Mod, true, true) => (a as u64).wrapping_rem(b as u64) as i64,
+        _ => return None,
+    })
+}
+
+/// Evaluate a constant `<<` or `>>` with the correct signedness/width of the
+/// (promoted) left operand. A right shift of an unsigned value is logical,
+/// not arithmetic; a 64-bit shift must not be truncated to 32 bits.
+fn eval_const_shift(op: ast::BinaryOp, lhs: &ast::Expr, a: i64, b: i64) -> Option<i64> {
+    use ast::BinaryOp;
+    let lty = const_int_expr_type(lhs).map(|t| t.integer_promoted());
+    let unsigned = lty.as_ref().is_some_and(types::Type::is_unsigned);
+    let long_long = lty.as_ref().is_some_and(types::Type::is_long_long);
+    let s = b as u32;
+    Some(match (op, unsigned, long_long) {
+        (BinaryOp::Shl, _, false) => (a as u32).wrapping_shl(s) as i32 as i64,
+        (BinaryOp::Shl, _, true) => (a as u64).wrapping_shl(s) as i64,
+        (BinaryOp::Shr, false, false) => (a as i32).wrapping_shr(s) as i64,
+        (BinaryOp::Shr, true, false) => (a as u32).wrapping_shr(s) as i64,
+        (BinaryOp::Shr, false, true) => a.wrapping_shr(s),
+        (BinaryOp::Shr, true, true) => (a as u64).wrapping_shr(s) as i64,
+        _ => return None,
+    })
 }
 
 fn eval_signed_comparison(op: ast::BinaryOp, a: i64, b: i64) -> i64 {
@@ -7120,6 +8072,341 @@ fn collect_all_ident_uses_in_expr(expr: &ast::Expr, uses: &mut std::collections:
         }
         Sizeof(_) | IntLit(..) | FloatLit(_) | ImagLit(_) | StringLit(_) | WideStringLit(_)
         | CharLit(_) => {}
+    }
+}
+
+/// A `static` csmith `safe_*` wrapper whose body is a single guarded
+/// `return (guard) ? p : (p OP q);` expression, pure over its parameters.
+struct GuardedHelper {
+    params: Vec<(String, crate::types::Type)>,
+    return_type: crate::types::Type,
+    body: ast::Expr,
+}
+
+/// Per-function generator state for guarded-helper inlining: a counter for
+/// fresh temp names and the temp declarations to prepend to the body.
+struct GuardedGen {
+    counter: usize,
+    decls: Vec<(String, crate::types::Type)>,
+}
+
+/// Inline csmith guarded `safe_*` wrappers (div/mod/shift bound-checks) at
+/// their call sites, binding each argument to a fresh function-scope temp
+/// evaluated exactly once via a comma-expression:
+///
+/// ```text
+///   safe_div(A, B)  ==>  (t0 = (T0)A, t1 = (T1)B, (T)((t1==0) ? t0 : t0/t1))
+/// ```
+///
+/// Temp-binding (rather than substituting the argument expressions directly)
+/// is what makes this correct when an argument has side effects and what
+/// avoids duplicating a multi-use parameter --- the previous direct-substitution
+/// path either bailed out (leaving the call overhead) or bloated the hot loop.
+fn inline_guarded_safe_calls(unit: &mut ast::TranslationUnit) {
+    use std::collections::HashMap;
+
+    let typedefs: HashMap<String, types::Type> = unit.typedefs.iter().cloned().collect();
+    let mut helpers: HashMap<String, GuardedHelper> = HashMap::new();
+    for f in &unit.functions {
+        if let Some(h) = guarded_safe_helper(f, &typedefs) {
+            helpers.insert(f.name.clone(), h);
+        }
+    }
+    if helpers.is_empty() {
+        return;
+    }
+
+    for f in &mut unit.functions {
+        let mut gen = GuardedGen {
+            counter: 0,
+            decls: Vec::new(),
+        };
+        for stmt in &mut f.body {
+            transform_guarded_stmt(stmt, &helpers, &mut gen);
+        }
+        if !gen.decls.is_empty() {
+            let mut decls: Vec<ast::Stmt> = gen
+                .decls
+                .into_iter()
+                .map(|(name, ty)| ast::Stmt::VarDecl {
+                    name,
+                    ty,
+                    init: None,
+                    is_static: false,
+                    vla_dim: None,
+                })
+                .collect();
+            decls.append(&mut f.body);
+            f.body = decls;
+        }
+    }
+}
+
+fn guarded_safe_helper(
+    f: &ast::Function,
+    typedefs: &std::collections::HashMap<String, types::Type>,
+) -> Option<GuardedHelper> {
+    if !f.is_static
+        || f.is_variadic
+        || !f.name.starts_with("safe_")
+        || f.params.is_empty()
+        || f.params.len() > 2
+    {
+        return None;
+    }
+    let [ast::Stmt::Return(Some(body))] = f.body.as_slice() else {
+        return None;
+    };
+    if !matches!(body, ast::Expr::Ternary { .. }) {
+        return None;
+    }
+    let params: std::collections::HashSet<&str> =
+        f.params.iter().map(|(name, _)| name.as_str()).collect();
+    if !guarded_pure_over_params(body, &params) || expr_mentions_name(body, &f.name) {
+        return None;
+    }
+    Some(GuardedHelper {
+        params: resolve_inline_params(&f.params, typedefs),
+        return_type: resolve_optimizer_typedefs(&f.return_type, typedefs),
+        body: body.clone(),
+    })
+}
+
+/// True when `expr` only reads the given parameters and integer/char
+/// constants through pure operators (no calls, assignments, or memory access).
+fn guarded_pure_over_params(expr: &ast::Expr, params: &std::collections::HashSet<&str>) -> bool {
+    use ast::Expr::*;
+    match expr {
+        Ident(name) => params.contains(name.as_str()),
+        IntLit(..) | CharLit(_) => true,
+        Cast(_, e) | Unary { operand: e, .. } => guarded_pure_over_params(e, params),
+        Binary { lhs, rhs, .. } => {
+            guarded_pure_over_params(lhs, params) && guarded_pure_over_params(rhs, params)
+        }
+        Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            guarded_pure_over_params(cond, params)
+                && guarded_pure_over_params(then_expr, params)
+                && guarded_pure_over_params(else_expr, params)
+        }
+        _ => false,
+    }
+}
+
+/// True for arguments that are free to duplicate into multiple parameter
+/// uses: integer/char constants (also exposing them to later constant
+/// folding). Identifiers are deliberately excluded so a possibly-`volatile`
+/// read is not duplicated --- they are bound to a single temp instead.
+fn is_trivially_duplicable(arg: &ast::Expr) -> bool {
+    match arg {
+        ast::Expr::IntLit(..) | ast::Expr::CharLit(_) => true,
+        ast::Expr::Cast(_, inner) => is_trivially_duplicable(inner),
+        _ => false,
+    }
+}
+
+fn build_guarded_inline(
+    h: &GuardedHelper,
+    args: &[ast::Expr],
+    gen: &mut GuardedGen,
+) -> ast::Expr {
+    use std::collections::HashMap;
+
+    let mut uses_map: HashMap<&str, usize> = HashMap::new();
+    count_ident_uses(&h.body, &mut uses_map);
+
+    let mut subst: HashMap<&str, ast::Expr> = HashMap::new();
+    // Side-effect prelude evaluated (left to right) before the body. Each entry
+    // is either a temp assignment `t = (T)arg` or a bare side-effecting arg
+    // whose value is discarded (parameter unused in the body).
+    let mut prelude: Vec<ast::Expr> = Vec::new();
+    for ((param, ty), arg) in h.params.iter().zip(args.iter()) {
+        let uses = uses_map.get(param.as_str()).copied().unwrap_or(0);
+        let pure = expr_side_effect_free(arg);
+        if (uses >= 2 && !is_trivially_duplicable(arg)) || (!pure && uses >= 1) {
+            let tname = format!("__sg_tmp{}", gen.counter);
+            gen.counter += 1;
+            gen.decls.push((tname.clone(), ty.clone()));
+            prelude.push(ast::Expr::Assign {
+                target: Box::new(ast::Expr::Ident(tname.clone())),
+                value: Box::new(inline_arg_expr(ty, arg)),
+            });
+            subst.insert(param.as_str(), ast::Expr::Ident(tname));
+        } else if uses >= 1 {
+            subst.insert(param.as_str(), inline_arg_expr(ty, arg));
+        } else if !pure {
+            // Unused parameter but the argument has side effects: keep it.
+            prelude.push(arg.clone());
+        }
+    }
+
+    let body_subst = substitute_inline_expr(&h.body, &subst);
+    let mut result = inline_return_expr(&h.return_type, body_subst);
+    for pre in prelude.into_iter().rev() {
+        result = ast::Expr::Comma(Box::new(pre), Box::new(result));
+    }
+    result
+}
+
+fn transform_guarded_expr(
+    expr: &mut ast::Expr,
+    helpers: &std::collections::HashMap<String, GuardedHelper>,
+    gen: &mut GuardedGen,
+) {
+    use ast::Expr::*;
+    match expr {
+        Unary { operand, .. }
+        | Deref(operand)
+        | AddrOf(operand)
+        | Cast(_, operand)
+        | PreInc(operand)
+        | PreDec(operand)
+        | PostInc(operand)
+        | PostDec(operand)
+        | RealPart(operand)
+        | ImagPart(operand)
+        | Member(operand, _)
+        | Arrow(operand, _) => transform_guarded_expr(operand, helpers, gen),
+        Binary { lhs, rhs, .. }
+        | Assign {
+            target: lhs,
+            value: rhs,
+        }
+        | CompoundAssign {
+            target: lhs,
+            value: rhs,
+            ..
+        }
+        | Index(lhs, rhs)
+        | Comma(lhs, rhs) => {
+            transform_guarded_expr(lhs, helpers, gen);
+            transform_guarded_expr(rhs, helpers, gen);
+        }
+        Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            transform_guarded_expr(cond, helpers, gen);
+            transform_guarded_expr(then_expr, helpers, gen);
+            transform_guarded_expr(else_expr, helpers, gen);
+        }
+        Call { args, .. } => {
+            for a in args.iter_mut() {
+                transform_guarded_expr(a, helpers, gen);
+            }
+        }
+        CallIndirect { func_expr, args } => {
+            transform_guarded_expr(func_expr, helpers, gen);
+            for a in args.iter_mut() {
+                transform_guarded_expr(a, helpers, gen);
+            }
+        }
+        InitList(items) => {
+            for it in items.iter_mut() {
+                transform_guarded_expr(it, helpers, gen);
+            }
+        }
+        DesignatedInit { value, .. } => transform_guarded_expr(value, helpers, gen),
+        ArrayDesignator { index, value } => {
+            transform_guarded_expr(index, helpers, gen);
+            transform_guarded_expr(value, helpers, gen);
+        }
+        Sizeof(_) | IntLit(..) | FloatLit(_) | ImagLit(_) | StringLit(_) | WideStringLit(_)
+        | CharLit(_) | Ident(_) => {}
+    }
+
+    if let Call { name, args } = expr {
+        if let Some(replacement) = fold_csmith_safe_const_call(name, args) {
+            // Preserve the existing constant folds (boolean shift -> 0,
+            // constant div/mod, ...) which are strictly better than inlining.
+            *expr = replacement;
+        } else if let Some(h) = helpers.get(name) {
+            if h.params.len() == args.len() {
+                *expr = build_guarded_inline(h, args, gen);
+            }
+        }
+    }
+}
+
+fn transform_guarded_stmt(
+    stmt: &mut ast::Stmt,
+    helpers: &std::collections::HashMap<String, GuardedHelper>,
+    gen: &mut GuardedGen,
+) {
+    use ast::Stmt::*;
+    match stmt {
+        Return(Some(e)) | Expr(e) | CaseLabel(e) => transform_guarded_expr(e, helpers, gen),
+        Return(None) | Break | Continue | Goto(_) | DefaultLabel | EnumDecl(_) | Asm(_) => {}
+        VarDecl { init, vla_dim, .. } => {
+            if let Some(e) = init {
+                transform_guarded_expr(e, helpers, gen);
+            }
+            if let Some(e) = vla_dim {
+                transform_guarded_expr(e, helpers, gen);
+            }
+        }
+        If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            transform_guarded_expr(cond, helpers, gen);
+            for s in then_body.iter_mut() {
+                transform_guarded_stmt(s, helpers, gen);
+            }
+            if let Some(eb) = else_body {
+                for s in eb.iter_mut() {
+                    transform_guarded_stmt(s, helpers, gen);
+                }
+            }
+        }
+        While { cond, body } => {
+            transform_guarded_expr(cond, helpers, gen);
+            for s in body.iter_mut() {
+                transform_guarded_stmt(s, helpers, gen);
+            }
+        }
+        DoWhile { body, cond } => {
+            for s in body.iter_mut() {
+                transform_guarded_stmt(s, helpers, gen);
+            }
+            transform_guarded_expr(cond, helpers, gen);
+        }
+        For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(i) = init {
+                transform_guarded_stmt(i, helpers, gen);
+            }
+            if let Some(c) = cond {
+                transform_guarded_expr(c, helpers, gen);
+            }
+            if let Some(st) = step {
+                transform_guarded_expr(st, helpers, gen);
+            }
+            for s in body.iter_mut() {
+                transform_guarded_stmt(s, helpers, gen);
+            }
+        }
+        Block(body) | DeclGroup(body) => {
+            for s in body.iter_mut() {
+                transform_guarded_stmt(s, helpers, gen);
+            }
+        }
+        Switch { expr, body } => {
+            transform_guarded_expr(expr, helpers, gen);
+            for s in body.iter_mut() {
+                transform_guarded_stmt(s, helpers, gen);
+            }
+        }
+        Label(_, inner) => transform_guarded_stmt(inner, helpers, gen),
     }
 }
 
@@ -9596,6 +10883,223 @@ fn collect_expr_refs(
 
 #[cfg(test)]
 mod tests {
+    /// Recursively search a statement slice for any read of identifier `name`
+    /// (an `Expr::Ident(name)` appearing anywhere, including nested bodies).
+    fn stmts_mention_ident(stmts: &[crate::ast::Stmt], name: &str) -> bool {
+        let mut out = std::collections::HashSet::new();
+        for stmt in stmts {
+            crate::collect_stmt_all_ident_mentions(stmt, &mut out);
+        }
+        out.contains(name)
+    }
+
+    /// Find the declaration of local `name` in a statement slice (searching
+    /// nested bodies) and report whether it still carries an initializer.
+    /// `substitute_single_use_pure_locals` drops a candidate's init only once
+    /// it has substituted the init into the use, so a retained init proves the
+    /// substitution did NOT fire.
+    fn decl_init_present(stmts: &[crate::ast::Stmt], name: &str) -> Option<bool> {
+        use crate::ast::Stmt;
+        for stmt in stmts {
+            match stmt {
+                Stmt::VarDecl {
+                    name: n, init, ..
+                } if n == name => return Some(init.is_some()),
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    if let Some(found) = decl_init_present(then_body, name) {
+                        return Some(found);
+                    }
+                    if let Some(body) = else_body {
+                        if let Some(found) = decl_init_present(body, name) {
+                            return Some(found);
+                        }
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. }
+                | Stmt::Block(body)
+                | Stmt::DeclGroup(body)
+                | Stmt::Switch { body, .. }
+                | Stmt::For { body, .. } => {
+                    if let Some(found) = decl_init_present(body, name) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Negative (load-bearing) test: the classic two-variable swap idiom
+    /// `int t = a + b; a = b; b = t;` must NOT have `t`'s init folded into the
+    /// `b = t` use. The intervening `a = b` reassigns `a`, which the init reads,
+    /// so substituting would compute `b = a + b` with the post-swap `a` and
+    /// miscompile fib's loop (returns 2^n instead of fib(n)). With the
+    /// interference check reverted this assertion fails: `t` gets substituted,
+    /// its init is dropped, and the use no longer mentions `t`.
+    #[test]
+    fn does_not_substitute_pure_local_across_interfering_assignment() {
+        let src = "int test_main(void) {
+                       int a = 0, b = 1;
+                       for (int i = 0; i < 10; i++) {
+                           int t = a + b;
+                           a = b;
+                           b = t;
+                       }
+                       return a;
+                   }";
+        let mut unit = crate::parse::parse(src).expect("parse swap idiom");
+        crate::substitute_single_use_pure_locals(&mut unit);
+        let body = &unit.functions[0].body;
+        assert_eq!(
+            decl_init_present(body, "t"),
+            Some(true),
+            "swap temporary `t` must keep its initializer (substitution must NOT fire \
+             because the intervening `a = b` clobbers an operand the init reads)"
+        );
+        assert!(
+            stmts_mention_ident(body, "t"),
+            "the `b = t` use must still reference `t`; folding `a + b` here miscompiles"
+        );
+    }
+
+    /// Positive test: when no operand of the init is modified between the decl
+    /// and its single use, the optimization must still fire (a retained init
+    /// here would be a perf regression). `int t = a + b; return t;` has no
+    /// interfering write, so `t` is folded away and its init dropped.
+    #[test]
+    fn substitutes_pure_local_without_interference() {
+        let src = "int f(int a, int b) {
+                       int t = a + b;
+                       return t;
+                   }";
+        let mut unit = crate::parse::parse(src).expect("parse safe single-use local");
+        crate::substitute_single_use_pure_locals(&mut unit);
+        let body = &unit.functions[0].body;
+        assert_eq!(
+            decl_init_present(body, "t"),
+            Some(false),
+            "safe single-use pure local `t` must still be substituted (init dropped)"
+        );
+        assert!(
+            !stmts_mention_ident(body, "t"),
+            "after substitution the use of `t` must be replaced by its init `a + b`"
+        );
+    }
+
+    /// Negative (load-bearing) test: an init that reads a GLOBAL must not be
+    /// folded across an intervening call, because the callee may write the
+    /// global. `int t = gg + 1; bump(); return t;` (with `bump` setting
+    /// `gg = 99`) must keep `t`'s init so the program returns `11` (the value
+    /// of `gg` at the decl), not `100`. The substitution treats the call as
+    /// transparent without the call/alias gate, so disabling
+    /// `intervening_call_or_aliasing_store` (or the `init_reads_nonlocal`
+    /// branch) makes this assertion fail: `t` is substituted, its init dropped,
+    /// and `return gg + 1` then reads the post-call `gg`.
+    #[test]
+    fn does_not_substitute_global_read_across_call() {
+        let src = "int gg = 10;
+                   void bump(void) { gg = 99; }
+                   int f(void) {
+                       int t = gg + 1;
+                       bump();
+                       return t;
+                   }";
+        let mut unit = crate::parse::parse(src).expect("parse global-read-across-call");
+        crate::substitute_single_use_pure_locals(&mut unit);
+        let f = unit
+            .functions
+            .iter()
+            .find(|fun| fun.name == "f")
+            .expect("function f");
+        assert_eq!(
+            decl_init_present(&f.body, "t"),
+            Some(true),
+            "global-reading temporary `t` must keep its initializer (substitution must \
+             NOT fire across the intervening `bump()` call which may write `gg`)"
+        );
+        assert!(
+            stmts_mention_ident(&f.body, "t"),
+            "the `return t` use must still reference `t`; folding `gg + 1` past `bump()` \
+             miscompiles (returns 100 instead of 11)"
+        );
+    }
+
+    /// Negative (load-bearing) test: an init that reads an ADDRESS-TAKEN
+    /// PARAMETER must not be folded across an intervening call, since the
+    /// callee may hold a pointer to it and write it. The escape (`stash(&a)`)
+    /// happens BEFORE the candidate decl, so the intervening `clobber()` call
+    /// does not itself mention `&a`, and `a` is a parameter (not a same-level
+    /// local), so neither the pre-existing direct-modification check nor the
+    /// "init reads another same-level local" exclusion catches it. Only the new
+    /// `init_reads_aliasable` + call gate does, so with the gate disabled this
+    /// assertion fails: `t` is substituted and `return a + 1` reads the
+    /// clobbered `a`.
+    #[test]
+    fn does_not_substitute_address_taken_local_read_across_call() {
+        let src = "int *g;
+                   void stash(int *p) { g = p; }
+                   void clobber(void) { *g = 99; }
+                   int f(int a) {
+                       stash(&a);
+                       int t = a + 1;
+                       clobber();
+                       return t;
+                   }";
+        let mut unit = crate::parse::parse(src).expect("parse addr-taken-read-across-call");
+        crate::substitute_single_use_pure_locals(&mut unit);
+        let f = unit
+            .functions
+            .iter()
+            .find(|fun| fun.name == "f")
+            .expect("function f");
+        assert_eq!(
+            decl_init_present(&f.body, "t"),
+            Some(true),
+            "temporary `t` reading the address-taken parameter `a` must keep its \
+             initializer (the intervening `clobber()` may write `a` through the escaped \
+             pointer stashed in `g`)"
+        );
+        assert!(
+            stmts_mention_ident(&f.body, "t"),
+            "the `return t` use must still reference `t`; folding `a + 1` past `clobber()` \
+             miscompiles"
+        );
+    }
+
+    /// Positive test: a safe local case with NO intervening call still
+    /// substitutes (the optimization must keep firing). `int t = a + b; c = d;
+    /// b = t;` reads only plain locals, none modified or aliased between decl
+    /// and use, and the intervening `c = d` is neither a call nor a pointer
+    /// store, so `t` is folded and its init dropped.
+    #[test]
+    fn substitutes_local_with_safe_intervening_assignment() {
+        let src = "int f(int a, int b, int c, int d) {
+                       int t = a + b;
+                       c = d;
+                       b = t;
+                       return b + c;
+                   }";
+        let mut unit = crate::parse::parse(src).expect("parse safe intervening assignment");
+        crate::substitute_single_use_pure_locals(&mut unit);
+        let body = &unit.functions[0].body;
+        assert_eq!(
+            decl_init_present(body, "t"),
+            Some(false),
+            "safe single-use pure local `t` must still be substituted (init dropped) when \
+             the only intervening statement is a plain local assignment"
+        );
+        assert!(
+            !stmts_mention_ident(body, "t"),
+            "after substitution the use of `t` must be replaced by its init `a + b`"
+        );
+    }
+
     #[test]
     fn folds_constant_call_to_static_switch_return_helper() {
         let src = "static unsigned int pick(unsigned int x) {
@@ -10097,9 +11601,27 @@ mod tests {
         let asm =
             crate::compile_to_asm(src, "keep-csmith-shift-count-effect.c", &Default::default())
                 .expect("compile keep-csmith-shift-count-effect");
+        // The comma-operator side effect `g = 1` must survive: the store of
+        // the constant 1 into `g` has to be emitted. Match on the store to
+        // `g.` of whichever register holds the constant rather than a fixed
+        // register name, since intra-block constant-load CSE may place the
+        // `1` in a different register than a bare load would.
+        let lines: Vec<&str> = asm.lines().map(str::trim).collect();
+        let stores_one_to_g = lines.iter().enumerate().any(|(i, line)| {
+            if let Some(reg) = line
+                .strip_prefix("DM (g.)=")
+                .and_then(|s| s.strip_suffix(';'))
+            {
+                // Find a `<reg> = 0x1;` definition before the store.
+                let def = format!("{reg} = 0x1;");
+                lines[..i].iter().rev().any(|l| *l == def)
+            } else {
+                false
+            }
+        });
         assert!(
-            asm.contains("DM (g.)=R1;"),
-            "shift-count comma side effect must be preserved:\n{}",
+            stores_one_to_g,
+            "shift-count comma side effect (g = 1) must be preserved:\n{}",
             asm
         );
     }

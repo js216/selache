@@ -707,6 +707,7 @@ fn assigned_in_stmts(stmts: &[Stmt]) -> HashSet<String> {
     set
 }
 
+
 fn invalidate_const_locals(ctx: &mut LowerCtx, names: &HashSet<String>) {
     for name in names {
         ctx.const_locals.remove(name);
@@ -4189,9 +4190,13 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let byte_size = target_ty
                     .as_ref()
                     .map_or(4, |t| crate::types::size_bytes_ctx(t, ctx));
+                let src_aligned = !lvalue_needs_unaligned_word_access(value, ctx);
+                let dst_aligned = !lvalue_needs_unaligned_word_access(target, ctx);
                 let src_addr = lower_struct_expr_addr(ctx, value)?;
                 let dst_addr = lower_lvalue_addr(ctx, target)?;
-                emit_struct_copy_exact(ctx, dst_addr, src_addr, byte_size);
+                emit_struct_copy_exact_aligned(
+                    ctx, dst_addr, src_addr, byte_size, src_aligned, dst_aligned,
+                );
                 let result = ctx.alloc_vreg();
                 ctx.emit(IrOp::Load(result, dst_addr, 0));
                 return Ok(result);
@@ -5422,20 +5427,15 @@ fn lower_comparison(
     is_unsigned: bool,
 ) -> Result<VReg> {
     let dst = ctx.alloc_vreg();
-    let zero = ctx.alloc_vreg();
     let one = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
+    // Materialise the boolean branchlessly: dst = 0, then a SHARC conditional
+    // compute sets dst = 1 when the relation holds. The immediate loads are
+    // emitted before the compare so they cannot clobber the flags the
+    // conditional move depends on (LoadImm does not touch ASTAT).
     ctx.emit(IrOp::LoadImm(one, 1));
+    ctx.emit(IrOp::LoadImm(dst, 0));
     let cond = emit_compare_for_condition(ctx, op, l, r, is_unsigned);
-
-    let lbl_true = ctx.alloc_label();
-    let lbl_end = ctx.alloc_label();
-    ctx.emit(IrOp::BranchCond(cond, lbl_true));
-    ctx.emit(IrOp::Copy(dst, zero));
-    ctx.emit(IrOp::Branch(lbl_end));
-    ctx.emit(IrOp::Label(lbl_true));
-    ctx.emit(IrOp::Copy(dst, one));
-    ctx.emit(IrOp::Label(lbl_end));
+    ctx.emit(IrOp::CondMove(dst, one, cond));
     Ok(dst)
 }
 
@@ -5516,29 +5516,6 @@ fn lower_comparison_64(
     Ok(dst)
 }
 
-fn lower_abs_64(ctx: &mut LowerCtx, src: VReg) -> VReg {
-    let dst = ctx.alloc_vreg_pair();
-    let zero_pair = ctx.alloc_vreg_pair();
-    ctx.emit(IrOp::LoadImm64(zero_pair, 0));
-    ctx.emit(IrOp::Cmp64(src, zero_pair));
-
-    let lbl_nonneg = ctx.alloc_label();
-    let lbl_end = ctx.alloc_label();
-    ctx.emit(IrOp::BranchCond(Cond::Ge, lbl_nonneg));
-    ctx.emit(IrOp::Neg64(dst, src));
-    ctx.emit(IrOp::Branch(lbl_end));
-    ctx.emit(IrOp::Label(lbl_nonneg));
-    ctx.emit(IrOp::Copy(dst, src));
-    ctx.emit(IrOp::Copy(dst + 1, src + 1));
-    ctx.emit(IrOp::Label(lbl_end));
-    dst
-}
-
-fn copy_pair(ctx: &mut LowerCtx, dst: VReg, src: VReg) {
-    ctx.emit(IrOp::Copy(dst, src));
-    ctx.emit(IrOp::Copy(dst + 1, src + 1));
-}
-
 fn lower_signed_divmod_64(
     ctx: &mut LowerCtx,
     dst: VReg,
@@ -5546,57 +5523,15 @@ fn lower_signed_divmod_64(
     rhs: VReg,
     want_remainder: bool,
 ) {
-    let zero_pair = ctx.alloc_vreg_pair();
-    ctx.emit(IrOp::LoadImm64(zero_pair, 0));
-    let zero = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(zero, 0));
-
-    let lhs_neg = ctx.alloc_vreg();
-    ctx.emit(IrOp::Cmp64(lhs, zero_pair));
-    let lhs_neg_true = ctx.alloc_label();
-    let lhs_neg_end = ctx.alloc_label();
-    ctx.emit(IrOp::BranchCond(Cond::Lt, lhs_neg_true));
-    ctx.emit(IrOp::Copy(lhs_neg, zero));
-    ctx.emit(IrOp::Branch(lhs_neg_end));
-    ctx.emit(IrOp::Label(lhs_neg_true));
-    let one = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(one, 1));
-    ctx.emit(IrOp::Copy(lhs_neg, one));
-    ctx.emit(IrOp::Label(lhs_neg_end));
-
-    let abs_lhs = lower_abs_64(ctx, lhs);
-    let abs_rhs = lower_abs_64(ctx, rhs);
-    let tmp = ctx.alloc_vreg_pair();
+    // Emit a single signed 64-bit runtime divide/modulo call. Doing the sign
+    // handling inline (abs + unsigned divide + conditional negate) needs many
+    // temporaries live across the divide call and miscompiles under register
+    // pressure; the runtime helper keeps caller pressure minimal.
     if want_remainder {
-        ctx.emit(IrOp::UMod64(tmp, abs_lhs, abs_rhs));
+        ctx.emit(IrOp::Mod64(dst, lhs, rhs));
     } else {
-        ctx.emit(IrOp::UDiv64(tmp, abs_lhs, abs_rhs));
+        ctx.emit(IrOp::Div64(dst, lhs, rhs));
     }
-    copy_pair(ctx, dst, tmp);
-
-    let negate = if want_remainder {
-        lhs_neg
-    } else {
-        let rhs_neg = ctx.alloc_vreg();
-        ctx.emit(IrOp::Cmp64(rhs, zero_pair));
-        let rhs_neg_true = ctx.alloc_label();
-        let rhs_neg_end = ctx.alloc_label();
-        ctx.emit(IrOp::BranchCond(Cond::Lt, rhs_neg_true));
-        ctx.emit(IrOp::Copy(rhs_neg, zero));
-        ctx.emit(IrOp::Branch(rhs_neg_end));
-        ctx.emit(IrOp::Label(rhs_neg_true));
-        ctx.emit(IrOp::Copy(rhs_neg, one));
-        ctx.emit(IrOp::Label(rhs_neg_end));
-        let sign = ctx.alloc_vreg();
-        ctx.emit(IrOp::BitXor(sign, lhs_neg, rhs_neg));
-        sign
-    };
-
-    ctx.emit(IrOp::Cmp(negate, zero));
-    let lbl_end = ctx.alloc_label();
-    ctx.emit(IrOp::BranchCond(Cond::Eq, lbl_end));
-    ctx.emit(IrOp::Neg64(dst, tmp));
-    ctx.emit(IrOp::Label(lbl_end));
 }
 
 fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
@@ -5606,6 +5541,18 @@ fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     ) {
         let dst = ctx.alloc_vreg();
         ctx.emit(IrOp::LoadImm(dst, i64::from(lhs != 0 && rhs != 0)));
+        return Ok(dst);
+    }
+
+    // Branchless: result = (lhs != 0) & (rhs != 0), when the right operand is
+    // safe to evaluate unconditionally.
+    if is_speculatable(rhs) {
+        let l = lower_expr(ctx, lhs)?;
+        let lb = if expr_is_boolean(lhs) { l } else { lower_bool_value(ctx, l) };
+        let r = lower_expr(ctx, rhs)?;
+        let rb = if expr_is_boolean(rhs) { r } else { lower_bool_value(ctx, r) };
+        let dst = ctx.alloc_vreg();
+        ctx.emit(IrOp::BitAnd(dst, lb, rb));
         return Ok(dst);
     }
 
@@ -5643,6 +5590,18 @@ fn lower_log_or(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     ) {
         let dst = ctx.alloc_vreg();
         ctx.emit(IrOp::LoadImm(dst, i64::from(lhs != 0 || rhs != 0)));
+        return Ok(dst);
+    }
+
+    // Branchless: result = (lhs != 0) | (rhs != 0), when the right operand is
+    // safe to evaluate unconditionally.
+    if is_speculatable(rhs) {
+        let l = lower_expr(ctx, lhs)?;
+        let lb = if expr_is_boolean(lhs) { l } else { lower_bool_value(ctx, l) };
+        let r = lower_expr(ctx, rhs)?;
+        let rb = if expr_is_boolean(rhs) { r } else { lower_bool_value(ctx, r) };
+        let dst = ctx.alloc_vreg();
+        ctx.emit(IrOp::BitOr(dst, lb, rb));
         return Ok(dst);
     }
 
@@ -6240,6 +6199,80 @@ fn const_scalar_compound_ptr_init(ctx: &LowerCtx, init: Option<&Expr>) -> Option
     }
     let value = const_local_i64_expr(ctx, item)?;
     Some((const_int_to_type(ctx, value, &resolved), resolved))
+}
+
+/// True if `expr` contains a raw `/` or `%`: unsafe to evaluate speculatively
+/// (the divisor may be zero on a path the source short-circuits away).
+fn expr_contains_raw_division(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary { op, lhs, rhs } => {
+            matches!(op, BinaryOp::Div | BinaryOp::Mod)
+                || expr_contains_raw_division(lhs)
+                || expr_contains_raw_division(rhs)
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf(operand)
+        | Expr::Deref(operand)
+        | Expr::Cast(_, operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand) => expr_contains_raw_division(operand),
+        Expr::Comma(a, b) | Expr::Index(a, b) => {
+            expr_contains_raw_division(a) || expr_contains_raw_division(b)
+        }
+        Expr::Member(b, _) | Expr::Arrow(b, _) => expr_contains_raw_division(b),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_contains_raw_division(cond)
+                || expr_contains_raw_division(then_expr)
+                || expr_contains_raw_division(else_expr)
+        }
+        _ => false,
+    }
+}
+
+/// True if `expr` can be evaluated unconditionally in place of a short-circuit
+/// operand: no side effects and no raw division (loads cannot fault here).
+fn is_speculatable(expr: &Expr) -> bool {
+    !expr_has_runtime_side_effect(expr) && !expr_contains_raw_division(expr)
+}
+
+/// True if `expr` already evaluates to a 0/1 boolean (so re-normalising it
+/// with `(expr != 0)` is redundant): a relational/equality compare, a logical
+/// connective, or a logical-not.
+fn expr_is_boolean(expr: &Expr) -> bool {
+    match expr {
+        Expr::Binary { op, .. } => matches!(
+            op,
+            BinaryOp::Lt
+                | BinaryOp::Gt
+                | BinaryOp::Le
+                | BinaryOp::Ge
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::LogAnd
+                | BinaryOp::LogOr
+        ),
+        Expr::Unary {
+            op: UnaryOp::LogNot,
+            ..
+        } => true,
+        Expr::Cast(_, inner) => expr_is_boolean(inner),
+        _ => false,
+    }
+}
+
+/// Materialise `(v != 0)` as a branchless 0/1 boolean via conditional move.
+fn lower_bool_value(ctx: &mut LowerCtx, v: VReg) -> VReg {
+    let dst = ctx.alloc_vreg();
+    let one = ctx.alloc_vreg();
+    ctx.emit(IrOp::LoadImm(one, 1));
+    ctx.emit(IrOp::LoadImm(dst, 0));
+    lower_compare_scalar_to_zero(ctx, v);
+    ctx.emit(IrOp::CondMove(dst, one, Cond::Ne));
+    dst
 }
 
 fn expr_has_runtime_side_effect(expr: &Expr) -> bool {
@@ -9492,6 +9525,26 @@ fn lower_ternary(
         return lower_ternary_arm(ctx, chosen, result_ty.as_ref(), result_is_64);
     }
 
+    // Branchless select for a 32-bit integer result whose arms are both safe
+    // to evaluate unconditionally: compute both arms, then a conditional move
+    // picks the right one based on the condition's flags. Removes the two
+    // branches a ternary otherwise needs (common in inlined shift guards).
+    let result_is_float = result_ty.as_ref().is_some_and(|t| t.is_float());
+    if !result_is_64
+        && !result_is_float
+        && is_speculatable(then_expr)
+        && is_speculatable(else_expr)
+    {
+        let tv = lower_ternary_arm(ctx, then_expr, result_ty.as_ref(), result_is_64)?;
+        let ev = lower_ternary_arm(ctx, else_expr, result_ty.as_ref(), result_is_64)?;
+        ctx.emit(IrOp::Copy(result, ev));
+        let c = lower_expr(ctx, cond)?;
+        lower_compare_scalar_to_zero(ctx, c);
+        ctx.emit(IrOp::CondMove(result, tv, Cond::Ne));
+        invalidate_const_locals(ctx, &branch_assigned);
+        return Ok(result);
+    }
+
     let else_label = ctx.alloc_label();
     let end_label = ctx.alloc_label();
 
@@ -9680,13 +9733,36 @@ fn emit_struct_copy(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, num_word
 /// this never rounds the object size up to a full word at the destination,
 /// so assigning `struct { short x; }` into a packed array element preserves
 /// the neighboring element that shares the same 32-bit storage word.
-fn emit_struct_copy_exact(ctx: &mut LowerCtx, dst_addr: VReg, src_addr: VReg, byte_size: u32) {
+/// Copy `byte_size` bytes from `src_addr` to `dst_addr`. When the source or
+/// destination is known to be word-aligned (`src_aligned` / `dst_aligned`),
+/// the word-sized chunks use plain aligned Load/Store instead of the
+/// shift-and-mask unaligned sequence — a large win for struct/union copies of
+/// word-aligned aggregates (e.g. an array element `g[i] = v`), which would
+/// otherwise emit ~7 instructions per word.
+fn emit_struct_copy_exact_aligned(
+    ctx: &mut LowerCtx,
+    dst_addr: VReg,
+    src_addr: VReg,
+    byte_size: u32,
+    src_aligned: bool,
+    dst_aligned: bool,
+) {
     let mut byte_off = 0;
     while byte_off + 4 <= byte_size {
         let src = add_byte_offset(ctx, src_addr, byte_off);
         let dst = add_byte_offset(ctx, dst_addr, byte_off);
-        let val = emit_unaligned_word_load(ctx, src);
-        emit_unaligned_word_store(ctx, dst, val);
+        let val = if src_aligned {
+            let v = ctx.alloc_vreg();
+            ctx.emit(IrOp::Load(v, src, 0));
+            v
+        } else {
+            emit_unaligned_word_load(ctx, src)
+        };
+        if dst_aligned {
+            ctx.emit(IrOp::Store(val, dst, 0));
+        } else {
+            emit_unaligned_word_store(ctx, dst, val);
+        }
         byte_off += 4;
     }
     if byte_off + 2 <= byte_size {
@@ -9797,9 +9873,13 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let byte_size = target_ty
                     .as_ref()
                     .map_or(4, |t| crate::types::size_bytes_ctx(t, ctx));
+                let src_aligned = !lvalue_needs_unaligned_word_access(value, ctx);
+                let dst_aligned = !lvalue_needs_unaligned_word_access(target, ctx);
                 let src_addr = lower_struct_expr_addr(ctx, value)?;
                 let dst_addr = lower_lvalue_addr(ctx, target)?;
-                emit_struct_copy_exact(ctx, dst_addr, src_addr, byte_size);
+                emit_struct_copy_exact_aligned(
+                    ctx, dst_addr, src_addr, byte_size, src_aligned, dst_aligned,
+                );
                 return Ok(dst_addr);
             }
 
@@ -10253,19 +10333,23 @@ fn narrow_int_to_dst(ctx: &mut LowerCtx, val: VReg, dst_ty: &Type) -> VReg {
     }
     let resolved = resolve_type_chain(dst_ty, ctx);
     let bits = dst_bytes * 8;
-    let mask = (1u32 << bits).wrapping_sub(1) as i64;
-    let masked = ctx.alloc_vreg();
-    let mask_v = ctx.alloc_vreg();
-    ctx.emit(IrOp::LoadImm(mask_v, mask));
-    ctx.emit(IrOp::BitAnd(masked, val, mask_v));
     if resolved.is_unsigned() {
+        let mask = (1u32 << bits).wrapping_sub(1) as i64;
+        let masked = ctx.alloc_vreg();
+        let mask_v = ctx.alloc_vreg();
+        ctx.emit(IrOp::LoadImm(mask_v, mask));
+        ctx.emit(IrOp::BitAnd(masked, val, mask_v));
         return masked;
     }
+    // Signed narrowing: (val << (32-bits)) >> (32-bits) arithmetic. The
+    // left shift already discards the high bits, so a pre-mask `val & 0xFF`
+    // / `& 0xFFFF` would be redundant --- skip it (saves an AND + immediate
+    // load per signed sub-int cast, which recurs heavily in inlined helpers).
     let shift = (32 - bits) as i64;
     let shifted_up = ctx.alloc_vreg();
     let shl_v = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(shl_v, shift));
-    ctx.emit(IrOp::Shl(shifted_up, masked, shl_v));
+    ctx.emit(IrOp::Shl(shifted_up, val, shl_v));
     let shr_v = ctx.alloc_vreg();
     ctx.emit(IrOp::LoadImm(shr_v, -shift));
     let dst = ctx.alloc_vreg();
@@ -12851,9 +12935,14 @@ mod tests {
         .unwrap()
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::LongLongToInt(..))));
-        assert!(ops.iter().any(|op| matches!(op, IrOp::BitAnd(..))));
+        // Signed narrowing sign-extends via Shl+Shr; the left shift discards
+        // the high bits, so no redundant pre-mask AND should be emitted.
         assert!(ops.iter().any(|op| matches!(op, IrOp::Shl(..))));
         assert!(ops.iter().any(|op| matches!(op, IrOp::Shr(..))));
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::BitAnd(..))),
+            "signed narrowing must not emit a redundant pre-mask AND"
+        );
     }
 
     #[test]
@@ -12890,7 +12979,10 @@ mod tests {
     }
 
     #[test]
-    fn lower_signed_long_long_div_uses_unsigned_helper() {
+    fn lower_signed_long_long_div_uses_runtime_helper() {
+        // Signed 64-bit division is emitted as a single ___div64 runtime call
+        // (IrOp::Div64). The earlier inline abs+unsigned-divide sequence needed
+        // too many values live across the divide and miscompiled.
         let src = "long long f(long long a, long long b) { return a / b; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(
@@ -12902,12 +12994,11 @@ mod tests {
         )
         .unwrap()
         .ops;
-        assert!(ops.iter().any(|op| matches!(op, IrOp::UDiv64(..))));
-        assert!(!ops.iter().any(|op| matches!(op, IrOp::Div64(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Div64(..))));
     }
 
     #[test]
-    fn lower_signed_long_long_mod_uses_unsigned_helper() {
+    fn lower_signed_long_long_mod_uses_runtime_helper() {
         let src = "long long f(long long a, long long b) { return a % b; }";
         let unit = parse::parse(src).unwrap();
         let ops = lower_function(
@@ -12919,8 +13010,7 @@ mod tests {
         )
         .unwrap()
         .ops;
-        assert!(ops.iter().any(|op| matches!(op, IrOp::UMod64(..))));
-        assert!(!ops.iter().any(|op| matches!(op, IrOp::Mod64(..))));
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Mod64(..))));
     }
 
     #[test]

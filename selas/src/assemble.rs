@@ -1305,8 +1305,15 @@ mod tests {
     fn assemble_str(source: &str) -> Vec<u8> {
         let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
         let tid = std::thread::current().id();
-        let dir_name = format!("selas_mt_{seq}_{tid:?}");
-        let dir = std::env::temp_dir().join(dir_name);
+        // Use the project-local fast_data/tmp scratch area rather than
+        // the system /tmp: /tmp is shared across users and AGENTS.md
+        // forbids touching it, and stale same-named dirs left there by
+        // other users made `create_dir_all` no-op onto a dir this test
+        // could not write into (flaky PermissionDenied). The process id
+        // keeps the path unique per run.
+        let dir_name = format!("selas_mt_{}_{seq}_{tid:?}", std::process::id());
+        let base = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp"));
+        let dir = base.join(dir_name);
         let _ = std::fs::create_dir_all(&dir);
         let input_path = dir.join("test.s");
         let output_path = dir.join("test.doj");

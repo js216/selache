@@ -95,7 +95,11 @@ mod tests {
 
     #[test]
     fn test_find_toolchain_root() {
-        let tmp = std::env::temp_dir().join("test_selache_root");
+        // Project-local scratch (fast_data/tmp), not the shared /tmp:
+        // a fixed name under /tmp collides with other users' leftovers
+        // and AGENTS.md forbids /tmp. The pid keeps it unique per run.
+        let tmp = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp"))
+            .join(format!("test_selache_root_{}", std::process::id()));
         let _ = std::fs::create_dir_all(tmp.join("libsel/include"));
         let _ = std::fs::create_dir_all(tmp.join("target/release"));
         let fake_exe = tmp.join("target/release/selas");

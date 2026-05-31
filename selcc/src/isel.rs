@@ -82,6 +82,18 @@ pub fn select_with_name(
         "function uses too many vregs to fit 64-bit shift scratch slots; \
          max_ir_vreg={max_ir_vreg}",
     );
+    // The inline 64-bit multiply needs 7 scratch registers. Like the
+    // FDiv and shift helpers it must use reserved vreg ids above the
+    // function's own max vreg; using hardcoded low ids (0..6) aliases
+    // live IR vregs (e.g. a 64-bit accumulator that is live across the
+    // multiply), which the regalloc then maps to the same physical
+    // register and the multiply silently clobbers.
+    let mul64_scratch_base: u16 = shift64_scratch_base + 7;
+    assert!(
+        mul64_scratch_base + 7 < 0x8000,
+        "function uses too many vregs to fit 64-bit multiply scratch slots; \
+         max_ir_vreg={max_ir_vreg}",
+    );
 
     // Fresh label allocator for isel-internal skip branches (e.g. the
     // 64-bit compare lowers `IF NE skip` over the lo half compare). The
@@ -174,75 +186,80 @@ pub fn select_with_name(
                 });
             }
 
+            IrOp::MulUH(dst, lhs, rhs) => {
+                // Unsigned multiply-high: MRF = lhs * rhs (UUI) puts the
+                // full 64-bit product in MRF; dst = MR1F reads the high
+                // 32 bits. Used by magic-number constant division.
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Mul(selinstr::encode::MulOp::MrfMulUui {
+                            rx: *lhs as u16,
+                            ry: *rhs as u16,
+                        }),
+                    },
+                    reloc: None,
+                });
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: target::COND_TRUE,
+                        compute: ComputeOp::Mul(selinstr::encode::MulOp::ReadMr1f {
+                            rn: *dst as u16,
+                        }),
+                    },
+                    reloc: None,
+                });
+            }
+
             IrOp::Div(dst, lhs, rhs) => {
-                // Signed 32-bit integer divide: runtime call to
-                // `__sel_div32_c` (shift-and-subtract). The earlier inline
-                // float-reciprocal path gave a 24-bit-mantissa answer
-                // whose TRUNC rounded 100000/1000 down to 99.
+                // Signed 32-bit integer divide: runtime call to the
+                // hand-written `___div32` core (tail-jumps `__divrem_s32`,
+                // a single hardware DO-loop with a non-negative fast path).
+                // Its scratch is confined to caller-saved registers, so it
+                // honours selcc's CALLEE_SAVED set -- far cheaper than the
+                // C `__sel_div32_c`, which made three nested helper calls
+                // around a software loop. (The earlier inline
+                // float-reciprocal path was wrong: TRUNC rounded
+                // 100000/1000 down to 99 -- this integer core avoids that.)
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs,
-                    "__sel_div32_c",
-                    *dst,
-                    *lhs,
-                    *rhs,
-                    &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___div32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UDiv(dst, lhs, rhs) => {
-                // Unsigned 32-bit integer divide: runtime call to `__sel_udiv32_c`.
+                // Unsigned 32-bit integer divide: runtime call to the
+                // `___udiv32` asm core (tail-jumps `__divrem_u32`).
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs,
-                    "__sel_udiv32_c",
-                    *dst,
-                    *lhs,
-                    *rhs,
-                    &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___udiv32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::Mod(dst, lhs, rhs) => {
-                // Signed 32-bit integer modulo: runtime call to `__sel_mod32_c`.
+                // Signed 32-bit integer modulo: runtime call to the
+                // `___mod32` asm core (inlined divrem + sign fixup).
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs,
-                    "__sel_mod32_c",
-                    *dst,
-                    *lhs,
-                    *rhs,
-                    &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___mod32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::UMod(dst, lhs, rhs) => {
-                // Unsigned 32-bit integer modulo: runtime call to `__sel_umod32_c`.
+                // Unsigned 32-bit integer modulo: runtime call to the
+                // `___umod32` asm core (inlined divrem, remainder in R0).
                 let mut ctx = CallSiteCtx {
                     func_name,
                     counter: &mut call_site_counter,
                     return_labels: &mut call_return_labels,
                 };
-                emit_runtime_call_32_divmod(
-                    &mut instrs,
-                    "__sel_umod32_c",
-                    *dst,
-                    *lhs,
-                    *rhs,
-                    &mut ctx,
-                );
+                emit_runtime_call_32_divmod(&mut instrs, "___umod32", *dst, *lhs, *rhs, &mut ctx);
             }
 
             IrOp::BitAnd(dst, lhs, rhs) => {
@@ -1251,6 +1268,21 @@ pub fn select_with_name(
                 });
             }
 
+            IrOp::CondMove(dst, src, cond) => {
+                // IF cond Rn = Rx: branchless conditional move. The condition
+                // tests the flags left by the preceding Cmp/UCmp.
+                instrs.push(MachInstr {
+                    instr: Instruction::Compute {
+                        cond: ir_cond_to_sharc(*cond),
+                        compute: ComputeOp::Alu(AluOp::Pass {
+                            rn: *dst as u16,
+                            rx: *src as u16,
+                        }),
+                    },
+                    reloc: None,
+                });
+            }
+
             IrOp::Label(label) => {
                 label_positions.push((*label, instrs.len()));
             }
@@ -2115,7 +2147,7 @@ pub fn select_with_name(
 
             IrOp::Mul64(dst, lhs, rhs) => {
                 // Inline 64-bit multiply (low 64 bits of product).
-                emit_inline_mul_64(&mut instrs, *dst, *lhs, *rhs);
+                emit_inline_mul_64(&mut instrs, *dst, *lhs, *rhs, mul64_scratch_base);
             }
 
             IrOp::Div64(dst, lhs, rhs) => {
@@ -2756,107 +2788,117 @@ fn emit_indirect_access(
 /// for the low 64 bits of a 64x64 multiply is irrelevant: in two's
 /// complement, multiplication truncated to `N` bits produces the same
 /// bit pattern for signed and unsigned operands.
-fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32) {
+fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32, scratch_base: u16) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;
     let lhs_hi = (lhs + 1) as u16;
     let rhs_lo = rhs as u16;
     let rhs_hi = (rhs + 1) as u16;
-    // Move args into R0 = lhs_lo, R1 = lhs_hi, R2 = rhs_lo, R3 = rhs_hi.
-    if lhs_lo != 0 {
-        instrs.push(MachInstr::compute_pass(0, lhs_lo));
+    // Reserved scratch registers (above the function's max vreg) so the
+    // multiply cannot alias a live IR vreg. r0:r1 hold the result.
+    let r0 = scratch_base;
+    let r1 = scratch_base + 1;
+    let r2 = scratch_base + 2;
+    let r3 = scratch_base + 3;
+    let r4 = scratch_base + 4;
+    let r5 = scratch_base + 5;
+    let r6 = scratch_base + 6;
+    // Move args into r0 = lhs_lo, r1 = lhs_hi, r2 = rhs_lo, r3 = rhs_hi.
+    if lhs_lo != r0 {
+        instrs.push(MachInstr::compute_pass(r0, lhs_lo));
     }
-    if lhs_hi != 1 {
-        instrs.push(MachInstr::compute_pass(1, lhs_hi));
+    if lhs_hi != r1 {
+        instrs.push(MachInstr::compute_pass(r1, lhs_hi));
     }
-    if rhs_lo != 2 {
-        instrs.push(MachInstr::compute_pass(2, rhs_lo));
+    if rhs_lo != r2 {
+        instrs.push(MachInstr::compute_pass(r2, rhs_lo));
     }
-    if rhs_hi != 3 {
-        instrs.push(MachInstr::compute_pass(3, rhs_hi));
+    if rhs_hi != r3 {
+        instrs.push(MachInstr::compute_pass(r3, rhs_hi));
     }
-    // R4 = a_lo * b_hi  (low 32 bits of the cross term).
+    // r4 = a_lo * b_hi  (low 32 bits of the cross term).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Mul(MulOp::MulSsi {
-                rn: 4,
-                rx: 0,
-                ry: 3,
+                rn: r4,
+                rx: r0,
+                ry: r3,
             }),
         },
         reloc: None,
     });
-    // R5 = a_hi * b_lo  (low 32 bits of the other cross term).
+    // r5 = a_hi * b_lo  (low 32 bits of the other cross term).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Mul(MulOp::MulSsi {
-                rn: 5,
-                rx: 1,
-                ry: 2,
+                rn: r5,
+                rx: r1,
+                ry: r2,
             }),
         },
         reloc: None,
     });
-    // MRF = a_lo * b_lo as an unsigned 32x32 product.  The low words
-    // are limbs, not signed operands: `(-1LL) * 42` still needs
-    // 0xffffffff * 42 to contribute 41 to the high limb, not -1.
+    // MRF = a_lo * b_lo as an unsigned-integer 32x32 product.  The low
+    // words are limbs, not signed operands: `(-1LL) * 42` still needs
+    // 0xffffffff * 42 to contribute 41 to the high limb, not -1.  The
+    // (UUI) form (integer, not fractional) keeps the product un-shifted.
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::MrfMulUuf { rx: 0, ry: 2 }),
+            compute: ComputeOp::Mul(MulOp::MrfMulUui { rx: r0, ry: r2 }),
         },
         reloc: None,
     });
-    // R6 = MR1F  (high 32 bits of a_lo * b_lo).
+    // r6 = MR1F  (high 32 bits of a_lo * b_lo).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::ReadMr1f { rn: 6 }),
+            compute: ComputeOp::Mul(MulOp::ReadMr1f { rn: r6 }),
         },
         reloc: None,
     });
-    // R0 = MR0F  (low 32 bits of a_lo * b_lo, the final result_lo).
+    // r0 = MR0F  (low 32 bits of a_lo * b_lo, the final result_lo).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
-            compute: ComputeOp::Mul(MulOp::ReadMr0f { rn: 0 }),
+            compute: ComputeOp::Mul(MulOp::ReadMr0f { rn: r0 }),
         },
         reloc: None,
     });
-    // R1 = R4 + R5  (sum of the two cross terms).
+    // r1 = r4 + r5  (sum of the two cross terms).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Alu(AluOp::Add {
-                rn: 1,
-                rx: 4,
-                ry: 5,
+                rn: r1,
+                rx: r4,
+                ry: r5,
             }),
         },
         reloc: None,
     });
-    // R1 = R1 + R6  (add the high half of the low-low product,
+    // r1 = r1 + r6  (add the high half of the low-low product,
     // giving the final result_hi).
     instrs.push(MachInstr {
         instr: Instruction::Compute {
             cond: target::COND_TRUE,
             compute: ComputeOp::Alu(AluOp::Add {
-                rn: 1,
-                rx: 1,
-                ry: 6,
+                rn: r1,
+                rx: r1,
+                ry: r6,
             }),
         },
         reloc: None,
     });
-    // Copy result from R0:R1 to the destination vreg pair.
-    if dst_lo != 0 {
-        instrs.push(MachInstr::compute_pass(dst_lo, 0));
+    // Copy result from r0:r1 to the destination vreg pair.
+    if dst_lo != r0 {
+        instrs.push(MachInstr::compute_pass(dst_lo, r0));
     }
-    if dst_hi != 1 {
-        instrs.push(MachInstr::compute_pass(dst_hi, 1));
+    if dst_hi != r1 {
+        instrs.push(MachInstr::compute_pass(dst_hi, r1));
     }
 }
 
@@ -3861,6 +3903,7 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
             IrOp::StoreGlobal(a, _) | IrOp::WriteGlobal64(a, _) | IrOp::StackRestore(a) => bump(*a),
             IrOp::Copy(a, b)
             | IrOp::Copy64(a, b)
+            | IrOp::CondMove(a, b, _)
             | IrOp::Neg(a, b)
             | IrOp::Neg64(a, b)
             | IrOp::BitNot(a, b)
@@ -3878,6 +3921,7 @@ fn max_ir_vreg(ir: &[IrOp]) -> u32 {
             IrOp::Add(a, b, c)
             | IrOp::Sub(a, b, c)
             | IrOp::Mul(a, b, c)
+            | IrOp::MulUH(a, b, c)
             | IrOp::Div(a, b, c)
             | IrOp::UDiv(a, b, c)
             | IrOp::Mod(a, b, c)
@@ -4363,8 +4407,8 @@ mod tests {
             "unexpected relocation to legacy ___mul64 helper"
         );
         // The sequence must contain at least two SSI integer multiplies
-        // for the signed cross terms and one MRF-UUF multiply for the
-        // low-low limb product.
+        // for the signed cross terms and one MRF-UUI integer multiply
+        // for the low-low limb product.
         let ssi_count = result
             .instrs
             .iter()
@@ -4382,18 +4426,18 @@ mod tests {
             ssi_count >= 2,
             "expected at least two SSI multiplies for the cross terms, got {ssi_count}",
         );
-        let has_mrf_uuf = result.instrs.iter().any(|m| {
+        let has_mrf_uui = result.instrs.iter().any(|m| {
             matches!(
                 &m.instr,
                 Instruction::Compute {
-                    compute: ComputeOp::Mul(MulOp::MrfMulUuf { .. }),
+                    compute: ComputeOp::Mul(MulOp::MrfMulUui { .. }),
                     ..
                 }
             )
         });
         assert!(
-            has_mrf_uuf,
-            "missing MRF UUF multiply for the low-low limb product"
+            has_mrf_uui,
+            "missing MRF UUI integer multiply for the low-low limb product"
         );
     }
 

@@ -38,10 +38,24 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
         }
     }
 
-    // First pass: collect known immediates.
+    // Count how many times each vreg is defined. A vreg that is written by
+    // more than one op (e.g. a `LoadImm(dst, 0)` followed by a conditional
+    // `CondMove(dst, ...)`) is not a reliable compile-time constant even
+    // though one of its definitions is a LoadImm: folding its uses to that
+    // immediate would discard the conditional update.
+    let mut def_counts: HashMap<VReg, u32> = HashMap::new();
+    for op in ops {
+        for dst in dest_vregs(op) {
+            *def_counts.entry(dst).or_insert(0) += 1;
+        }
+    }
+
+    // First pass: collect known immediates, but only for single-definition vregs.
     for op in ops {
         if let IrOp::LoadImm(dst, val) = op {
-            known.insert(*dst, *val);
+            if def_counts.get(dst).copied().unwrap_or(0) == 1 {
+                known.insert(*dst, *val);
+            }
         }
     }
 
@@ -527,7 +541,21 @@ pub fn constant_fold(ops: &[IrOp]) -> Vec<IrOp> {
             }
 
             IrOp::LoadImm(dst, val) => {
-                known.insert(*dst, *val);
+                // Only a single-definition vreg is a reliable constant; a vreg
+                // also written by e.g. a CondMove must not be folded away.
+                if def_counts.get(dst).copied().unwrap_or(0) == 1 {
+                    known.insert(*dst, *val);
+                } else {
+                    known.remove(dst);
+                }
+                affine.remove(dst);
+                result.push(op.clone());
+            }
+
+            IrOp::CondMove(dst, _, _) => {
+                // Conditional write: invalidate any constant/affine knowledge
+                // of the destination (its value is no longer the init).
+                known.remove(dst);
                 affine.remove(dst);
                 result.push(op.clone());
             }
@@ -750,6 +778,242 @@ fn emit_signed_div_pow2(
     result.push(IrOp::Add(adjusted, lhs, bias));
     result.push(IrOp::LoadImm(div_shift, -(shift as i64)));
     result.push(IrOp::Shr(dst, adjusted, div_shift));
+}
+
+/// Unsigned "magic number" division parameters for divisor `d`
+/// (1 < d < 2^32, d not a power of two). Returns `(M, add, shift)` so
+/// that `n / d` equals `MULUH(M, n) >> shift` when `add` is false, or
+/// the overflow-safe average form when `add` is true. Faithful port of
+/// Hacker's Delight `magicu`; all arithmetic is 32-bit wrapping to
+/// match the original unsigned-C semantics.
+fn magicu(d: u32) -> (u32, bool, u32) {
+    let mut a = false;
+    let nc = u32::MAX.wrapping_sub((0u32.wrapping_sub(d)) % d);
+    let mut p: u32 = 31;
+    let mut q1: u32 = 0x8000_0000 / nc;
+    let mut r1: u32 = 0x8000_0000u32.wrapping_sub(q1.wrapping_mul(nc));
+    let mut q2: u32 = 0x7FFF_FFFF / d;
+    let mut r2: u32 = 0x7FFF_FFFFu32.wrapping_sub(q2.wrapping_mul(d));
+    loop {
+        p += 1;
+        if r1 >= nc.wrapping_sub(r1) {
+            q1 = q1.wrapping_mul(2).wrapping_add(1);
+            r1 = r1.wrapping_mul(2).wrapping_sub(nc);
+        } else {
+            q1 = q1.wrapping_mul(2);
+            r1 = r1.wrapping_mul(2);
+        }
+        if r2.wrapping_add(1) >= d.wrapping_sub(r2) {
+            if q2 >= 0x7FFF_FFFF {
+                a = true;
+            }
+            q2 = q2.wrapping_mul(2).wrapping_add(1);
+            r2 = r2.wrapping_mul(2).wrapping_add(1).wrapping_sub(d);
+        } else {
+            if q2 >= 0x8000_0000 {
+                a = true;
+            }
+            q2 = q2.wrapping_mul(2);
+            r2 = r2.wrapping_mul(2).wrapping_add(1);
+        }
+        let delta = d.wrapping_sub(1).wrapping_sub(r2);
+        if !(p < 64 && (q1 < delta || (q1 == delta && r1 == 0))) {
+            break;
+        }
+    }
+    (q2.wrapping_add(1), a, p - 32)
+}
+
+/// Emit the IR sequence computing the unsigned quotient `n / d` into
+/// `q` (d > 0). Power-of-two divisors lower to a shift; others use the
+/// magic-number multiply-high sequence.
+fn emit_quotient_into(out: &mut Vec<IrOp>, next: &mut VReg, q: VReg, n: VReg, d: u32) {
+    if d == 1 {
+        out.push(IrOp::Copy(q, n));
+        return;
+    }
+    if d.is_power_of_two() {
+        let k = d.trailing_zeros();
+        let sh = bump_fresh_vreg(next);
+        out.push(IrOp::LoadImm(sh, -(k as i64)));
+        out.push(IrOp::Lshr(q, n, sh));
+        return;
+    }
+    let (m, add, s) = magicu(d);
+    let mv = bump_fresh_vreg(next);
+    out.push(IrOp::LoadImm(mv, m as i64));
+    let t = bump_fresh_vreg(next);
+    out.push(IrOp::MulUH(t, n, mv)); // t = high 32 of (M * n)
+    if !add {
+        let sh = bump_fresh_vreg(next);
+        out.push(IrOp::LoadImm(sh, -(s as i64)));
+        out.push(IrOp::Lshr(q, t, sh)); // q = t >> s
+    } else {
+        // q = (t + ((n - t) >> 1)) >> (s - 1), computed overflow-safe.
+        let diff = bump_fresh_vreg(next);
+        out.push(IrOp::Sub(diff, n, t));
+        let one = bump_fresh_vreg(next);
+        out.push(IrOp::LoadImm(one, -1));
+        let half = bump_fresh_vreg(next);
+        out.push(IrOp::Lshr(half, diff, one));
+        let sum = bump_fresh_vreg(next);
+        out.push(IrOp::Add(sum, half, t));
+        let sh = bump_fresh_vreg(next);
+        out.push(IrOp::LoadImm(sh, -((s - 1) as i64)));
+        out.push(IrOp::Lshr(q, sum, sh));
+    }
+}
+
+/// Replace unsigned division / modulo by a compile-time-constant
+/// divisor with a magic-number multiply sequence, eliminating the slow
+/// `__sel_udiv32_c` / `__sel_umod32_c` software-divide calls. Tracks
+/// `LoadImm` values to recover constant divisors; the value map is
+/// cleared at control-flow boundaries so a stale constant from another
+/// path is never used.
+/// A dividend value handle for quotient CSE. Loads from the same frame
+/// slot (with no intervening store to that slot) carry the same value
+/// even though each load lands in a fresh vreg, so they key on the slot;
+/// other values key on their vreg.
+#[derive(Hash, PartialEq, Eq, Clone, Copy)]
+enum Dividend {
+    Slot(i32),
+    Vreg(VReg),
+}
+
+pub fn strength_reduce_constant_udivmod(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut known: HashMap<VReg, i64> = HashMap::new();
+    // vreg -> frame slot it was loaded from (base-0 Load).
+    let mut frame_src: HashMap<VReg, i32> = HashMap::new();
+    // (dividend, divisor) -> vreg holding `dividend / divisor`. Lets
+    // repeated `n/d` and a paired `n%d` (computed as n - (n/d)*d) share
+    // a single magic sequence.
+    let mut quot: HashMap<(Dividend, u32), VReg> = HashMap::new();
+    let mut next_vreg: VReg = ops
+        .iter()
+        .flat_map(|op| dest_vregs(op).into_iter().chain(source_vregs(op)))
+        .max()
+        .map_or(0, |v| v + 2);
+
+    let is_cfg_boundary = |op: &IrOp| {
+        matches!(
+            op,
+            IrOp::Label(_)
+                | IrOp::Branch(_)
+                | IrOp::BranchCond(..)
+                | IrOp::Call(..)
+                | IrOp::CallIndirect(..)
+                | IrOp::CallStruct { .. }
+                | IrOp::CallIndirectStruct { .. }
+                | IrOp::HardwareLoop { .. }
+                | IrOp::HardwareLoopReg { .. }
+        )
+    };
+
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        // Determine the dividend handle for a UDiv/UMod before any
+        // bookkeeping mutates frame_src for this op's destination.
+        let dividend = |n: &VReg, frame_src: &HashMap<VReg, i32>| match frame_src.get(n) {
+            Some(&slot) => Dividend::Slot(slot),
+            None => Dividend::Vreg(*n),
+        };
+
+        match op {
+            IrOp::LoadImm(dst, val) => {
+                known.insert(*dst, *val);
+                frame_src.remove(dst);
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                out.push(op.clone());
+            }
+            IrOp::Load(dst, 0, slot) => {
+                known.remove(dst);
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                frame_src.insert(*dst, *slot);
+                out.push(op.clone());
+            }
+            IrOp::UDiv(dst, n, c) if known.get(c).map(|v| *v as u32).is_some_and(|d| d != 0) => {
+                let d = *known.get(c).unwrap() as u32;
+                let key = (dividend(n, &frame_src), d);
+                // Drop stale state for the redefined dst BEFORE recording
+                // the new quotient, so the retain cannot delete it.
+                known.remove(dst);
+                frame_src.remove(dst);
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                if let Some(&pq) = quot.get(&key) {
+                    out.push(IrOp::Copy(*dst, pq));
+                } else {
+                    emit_quotient_into(&mut out, &mut next_vreg, *dst, *n, d);
+                    quot.insert(key, *dst);
+                }
+            }
+            IrOp::UMod(dst, n, c) if known.get(c).map(|v| *v as u32).is_some_and(|d| d != 0) => {
+                let d = *known.get(c).unwrap() as u32;
+                let key = (dividend(n, &frame_src), d);
+                // Drop stale state for the redefined dst BEFORE recording
+                // a new quotient, so the retain cannot delete it.
+                known.remove(dst);
+                frame_src.remove(dst);
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                if d == 1 {
+                    out.push(IrOp::LoadImm(*dst, 0));
+                } else if d.is_power_of_two() {
+                    let mask = bump_fresh_vreg(&mut next_vreg);
+                    out.push(IrOp::LoadImm(mask, (d - 1) as i64));
+                    out.push(IrOp::BitAnd(*dst, *n, mask));
+                } else {
+                    let q = if let Some(&pq) = quot.get(&key) {
+                        pq
+                    } else {
+                        let qv = bump_fresh_vreg(&mut next_vreg);
+                        emit_quotient_into(&mut out, &mut next_vreg, qv, *n, d);
+                        quot.insert(key, qv);
+                        qv
+                    };
+                    // r = n - q*d  (q*d fits in 32 bits since q*d <= n).
+                    let dv = bump_fresh_vreg(&mut next_vreg);
+                    out.push(IrOp::LoadImm(dv, d as i64));
+                    let qd = bump_fresh_vreg(&mut next_vreg);
+                    out.push(IrOp::Mul(qd, q, dv));
+                    out.push(IrOp::Sub(*dst, *n, qd));
+                }
+            }
+            IrOp::Store(_, 0, slot) | IrOp::Store64(_, 0, slot) => {
+                // The slot's value changed: drop slot-keyed quotients and
+                // the frame-source tags for vregs loaded from this slot
+                // (their values are still valid, but they must no longer
+                // be treated as representing the *current* slot value).
+                quot.retain(|(dv, _), _| *dv != Dividend::Slot(*slot));
+                frame_src.retain(|_, s| *s != *slot);
+                out.push(op.clone());
+            }
+            _ => {
+                if is_cfg_boundary(op) {
+                    known.clear();
+                    quot.clear();
+                    frame_src.clear();
+                } else {
+                    // Conservatively treat any indirect / global store as
+                    // possibly aliasing the frame: drop all slot-keyed
+                    // quotients and frame tags. Vreg-keyed entries stay
+                    // valid (those vregs already hold fixed values).
+                    if matches!(
+                        op,
+                        IrOp::Store(..) | IrOp::Store64(..) | IrOp::StoreGlobal(..) | IrOp::WriteGlobal64(..)
+                    ) {
+                        quot.retain(|(dv, _), _| matches!(dv, Dividend::Vreg(_)));
+                        frame_src.clear();
+                    }
+                    for d in dest_vregs(op) {
+                        known.remove(&d);
+                        frame_src.remove(&d);
+                        quot.retain(|(dv, _), q| *dv != Dividend::Vreg(d) && *q != d);
+                    }
+                }
+                out.push(op.clone());
+            }
+        }
+    }
+    out
 }
 
 fn fold_float_binary(op: &IrOp, lhs_bits: u32, rhs_bits: u32) -> Option<u32> {
@@ -1170,18 +1434,18 @@ fn escaped_frame_addr_slots(ops: &[IrOp]) -> HashSet<i32> {
             }
         }
 
-        if matches!(
-            op,
-            IrOp::Label(_)
-                | IrOp::Branch(_)
-                | IrOp::BranchCond(..)
-                | IrOp::HardwareLoop { .. }
-                | IrOp::HardwareLoopReg { .. }
-        ) {
-            facts.clear();
-        } else {
-            facts.update_after(op);
-        }
+        // Unlike the forwarding/canonicalization passes, escape detection must
+        // NOT drop its address facts at CFG boundaries. A `FrameAddr` result is
+        // a single-def vreg that keeps aliasing its slot until it is
+        // redefined; an escaping use can be in a different basic block than the
+        // `FrameAddr` (e.g. after `hoist_loop_invariant_frame_addr` lifts the
+        // address out of a loop, the indexing `Add` that escapes it lives below
+        // the loop-top label). Clearing facts at the label would lose the
+        // escape and let a later `forward_stack_loads`/DCE delete stores to a
+        // slot that is in fact aliased. `update_after` already kills the fact
+        // when the vreg is reassigned, so keeping facts across boundaries is
+        // sound and strictly more conservative (it can only mark more escapes).
+        facts.update_after(op);
     }
 
     escaped
@@ -1407,6 +1671,16 @@ pub fn forward_stack_loads(ops: &[IrOp]) -> Vec<IrOp> {
                     forwarded.push(IrOp::Copy(*dst, src));
                 } else if let Some(loc) = loc.filter(|loc| loc.byte_offset == 0) {
                     forwarded.push(IrOp::Load(*dst, 0, loc.slot));
+                    // Cache the loaded value so a later read of the same slot
+                    // (with no intervening store) forwards to this vreg
+                    // instead of re-loading from memory. The Load's dst is a
+                    // fresh single-def vreg, so it stably holds the slot value
+                    // until the next Store updates the cache or a CFG boundary
+                    // clears it. Only safe for non-escaped slots (no aliasing
+                    // indirect write can reach them).
+                    if !escaped_slots.contains(&loc.slot) {
+                        slot_values.insert(loc, *dst);
+                    }
                 } else {
                     forwarded.push(op.clone());
                 }
@@ -1678,11 +1952,31 @@ pub fn propagate_copies(ops: &[IrOp]) -> Vec<IrOp> {
                 at_block_start = false;
             }
             IrOp::Cmp(a, b) => {
-                out.push(IrOp::Cmp(resolve(&aliases, *a), resolve(&aliases, *b)));
+                let a = resolve(&aliases, *a);
+                let b = resolve(&aliases, *b);
+                // A compare sets the ASTAT flags consumed by a following
+                // CondMove. Flush any pending copies *before* it so no
+                // flag-clobbering copy can land between the compare and the
+                // conditional move.
+                flush_aliases(&mut aliases, &mut out);
+                out.push(IrOp::Cmp(a, b));
                 at_block_start = false;
             }
             IrOp::UCmp(a, b) => {
-                out.push(IrOp::UCmp(resolve(&aliases, *a), resolve(&aliases, *b)));
+                let a = resolve(&aliases, *a);
+                let b = resolve(&aliases, *b);
+                flush_aliases(&mut aliases, &mut out);
+                out.push(IrOp::UCmp(a, b));
+                at_block_start = false;
+            }
+            IrOp::CondMove(dst, src, cond) => {
+                // Conditional move depends on the flags set by the preceding
+                // compare; resolve its source but do not flush copies here
+                // (the compare already flushed), so nothing clobbers ASTAT
+                // between the compare and this move.
+                let src = resolve(&aliases, *src);
+                kill(&mut aliases, *dst);
+                out.push(IrOp::CondMove(*dst, src, *cond));
                 at_block_start = false;
             }
             IrOp::Load(dst, base, slot) => {
@@ -1777,6 +2071,116 @@ pub fn propagate_copies(ops: &[IrOp]) -> Vec<IrOp> {
                 flush_aliases(&mut aliases, &mut out);
                 out.push(op.clone());
                 at_block_start = false;
+            }
+        }
+    }
+
+    out
+}
+
+/// True if `op` ends (or interrupts) a basic block, so any cached
+/// constant-holding register must be considered dead afterwards.
+///
+/// This mirrors the conservative boundary set used by `propagate_copies`
+/// and `forward_stack_loads`: the SHARC+ register allocator flushes and
+/// clears its register map at every control-flow edge and across calls,
+/// so a vreg that held a constant before such a point may be allocated to
+/// a register that is reused/clobbered after it. Constant reuse must stay
+/// strictly within a single basic block.
+fn is_block_boundary(op: &IrOp) -> bool {
+    matches!(
+        op,
+        IrOp::Label(_)
+            | IrOp::Branch(_)
+            | IrOp::BranchCond(..)
+            | IrOp::Call(..)
+            | IrOp::CallIndirect(..)
+            | IrOp::CallStruct { .. }
+            | IrOp::CallIndirectStruct { .. }
+            | IrOp::Ret(_)
+            | IrOp::RetStruct { .. }
+            | IrOp::HardwareLoop { .. }
+            | IrOp::HardwareLoopReg { .. }
+            | IrOp::StackRestore(_)
+            | IrOp::StackAlloc(..)
+    )
+}
+
+/// Intra-block constant-load CSE.
+///
+/// The byte-gather idioms produced by csmith (mask/shift/or chains) reload
+/// the same small immediate constants — `0x3`, `0xFF`, `-0x4`, shift counts,
+/// etc. — into fresh registers on essentially every use. `constant_fold`
+/// only removes a `LoadImm` when it can fold the constant into a fully
+/// constant expression; a constant combined with a *runtime* value (the
+/// common `x & 0xFF`, `x >> 8` case) keeps its own `LoadImm`. In hot inner
+/// blocks this leaves thousands of redundant immediate loads.
+///
+/// This pass loads each distinct immediate once per basic block and rewrites
+/// later loads of the same value to a `Copy` from the first register. The
+/// `Copy` is then collapsed by `propagate_copies` + `dead_code_eliminate`,
+/// so the redundant `LoadImm`s disappear entirely.
+///
+/// Safety: the cache is cleared at every basic-block boundary
+/// (`is_block_boundary`) because the register allocator flushes its register
+/// map at control-flow edges; reusing a constant register across a boundary
+/// would read a stale/flushed register. A cached entry is also dropped if
+/// its defining vreg is redefined within the block (defensive — `LoadImm`
+/// destinations are normally fresh single-def vregs).
+pub fn cse_constant_loads(ops: &[IrOp]) -> Vec<IrOp> {
+    // Map immediate value -> vreg currently holding it in this block.
+    let mut live32: HashMap<i64, VReg> = HashMap::new();
+    // Map 64-bit immediate value -> lo vreg of the pair holding it.
+    let mut live64: HashMap<i64, VReg> = HashMap::new();
+    let mut out = Vec::with_capacity(ops.len());
+
+    for op in ops {
+        if is_block_boundary(op) {
+            live32.clear();
+            live64.clear();
+            out.push(op.clone());
+            continue;
+        }
+
+        match op {
+            IrOp::LoadImm(dst, val) => {
+                if let Some(&src) = live32.get(val) {
+                    if src != *dst {
+                        out.push(IrOp::Copy(*dst, src));
+                    } else {
+                        out.push(op.clone());
+                    }
+                } else {
+                    out.push(IrOp::LoadImm(*dst, *val));
+                    live32.insert(*val, *dst);
+                }
+            }
+            IrOp::LoadImm64(dst, val) => {
+                if let Some(&src) = live64.get(val) {
+                    if src != *dst {
+                        out.push(IrOp::Copy64(*dst, src));
+                    } else {
+                        out.push(op.clone());
+                    }
+                } else {
+                    out.push(IrOp::LoadImm64(*dst, *val));
+                    live64.insert(*val, *dst);
+                }
+            }
+            other => {
+                out.push(other.clone());
+            }
+        }
+
+        // Defensive: if this op redefines a vreg that a cache entry points
+        // at, that cached register no longer holds the constant. LoadImm
+        // destinations are normally fresh single-def vregs so this rarely
+        // fires, but a multiply-defined vreg (e.g. one later updated by a
+        // CondMove) must not be reused.
+        if !matches!(op, IrOp::LoadImm(..) | IrOp::LoadImm64(..)) {
+            for d in dest_vregs(op) {
+                live32.retain(|_, v| *v != d);
+                live64.retain(|_, v| *v != d && *v + 1 != d);
             }
         }
     }
@@ -1912,6 +2316,158 @@ pub fn remove_unreferenced_labels(ops: &[IrOp]) -> Vec<IrOp> {
         })
         .cloned()
         .collect()
+}
+
+/// Hoist loop-invariant `FrameAddr` computations out of software loops.
+///
+/// `FrameAddr(dst, off)` lowers to a three-instruction `I6=MODIFY(-k) /
+/// dst=I6 / I6=MODIFY(+k)` dance that materializes a frame-relative
+/// address into a data register. Its value depends only on the frame
+/// pointer `I6`, which never changes inside a function body, so the op
+/// is *always* loop-invariant: the same slot address is recomputed on
+/// every iteration. This pass moves such ops out to just before the
+/// enclosing loop's top label and deduplicates identical offsets, so the
+/// address is materialized once per loop entry instead of once per
+/// iteration.
+///
+/// Loops are recognized by the same `Label(top) ... Branch(top)`
+/// back-edge shape `detect_hardware_loops` uses; this runs *before* that
+/// pass, while loops are still in software form. Hoisting only extends a
+/// value's live range across the loop it is already used in every
+/// iteration of, so register pressure is essentially unchanged. Running
+/// to a fixpoint lets an address used in nested loops bubble outward one
+/// level at a time.
+pub fn hoist_loop_invariant_frame_addr(ops: &[IrOp]) -> Vec<IrOp> {
+    let mut result = ops.to_vec();
+    while let Some(next) = hoist_one_loop_frame_addr(&result) {
+        result = next;
+    }
+    result
+}
+
+fn hoist_one_loop_frame_addr(ops: &[IrOp]) -> Option<Vec<IrOp>> {
+    for (top_idx, op) in ops.iter().enumerate() {
+        let top_label = match op {
+            IrOp::Label(l) => *l,
+            _ => continue,
+        };
+        // Innermost back-edge: the first Branch(top_label) after the
+        // label. (Processing innermost-first keeps the body range tight;
+        // the fixpoint loop re-runs to hoist further out.)
+        let Some(back_edge_idx) = ops[top_idx + 1..]
+            .iter()
+            .position(|o| matches!(o, IrOp::Branch(l) if *l == top_label))
+            .map(|p| p + top_idx + 1)
+        else {
+            continue;
+        };
+
+        let body = &ops[top_idx + 1..back_edge_idx];
+
+        // The body slice must be a *closed* region: control may enter it
+        // only by falling through `top_idx` (the loop header), and may leave
+        // it only by branching forward past `back_edge_idx` (a `break`-style
+        // exit). Two improper shapes break the hoist and must be rejected:
+        //
+        //  1. External entry. An inner `Label(L)` opens inside this body but
+        //     its matching back-edge `Branch(L)` sits *beyond* `back_edge_idx`
+        //     (the first branch back to `top_label`). That back-edge re-enters
+        //     the middle of the body without passing through `top_idx`.
+        //
+        //  2. Backward exit. A branch inside the body targets a label defined
+        //     *before* `top_idx` (an enclosing/earlier loop). Control leaves
+        //     to that earlier point and can fall back into the middle of the
+        //     body, again bypassing `top_idx`.
+        //
+        // In either case, hoisting a `FrameAddr` to before `top_idx` leaves
+        // its dst undefined on the re-entry path, so a later use reads a
+        // clobbered register -- exactly the `&local != NULL` miscompile in
+        // cctest_csmith_2fee2095. Reject such bodies entirely.
+        let mut body_labels: HashSet<Label> = HashSet::new();
+        for o in body {
+            if let IrOp::Label(l) = o {
+                body_labels.insert(*l);
+            }
+        }
+        let before_top_labels: HashSet<Label> = ops[..top_idx]
+            .iter()
+            .filter_map(|o| match o {
+                IrOp::Label(l) => Some(*l),
+                _ => None,
+            })
+            .collect();
+        let externally_entered = ops.iter().enumerate().any(|(i, o)| {
+            if i > top_idx && i < back_edge_idx {
+                return false;
+            }
+            matches!(o, IrOp::Branch(l) | IrOp::BranchCond(_, l)
+                if body_labels.contains(l))
+        });
+        let exits_backward = body.iter().any(|o| {
+            matches!(o, IrOp::Branch(l) | IrOp::BranchCond(_, l)
+                if before_top_labels.contains(l))
+        });
+        if externally_entered || exits_backward {
+            continue;
+        }
+
+        // A vreg defined more than once in the body, or also used as a
+        // FrameAddr destination by a *different* op, would make naive
+        // remapping unsound. Count body definitions per vreg.
+        let mut def_count: HashMap<VReg, u32> = HashMap::new();
+        for o in body {
+            for d in dest_vregs(o) {
+                *def_count.entry(d).or_insert(0) += 1;
+            }
+        }
+
+        // Collect hoistable FrameAddr ops: dst defined exactly once in the
+        // body (so removing this def cannot strand another definition).
+        // First occurrence of each offset becomes the canonical address;
+        // later duplicates are replaced by a cheap `Copy(dup, canon)` in
+        // the hoisted prologue so every original dst stays defined and no
+        // in-body source rewriting (which would have to enumerate every
+        // op that can read a FrameAddr result) is needed. `propagate_copies`
+        // + `dead_code_eliminate` collapse the copies afterwards.
+        let mut canonical: HashMap<i32, VReg> = HashMap::new();
+        let mut hoisted: Vec<IrOp> = Vec::new();
+        let mut drop_at: HashSet<usize> = HashSet::new();
+        for (off_in_body, o) in body.iter().enumerate() {
+            if let IrOp::FrameAddr(dst, off) = o {
+                if def_count.get(dst).copied() != Some(1) {
+                    continue;
+                }
+                let idx = top_idx + 1 + off_in_body;
+                if let Some(&canon) = canonical.get(off) {
+                    hoisted.push(IrOp::Copy(*dst, canon));
+                } else {
+                    canonical.insert(*off, *dst);
+                    hoisted.push(o.clone());
+                }
+                drop_at.insert(idx);
+            }
+        }
+
+        if hoisted.is_empty() {
+            continue;
+        }
+
+        // Rebuild: insert the hoisted defs immediately before Label(top)
+        // and drop the originals from the body. Values are unchanged
+        // because `FrameAddr` reads only the loop-invariant frame pointer.
+        let mut out: Vec<IrOp> = Vec::with_capacity(ops.len() + hoisted.len());
+        for (i, o) in ops.iter().enumerate() {
+            if i == top_idx {
+                out.extend(hoisted.iter().cloned());
+            }
+            if drop_at.contains(&i) {
+                continue;
+            }
+            out.push(o.clone());
+        }
+        return Some(out);
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2845,9 +3401,11 @@ fn dest_vregs(op: &IrOp) -> Vec<VReg> {
     match op {
         IrOp::LoadImm(d, _)
         | IrOp::Copy(d, _)
+        | IrOp::CondMove(d, _, _)
         | IrOp::Add(d, _, _)
         | IrOp::Sub(d, _, _)
         | IrOp::Mul(d, _, _)
+        | IrOp::MulUH(d, _, _)
         | IrOp::Div(d, _, _)
         | IrOp::UDiv(d, _, _)
         | IrOp::Mod(d, _, _)
@@ -2951,6 +3509,7 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         IrOp::Add(_, a, b)
         | IrOp::Sub(_, a, b)
         | IrOp::Mul(_, a, b)
+        | IrOp::MulUH(_, a, b)
         | IrOp::Div(_, a, b)
         | IrOp::UDiv(_, a, b)
         | IrOp::Mod(_, a, b)
@@ -2966,6 +3525,9 @@ fn source_vregs(op: &IrOp) -> Vec<VReg> {
         | IrOp::FMul(_, a, b)
         | IrOp::FDiv(_, a, b) => vec![*a, *b],
         IrOp::Cmp(a, b) | IrOp::UCmp(a, b) | IrOp::FCmp(a, b) => vec![*a, *b],
+        // Conditional move reads its source and (when the condition is false)
+        // its own destination.
+        IrOp::CondMove(d, s, _) => vec![*d, *s],
         IrOp::Ret(Some(v)) => vec![*v],
         IrOp::Ret(None) => Vec::new(),
         IrOp::BranchCond(_, _) => Vec::new(),
@@ -3056,6 +3618,54 @@ fn has_side_effects(op: &IrOp) -> bool {
 mod tests {
     use super::*;
     use crate::ir::IrOp;
+
+    // Reference application of the magicu parameters, mirroring the IR
+    // sequence emit_const_udivmod produces. Validates magicu + the
+    // division formula against the true quotient for many (n, d).
+    fn magic_divide(n: u32, d: u32) -> u32 {
+        let (m, add, s) = magicu(d);
+        let t = (((m as u64) * (n as u64)) >> 32) as u32; // MULUH(M, n)
+        if add {
+            let half = (n.wrapping_sub(t)) >> 1;
+            (t.wrapping_add(half)) >> (s - 1)
+        } else {
+            t >> s
+        }
+    }
+
+    #[test]
+    fn magicu_matches_true_division() {
+        let divisors = [
+            3u32, 5, 6, 7, 9, 10, 11, 12, 13, 25, 100, 1000, 7919, 65535, 100003, 0x0F0F_0F0F,
+            0xFFFF_FFFE, 0xFFFF_FFFF,
+        ];
+        for &d in &divisors {
+            // Edge values plus a scattered sweep across the full u32 range.
+            let samples = [
+                0u32,
+                1,
+                2,
+                d.wrapping_sub(1),
+                d,
+                d.wrapping_add(1),
+                d.wrapping_mul(2),
+                12345,
+                0x7FFF_FFFF,
+                0x8000_0000,
+                0xFFFF_FFFE,
+                0xFFFF_FFFF,
+            ];
+            for &n in &samples {
+                assert_eq!(magic_divide(n, d), n / d, "div n={n:#x} d={d:#x}");
+            }
+            // Dense pseudo-random sweep.
+            let mut x: u32 = 0x1234_5678;
+            for _ in 0..4000 {
+                x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                assert_eq!(magic_divide(x, d), x / d, "div n={x:#x} d={d:#x}");
+            }
+        }
+    }
 
     #[test]
     fn fold_add_constants() {
@@ -3448,6 +4058,63 @@ mod tests {
     }
 
     #[test]
+    fn cse_constant_loads_reuses_within_block() {
+        // Two loads of the same constant in one basic block: the second must
+        // become a Copy from the first so only one LoadImm of the value
+        // survives. The byte-gather idiom (mask the same 0xFF twice) is the
+        // motivating case.
+        let ops = vec![
+            IrOp::LoadImm(1, 0xFF),
+            IrOp::BitAnd(2, 10, 1),
+            IrOp::LoadImm(3, 0xFF),
+            IrOp::BitAnd(4, 11, 3),
+            IrOp::Ret(Some(4)),
+        ];
+        let out = cse_constant_loads(&ops);
+        let imm_ff = out
+            .iter()
+            .filter(|op| matches!(op, IrOp::LoadImm(_, 0xFF)))
+            .count();
+        assert_eq!(
+            imm_ff, 1,
+            "the duplicate 0xFF load should be CSE'd to a single LoadImm, got: {out:?}"
+        );
+        assert!(
+            out.iter().any(|op| matches!(op, IrOp::Copy(3, 1))),
+            "second 0xFF load should become Copy(3, 1), got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn cse_constant_loads_does_not_cross_block_boundary() {
+        // A Label between two loads of the same constant marks a basic-block
+        // boundary. The allocator flushes its register map there, so the
+        // second load must NOT be turned into a copy from a register defined
+        // before the boundary — it must remain a fresh LoadImm.
+        let ops = vec![
+            IrOp::LoadImm(1, 0x3),
+            IrOp::BitAnd(2, 10, 1),
+            IrOp::Label(7),
+            IrOp::LoadImm(3, 0x3),
+            IrOp::BitAnd(4, 11, 3),
+            IrOp::Ret(Some(4)),
+        ];
+        let out = cse_constant_loads(&ops);
+        let imm_three = out
+            .iter()
+            .filter(|op| matches!(op, IrOp::LoadImm(_, 0x3)))
+            .count();
+        assert_eq!(
+            imm_three, 2,
+            "constant load must not be reused across a block boundary, got: {out:?}"
+        );
+        assert!(
+            !out.iter().any(|op| matches!(op, IrOp::Copy(3, 1))),
+            "must not copy from a register defined before the boundary, got: {out:?}"
+        );
+    }
+
+    #[test]
     fn forward_stack_loads_handles_frameaddr_member_slot() {
         let ops = vec![
             IrOp::LoadImm(1, 7),
@@ -3568,6 +4235,39 @@ mod tests {
         assert!(
             forwarded.iter().any(|op| matches!(op, IrOp::Load(5, 4, 0))),
             "post-label load should not be forwarded across CFG boundary, got: {forwarded:?}"
+        );
+    }
+
+    #[test]
+    fn forward_stack_loads_keeps_init_store_when_frameaddr_escapes_after_label() {
+        // Reproduces the binary_search miscompile: a `FrameAddr` to an array
+        // base is hoisted above the loop-top label (as
+        // `hoist_loop_invariant_frame_addr` does), but the indexed access that
+        // *escapes* the address (the `Add` that forms `&arr[i]`) lives inside
+        // the loop, below the label. Escape detection must see that escape
+        // across the CFG boundary so the initializer store to the aliased slot
+        // is not deleted as dead. Pre-fix, escape facts were cleared at the
+        // label and the store to slot 5 was dropped, leaving the array
+        // uninitialized (return -1 / 0xffffffff instead of the found index).
+        let ops = vec![
+            IrOp::LoadImm(1, 21),
+            IrOp::FrameAddr(2, 5),
+            IrOp::Store(1, 2, 0), // arr base element initializer
+            IrOp::FrameAddr(3, 5),
+            IrOp::Label(0),
+            IrOp::Load(4, 0, 9),    // dynamic index i = arr_idx_slot
+            IrOp::Add(5, 3, 4),     // &arr[i]: escapes slot 5 across the label
+            IrOp::Load(6, 5, 0),
+            IrOp::BranchCond(Cond::Ne, 0),
+            IrOp::Ret(Some(6)),
+        ];
+        let forwarded = forward_stack_loads(&ops);
+        assert!(
+            forwarded
+                .iter()
+                .any(|op| matches!(op, IrOp::Store(1, 0, 5))),
+            "initializer store to a slot escaped by a post-label indexed \
+             access must be kept, got: {forwarded:?}"
         );
     }
 
@@ -4102,5 +4802,166 @@ mod tests {
             result.iter().any(|op| matches!(op, IrOp::Branch(0))),
             "software loop back-edge should remain: {result:?}"
         );
+    }
+
+    // Index of `op` in `ops`, panicking with context on miss.
+    fn pos_of(ops: &[IrOp], pred: impl Fn(&IrOp) -> bool, what: &str) -> usize {
+        ops.iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("{what} missing in {ops:?}"))
+    }
+
+    #[test]
+    fn hoist_frame_addr_moves_invariant_address_before_loop_top() {
+        // A FrameAddr recomputed every iteration must be hoisted to before
+        // the loop's top label so it materializes once per loop entry.
+        let ops = vec![
+            IrOp::Label(0),
+            IrOp::FrameAddr(5, -3),
+            IrOp::Load(6, 5, 0),
+            IrOp::Store(6, 0, 1),
+            IrOp::Branch(0),
+            IrOp::Label(1),
+            IrOp::Ret(None),
+        ];
+        let out = hoist_loop_invariant_frame_addr(&ops);
+        let fa = pos_of(
+            &out,
+            |op| matches!(op, IrOp::FrameAddr(5, -3)),
+            "hoisted FrameAddr",
+        );
+        let top = pos_of(&out, |op| matches!(op, IrOp::Label(0)), "loop top label");
+        assert!(
+            fa < top,
+            "FrameAddr must be hoisted above Label(0), got: {out:?}"
+        );
+        // The body between Label(0) and the back-edge must no longer
+        // contain the FrameAddr.
+        let back = pos_of(&out, |op| matches!(op, IrOp::Branch(0)), "back-edge");
+        assert!(
+            !out[top + 1..back]
+                .iter()
+                .any(|op| matches!(op, IrOp::FrameAddr(..))),
+            "loop body must hold no FrameAddr after hoist, got: {out:?}"
+        );
+        // The address vreg is still defined exactly once, and the dependent
+        // load/store remain intact and in the loop.
+        assert_eq!(
+            out.iter()
+                .filter(|op| matches!(op, IrOp::FrameAddr(5, _)))
+                .count(),
+            1,
+            "exactly one definition of the hoisted address: {out:?}"
+        );
+        assert!(
+            out.iter().any(|op| matches!(op, IrOp::Load(6, 5, 0)))
+                && out.iter().any(|op| matches!(op, IrOp::Store(6, 0, 1))),
+            "dependent load/store must survive: {out:?}"
+        );
+    }
+
+    #[test]
+    fn hoist_frame_addr_skips_improperly_nested_loop_body() {
+        // Improper nesting: Label(0) is the outer loop top with its first
+        // back-edge Branch(0) closing the body slice the hoist examines, but
+        // an inner Label(1) opens inside that slice while its matching
+        // back-edge Branch(1) lives *beyond* Branch(0). Control can re-enter
+        // the middle of the slice (at Label(1)) via Branch(1) without passing
+        // through Label(0). Hoisting the FrameAddr to before Label(0) would
+        // leave vreg 5 undefined on that re-entry path, so the Store(5,0,1)
+        // that follows reads a clobbered register -- exactly the
+        // `&local != NULL` miscompile in cctest_csmith_2fee2095. The pass
+        // must leave the FrameAddr inside the body.
+        let ops = vec![
+            IrOp::Label(0),
+            IrOp::Label(1),
+            IrOp::FrameAddr(5, -3),
+            IrOp::Store(5, 0, 1),
+            IrOp::Branch(0), // first Branch(0): closes the examined body slice
+            IrOp::Load(6, 0, 1),
+            IrOp::Branch(1), // back-edge re-enters Label(1) from outside slice
+            IrOp::Label(2),
+            IrOp::Ret(None),
+        ];
+        let out = hoist_loop_invariant_frame_addr(&ops);
+        assert_eq!(
+            out, ops,
+            "improperly-nested body must not be hoisted from: {out:?}"
+        );
+        // Pin the load-bearing fact: the FrameAddr still sits *after* both
+        // loop tops, never lifted above Label(0).
+        let fa = pos_of(
+            &out,
+            |op| matches!(op, IrOp::FrameAddr(5, -3)),
+            "FrameAddr",
+        );
+        let l0 = pos_of(&out, |op| matches!(op, IrOp::Label(0)), "Label(0)");
+        let l1 = pos_of(&out, |op| matches!(op, IrOp::Label(1)), "Label(1)");
+        assert!(
+            fa > l0 && fa > l1,
+            "FrameAddr must stay below both loop tops, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn hoist_frame_addr_dedups_same_offset_via_copy() {
+        // Two FrameAddr ops for the same slot in one loop collapse to a
+        // single canonical address plus a copy; both destinations stay
+        // defined so later uses remain sound.
+        let ops = vec![
+            IrOp::Label(0),
+            IrOp::FrameAddr(5, -3),
+            IrOp::Store(5, 0, 1),
+            IrOp::FrameAddr(7, -3),
+            IrOp::Store(7, 0, 2),
+            IrOp::Branch(0),
+            IrOp::Label(1),
+            IrOp::Ret(None),
+        ];
+        let out = hoist_loop_invariant_frame_addr(&ops);
+        // Only one real FrameAddr survives; the duplicate becomes a Copy.
+        assert_eq!(
+            out.iter()
+                .filter(|op| matches!(op, IrOp::FrameAddr(_, -3)))
+                .count(),
+            1,
+            "duplicate same-offset FrameAddr must be deduplicated: {out:?}"
+        );
+        let canon = match out
+            .iter()
+            .find(|op| matches!(op, IrOp::FrameAddr(_, -3)))
+            .unwrap()
+        {
+            IrOp::FrameAddr(d, _) => *d,
+            _ => unreachable!(),
+        };
+        // Both original destinations (5 and 7) must still be defined: the
+        // non-canonical one via a copy from the canonical address.
+        let dup = if canon == 5 { 7 } else { 5 };
+        assert!(
+            out.iter()
+                .any(|op| matches!(op, IrOp::Copy(d, s) if *d == dup && *s == canon)),
+            "duplicate dst must be defined by a copy of the canonical addr: {out:?}"
+        );
+        // Both addresses are produced before the loop top.
+        let top = pos_of(&out, |op| matches!(op, IrOp::Label(0)), "loop top label");
+        assert!(
+            out[..top]
+                .iter()
+                .any(|op| matches!(op, IrOp::Copy(d, _) if *d == dup)),
+            "dedup copy must be hoisted above the loop: {out:?}"
+        );
+    }
+
+    #[test]
+    fn hoist_frame_addr_leaves_loopless_code_unchanged() {
+        // No back-edge -> nothing to hoist; the pass must be a no-op.
+        let ops = vec![
+            IrOp::FrameAddr(5, -3),
+            IrOp::Store(5, 0, 1),
+            IrOp::Ret(None),
+        ];
+        let out = hoist_loop_invariant_frame_addr(&ops);
+        assert_eq!(out, ops, "non-loop code must be untouched: {out:?}");
     }
 }

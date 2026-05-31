@@ -2054,7 +2054,11 @@ mod tests {
 
     #[test]
     fn test_include() {
-        let dir = std::env::temp_dir();
+        // Project-local fast_data/tmp, not shared /tmp (AGENTS.md), with
+        // a per-process unique dir to avoid cross-user/run collisions.
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp"))
+            .join(format!("selcc_pp_inc_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let header = dir.join("test_header_selcc.h");
         std::fs::write(&header, "int header_var;\n").unwrap();
 
@@ -2065,7 +2069,7 @@ mod tests {
             .unwrap();
         assert!(result.contains("int header_var;"));
 
-        std::fs::remove_file(header).ok();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2074,7 +2078,8 @@ mod tests {
         // the selache builtin for system (`<>`) includes: external
         // system headers inline helper functions that name intrinsics
         // this compiler does not model.
-        let dir = std::env::temp_dir().join("test_selcc_builtin_priority");
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp"))
+            .join(format!("test_selcc_builtin_priority_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let header = dir.join("math.h");
         // The shadow header defines a sentinel variable; if it is

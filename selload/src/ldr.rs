@@ -742,7 +742,16 @@ pub fn generate_boot_stream(elf_data: &[u8], opts: &Options) -> Result<Vec<Block
         // For MBS+NoFill mode, compute segments using fill-mode logic
         // so we can preserve the default-mode block boundaries that
         // the MBS split layout depends on.
-        let compute_with_fill = (use_fill || opts.max_block_size.is_some()) && sec.compressible;
+        // Variable-length FILL blocks in non-code (data) sections corrupt the
+        // boot image: the boot ROM mishandles a data FILL block, so any case
+        // with a 36+ byte zero run inside initialised data (e.g. a sparse
+        // union/struct array) hangs before reaching main. Code sections use a
+        // separate fixed-68-byte fill placement that is correct, so FILL stays
+        // enabled there. In MBS mode the data fills are expanded to zero-data
+        // blocks (no FILL block emitted), so that path is left untouched.
+        let allow_fill_here = is_sw_code || opts.max_block_size.is_some();
+        let compute_with_fill =
+            (use_fill || opts.max_block_size.is_some()) && sec.compressible && allow_fill_here;
         let mut segments = if compute_with_fill {
             compress_zero_runs(&sec.raw, fixed, min_fill, step, base_mod4)
         } else {

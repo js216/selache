@@ -671,6 +671,7 @@ fn mul_to_23bit(mul: &MulOp) -> Option<u32> {
         MulOp::MrfMulSsf { rx, ry } => (0x7C, 0, rx, ry),
         MulOp::MrbMulSsf { rx, ry } => (0x7E, 0, rx, ry),
         MulOp::MrfMulUuf { rx, ry } => (0x4C, 0, rx, ry),
+        MulOp::MrfMulUui { rx, ry } => (0x44, 0, rx, ry),
         MulOp::MacSsf { rn, rx, ry } => (0xB8, rn, rx, ry),
         MulOp::MrfMacSsf { rx, ry } => (0xBC, 0, rx, ry),
         MulOp::MrbMacSsf { rx, ry } => (0xBE, 0, rx, ry),

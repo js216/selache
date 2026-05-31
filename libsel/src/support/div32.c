@@ -17,6 +17,14 @@ static unsigned int udivmod32(unsigned int dividend, unsigned int divisor,
     unsigned int remainder;
     int i;
 
+    /* Fast path: dividend smaller than divisor -> quotient 0, remainder
+       is the dividend. Skips the 32-iteration shift-subtract loop for the
+       very common small-value case. */
+    if (dividend < divisor) {
+        *rem_out = dividend;
+        return 0U;
+    }
+
     if ((int)divisor < 0) {
         if (dividend >= divisor) {
             *rem_out = dividend - divisor;
@@ -77,14 +85,27 @@ unsigned int __sel_umod32_c(unsigned int dividend, unsigned int divisor)
     return remainder;
 }
 
-static void divmod_u64(unsigned long long dividend,
-                       unsigned long long divisor,
-                       unsigned long long *quotient,
-                       unsigned long long *remainder)
+/* Unsigned 64-bit division: returns the quotient by value (no out-pointers).
+   The earlier two-out-pointer form (`*quotient`/`*remainder`) miscompiled the
+   quotient store, so callers now derive the remainder as
+   `dividend - quotient*divisor`. */
+static unsigned long long udiv_u64(unsigned long long dividend,
+                                   unsigned long long divisor)
 {
     unsigned long long q = 0;
     unsigned long long r = 0;
     int i;
+
+    /* Fast path: both operands fit in 32 bits -> use the 32-bit divider. */
+    if ((dividend >> 32) == 0ULL && (divisor >> 32) == 0ULL) {
+        unsigned int r32;
+        return (unsigned long long)udivmod32((unsigned int)dividend,
+                                             (unsigned int)divisor, &r32);
+    }
+
+    if (divisor > dividend) {
+        return 0ULL;
+    }
 
     for (i = 0; i < 64; i++) {
         r = (r << 1) | (dividend >> 63);
@@ -96,30 +117,12 @@ static void divmod_u64(unsigned long long dividend,
         }
     }
 
-    *quotient = q;
-    *remainder = r;
+    return q;
 }
+
 
 long long ___div64(long long dividend, long long divisor)
 {
-    unsigned long long q;
-    unsigned long long r;
-    unsigned long long lhs = dividend < 0
-                                 ? 0ULL - (unsigned long long)dividend
-                                 : (unsigned long long)dividend;
-    unsigned long long rhs = divisor < 0
-                                 ? 0ULL - (unsigned long long)divisor
-                                 : (unsigned long long)divisor;
-
-    divmod_u64(lhs, rhs, &q, &r);
-    (void)r;
-    return (long long)(((dividend < 0) != (divisor < 0)) ? 0ULL - q : q);
-}
-
-long long ___mod64(long long dividend, long long divisor)
-{
-    unsigned long long q;
-    unsigned long long r;
     int dividend_neg = ((int)(dividend >> 32)) < 0;
     int divisor_neg = ((int)(divisor >> 32)) < 0;
     unsigned long long lhs = dividend_neg
@@ -128,10 +131,23 @@ long long ___mod64(long long dividend, long long divisor)
     unsigned long long rhs = divisor_neg
                                  ? (~(unsigned long long)divisor + 1ULL)
                                  : (unsigned long long)divisor;
+    unsigned long long q = udiv_u64(lhs, rhs);
 
-    (void)dividend;
-    (void)divisor;
-    divmod_u64(lhs, rhs, &q, &r);
-    (void)q;
+    return (long long)((dividend_neg ^ divisor_neg) ? (~q + 1ULL) : q);
+}
+
+long long ___mod64(long long dividend, long long divisor)
+{
+    int dividend_neg = ((int)(dividend >> 32)) < 0;
+    int divisor_neg = ((int)(divisor >> 32)) < 0;
+    unsigned long long lhs = dividend_neg
+                                 ? (~(unsigned long long)dividend + 1ULL)
+                                 : (unsigned long long)dividend;
+    unsigned long long rhs = divisor_neg
+                                 ? (~(unsigned long long)divisor + 1ULL)
+                                 : (unsigned long long)divisor;
+    unsigned long long q = udiv_u64(lhs, rhs);
+    unsigned long long r = lhs - q * rhs;
+
     return (long long)(dividend_neg ? (~r + 1ULL) : r);
 }

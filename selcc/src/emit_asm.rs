@@ -2975,6 +2975,18 @@ fn emit_function_instrs(
         ir = ir_opt::constant_fold(&ir);
     }
     let ir = ir_opt::dead_code_eliminate(&ir);
+    // Hoist loop-invariant frame-slot address computations (the
+    // `I6=MODIFY/dst=I6/I6=MODIFY` triples) out of software loops before
+    // hardware-loop detection, then collapse the dedup copies and dead
+    // defs the hoist leaves behind. Runs while loops are still in
+    // software form so the `Label(top) ... Branch(top)` shape is intact.
+    let ir = if func.is_variadic {
+        ir
+    } else {
+        let ir = ir_opt::hoist_loop_invariant_frame_addr(&ir);
+        let ir = ir_opt::propagate_copies(&ir);
+        ir_opt::dead_code_eliminate(&ir)
+    };
     let mut ir = ir_opt::detect_hardware_loops(&ir);
     ir = ir_opt::dead_code_eliminate(&ir_opt::elide_noop_hardware_loops(&ir));
     if !func.is_variadic {
@@ -2984,6 +2996,8 @@ fn emit_function_instrs(
         ir = ir_opt::canonicalize_frame_indirect_accesses(&ir);
         ir = ir_opt::strength_reduce_nonnegative_divisions(&ir);
         ir = ir_opt::constant_fold(&ir);
+        ir = ir_opt::cse_constant_loads(&ir);
+        ir = ir_opt::propagate_copies(&ir);
         ir = ir_opt::dead_code_eliminate(&ir);
     }
 
@@ -3031,6 +3045,11 @@ fn emit_function_instrs(
     // for an I-register and `LoadImm { ureg }` prints `I0 = imm`
     // instead of allocating a data register. Renumbering compresses
     // the live vreg set into 0..0x80, eliminating the collision.
+    // Replace unsigned division/modulo by a constant divisor with a
+    // magic-number multiply sequence (avoids the slow software divide).
+    let ir = ir_opt::strength_reduce_constant_udivmod(&ir);
+    let ir = ir_opt::dead_code_eliminate(&ir);
+
     let ir = crate::ir::renumber_vregs(&ir, num_params as u32);
 
     let isel_result = isel::select_with_name(
@@ -3082,11 +3101,13 @@ fn emit_function_instrs(
     let mut optimized = eliminate_copies(&adjusted, &mut label_map);
     loop {
         let before = optimized.len();
+        optimized = eliminate_dead_copies(&optimized, &mut label_map);
         optimized = eliminate_copies(&optimized, &mut label_map);
         if optimized.len() == before {
             break;
         }
     }
+    let optimized = pack_multifunction(&optimized, &mut label_map);
     if std::env::var("SELCC_DEBUG_FN").ok().as_deref() == Some(func.name.as_str()) {
         eprintln!("=== {} after adjust ===", func.name);
         for (i, mi) in adjusted.iter().enumerate() {
@@ -4517,6 +4538,186 @@ fn pass_instr(dst: u16, src: u16) -> MachInstr {
     }
 }
 
+/// Fuse an independent standalone ALU compute with an adjacent single
+/// data-move (Type 3/Type 4) into one multifunction instruction. The SHARC+
+/// core runs the compute and the data access in the same cycle, so a
+/// load/compute/store sequence that selcc otherwise emits serially collapses
+/// to one instruction per pair. The two halves run in parallel, so they must
+/// be free of register hazards; branch targets and delayed-branch delay slots
+/// are never disturbed, and the fused form is only kept if it re-encodes.
+fn pack_multifunction(
+    instrs: &[MachInstr],
+    label_map: &mut HashMap<Label, usize>,
+) -> Vec<MachInstr> {
+    let branch_targets: std::collections::HashSet<usize> =
+        label_map.values().copied().collect();
+    let mut delay: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (i, mi) in instrs.iter().enumerate() {
+        let delayed = matches!(
+            mi.instr,
+            Instruction::Branch { delayed: true, .. }
+                | Instruction::CJump { delayed: true, .. }
+                | Instruction::Return { delayed: true, .. }
+                | Instruction::IndirectBranch { delayed: true, .. }
+        );
+        if delayed {
+            delay.insert(i + 1);
+            delay.insert(i + 2);
+        }
+    }
+    let mut removed = Vec::new();
+    let mut result = Vec::with_capacity(instrs.len());
+    let mut i = 0;
+    while i < instrs.len() {
+        if i + 1 < instrs.len()
+            && instrs[i].reloc.is_none()
+            && instrs[i + 1].reloc.is_none()
+            && !branch_targets.contains(&(i + 1))
+            && !delay.contains(&i)
+            && !delay.contains(&(i + 1))
+        {
+            if let Some(fused) = try_fuse_multifunction(&instrs[i].instr, &instrs[i + 1].instr) {
+                result.push(MachInstr {
+                    instr: fused,
+                    reloc: None,
+                });
+                removed.push(i + 1);
+                i += 2;
+                continue;
+            }
+        }
+        result.push(instrs[i].clone());
+        i += 1;
+    }
+    for pos in label_map.values_mut() {
+        let shift = removed.iter().filter(|&&r| r < *pos).count();
+        *pos -= shift;
+    }
+    result
+}
+
+/// If `a` and `b` are an independent (ALU compute, single data move) pair in
+/// either order, return the fused multifunction instruction.
+fn try_fuse_multifunction(a: &Instruction, b: &Instruction) -> Option<Instruction> {
+    let (compute, mem) = if let Some(c) = mf_standalone_alu(a) {
+        (c, b)
+    } else if let Some(c) = mf_standalone_alu(b) {
+        (c, a)
+    } else {
+        return None;
+    };
+    if !mf_is_fusable_mem(mem) {
+        return None;
+    }
+    // Hazard check: the two halves execute in parallel, so neither may write
+    // a register the other reads or writes (reads may overlap).
+    let mut c_dst = Vec::new();
+    compute_dest_regs(&compute, &mut c_dst);
+    let mut c_src = Vec::new();
+    compute_source_regs(&compute, &mut c_src);
+    let (m_wr, m_rd) = mf_mem_data_regs(mem);
+    let disjoint = |x: &[u16], y: &[u16]| x.iter().all(|r| !y.contains(r));
+    if !(disjoint(&c_dst, &m_wr) && disjoint(&c_dst, &m_rd) && disjoint(&m_wr, &c_src)) {
+        return None;
+    }
+    let fused = match *mem {
+        Instruction::UregDagMove {
+            pm,
+            write,
+            ureg,
+            i_reg,
+            m_reg,
+            cond,
+            post_modify,
+            ..
+        } => Instruction::UregDagMove {
+            pm,
+            write,
+            ureg,
+            i_reg,
+            m_reg,
+            cond,
+            compute: Some(compute),
+            post_modify,
+        },
+        Instruction::ComputeLoadStore {
+            access,
+            dreg,
+            offset,
+            cond,
+            ..
+        } => Instruction::ComputeLoadStore {
+            compute: Some(compute),
+            access,
+            dreg,
+            offset,
+            cond,
+        },
+        _ => return None,
+    };
+    // Guard against compute ops the multifunction form cannot represent.
+    if selinstr::encode::encode(&fused).is_err() {
+        return None;
+    }
+    Some(fused)
+}
+
+/// A standalone, unconditional ALU compute eligible to move into a data
+/// move's parallel compute slot.
+fn mf_standalone_alu(instr: &Instruction) -> Option<ComputeOp> {
+    match instr {
+        Instruction::Compute { cond, compute }
+            if *cond == crate::target::COND_TRUE && matches!(compute, ComputeOp::Alu(_)) =>
+        {
+            Some(*compute)
+        }
+        _ => None,
+    }
+}
+
+/// A single data move (Type 3/Type 4) to a data register, with an empty
+/// compute slot and no condition, that can absorb a parallel compute.
+fn mf_is_fusable_mem(instr: &Instruction) -> bool {
+    match *instr {
+        Instruction::UregDagMove {
+            compute: None,
+            cond,
+            ureg,
+            ..
+        } => cond == crate::target::COND_TRUE && ureg < 0x10,
+        Instruction::ComputeLoadStore {
+            compute: None,
+            cond,
+            dreg,
+            ..
+        } => cond == crate::target::COND_TRUE && dreg < 0x10,
+        _ => false,
+    }
+}
+
+/// Data registers (R0-R15) a memory move writes / reads. DAG I/M registers
+/// live in a separate file and never alias an ALU compute's operands, so they
+/// are excluded from the hazard sets.
+fn mf_mem_data_regs(instr: &Instruction) -> (Vec<u16>, Vec<u16>) {
+    match *instr {
+        Instruction::UregDagMove { write, ureg, .. } if ureg < 0x10 => {
+            if write {
+                (vec![], vec![ureg])
+            } else {
+                (vec![ureg], vec![])
+            }
+        }
+        Instruction::ComputeLoadStore { access, dreg, .. } if dreg < 0x10 => {
+            if access.write {
+                (vec![], vec![dreg])
+            } else {
+                (vec![dreg], vec![])
+            }
+        }
+        _ => (vec![], vec![]),
+    }
+}
+
 fn eliminate_dead_adjacent_load_imms(
     instrs: &[MachInstr],
     label_map: &mut HashMap<Label, usize>,
@@ -4677,6 +4878,131 @@ fn forward_frameaddr_spill_to_hidden_arg(
         *pos -= shift;
     }
 
+    result
+}
+
+/// Remove `Rd = PASS Rs` copies whose destination is provably dead.
+///
+/// The register allocator occasionally emits a copy into a register that the
+/// very next instructions overwrite without ever reading — a leftover of a
+/// three-way operand shuffle. Such a copy is pure dead code. This pass scans
+/// forward from each `Rd = PASS Rs` *within the same basic block* (stopping at
+/// any control-flow instruction or branch target): if `Rd` is rewritten by a
+/// later instruction before being read, the copy can be dropped.
+///
+/// Restricting the scan to a single basic block keeps the analysis trivially
+/// correct without a full control-flow liveness pass: at a block boundary the
+/// destination is conservatively assumed live, so the copy is kept. A
+/// conditional compute reports its own destination as a source (see
+/// `source_regs`), so a predicated redefinition counts as a read and the copy
+/// survives.
+fn eliminate_dead_copies(
+    instrs: &[MachInstr],
+    label_map: &mut HashMap<Label, usize>,
+) -> Vec<MachInstr> {
+    let branch_targets: std::collections::HashSet<usize> = label_map.values().copied().collect();
+
+    // `source_regs` / `dest_regs` only enumerate register operands for a
+    // subset of instruction forms exhaustively. For the forward liveness scan
+    // to be sound, every instruction we step over must have ALL of its data-
+    // register reads reported by `source_regs` (otherwise a copy whose
+    // destination is read through an unmodelled operand would be wrongly
+    // deleted). Restrict the scan to instructions whose data-register reads
+    // and writes are fully captured; stop (and keep the copy) at the first
+    // instruction outside that set.
+    let reads_fully_modeled = |instr: &Instruction| -> bool {
+        use selinstr::encode::{AluOp, ComputeOp, MulOp, ShiftOp};
+        match instr {
+            // LoadImm of a data register reads no data register.
+            Instruction::LoadImm { ureg, .. } => *ureg < 0x10,
+            Instruction::Compute { compute, .. } => match compute {
+                ComputeOp::Alu(a) => matches!(
+                    a,
+                    AluOp::Add { .. }
+                        | AluOp::Sub { .. }
+                        | AluOp::And { .. }
+                        | AluOp::Or { .. }
+                        | AluOp::Xor { .. }
+                        | AluOp::Pass { .. }
+                        | AluOp::Neg { .. }
+                        | AluOp::Not { .. }
+                        | AluOp::Inc { .. }
+                        | AluOp::Dec { .. }
+                        | AluOp::Abs { .. }
+                        | AluOp::Comp { .. }
+                        | AluOp::CompU { .. }
+                ),
+                ComputeOp::Mul(m) => matches!(
+                    m,
+                    MulOp::MulSsf { .. } | MulOp::MulSsi { .. } | MulOp::FMul { .. }
+                ),
+                ComputeOp::Shift(s) => {
+                    matches!(s, ShiftOp::Lshift { .. } | ShiftOp::Ashift { .. })
+                }
+                // Falu / Multi (and any other compute) are not exhaustively
+                // modelled by compute_source_regs.
+                _ => false,
+            },
+            _ => false,
+        }
+    };
+
+    let mut removed = Vec::new();
+    for (i, mi) in instrs.iter().enumerate() {
+        let Some((dst, src)) = is_pass_copy(&mi.instr) else {
+            continue;
+        };
+        if dst == src {
+            // Pure self-copies are handled by eliminate_copies; skip here.
+            continue;
+        }
+        // Scan straight-line successors within the basic block.
+        let mut j = i + 1;
+        let mut dead = false;
+        while j < instrs.len() {
+            // A jump may land on instruction `j`; values feeding that path are
+            // outside our linear view, so stop and keep the copy.
+            if branch_targets.contains(&j) {
+                break;
+            }
+            // Only step over instructions whose reads are fully modelled.
+            // Anything else (control flow, float ALU, DAG/move/swap/transfer,
+            // immediate-shift, stores, …) might read `dst` through an operand
+            // `source_regs` does not report, so conservatively keep the copy.
+            if !reads_fully_modeled(&instrs[j].instr) {
+                break;
+            }
+            if source_regs(&instrs[j].instr).contains(&dst) {
+                // Destination is read before any unconditional rewrite: live.
+                break;
+            }
+            if dest_regs(&instrs[j].instr).contains(&dst) {
+                // Rewritten without being read first: the copy is dead.
+                dead = true;
+                break;
+            }
+            j += 1;
+        }
+        if dead {
+            removed.push(i);
+        }
+    }
+
+    if removed.is_empty() {
+        return instrs.to_vec();
+    }
+
+    let removed_set: std::collections::HashSet<usize> = removed.iter().copied().collect();
+    let mut result = Vec::with_capacity(instrs.len() - removed.len());
+    for (i, mi) in instrs.iter().enumerate() {
+        if !removed_set.contains(&i) {
+            result.push(mi.clone());
+        }
+    }
+    for pos in label_map.values_mut() {
+        let shift = removed.iter().filter(|&&r| r < *pos).count();
+        *pos -= shift;
+    }
     result
 }
 
@@ -4927,8 +5253,8 @@ fn is_pass_copy(instr: &Instruction) -> Option<(u16, u16)> {
     match *instr {
         Instruction::Compute {
             compute: selinstr::encode::ComputeOp::Alu(selinstr::encode::AluOp::Pass { rn, rx }),
-            ..
-        } => Some((rn, rx)),
+            cond,
+        } if cond == crate::target::COND_TRUE => Some((rn, rx)),
         _ => None,
     }
 }
@@ -4936,7 +5262,14 @@ fn is_pass_copy(instr: &Instruction) -> Option<(u16, u16)> {
 fn source_regs(instr: &Instruction) -> Vec<u16> {
     let mut regs = Vec::new();
     match *instr {
-        Instruction::Compute { compute, .. } => compute_source_regs(&compute, &mut regs),
+        Instruction::Compute { compute, cond } => {
+            compute_source_regs(&compute, &mut regs);
+            // A conditional compute keeps its destination's prior value when
+            // the condition is false, so the destination is also a source.
+            if cond != crate::target::COND_TRUE {
+                compute_dest_regs(&compute, &mut regs);
+            }
+        }
         Instruction::ComputeLoadStore {
             compute,
             access,
@@ -5531,6 +5864,91 @@ mod tests {
             reloc: None,
         }];
         assert!(callee_saved_used(&instrs).contains(&9));
+    }
+
+    #[test]
+    fn dead_copy_removed_when_dest_overwritten_before_use() {
+        // Models the leftover three-way shuffle the allocator emits in the
+        // unrolled crc32 inner loop: `R7 = PASS R8` is immediately clobbered
+        // by `R7 = 0xFF` without R7 ever being read, so it is dead.
+        let instrs = vec![
+            pass_instr(5, 1),                                 // R5 = PASS R1 (live: read below)
+            pass_instr(7, 8),                                 // R7 = PASS R8 (DEAD)
+            MachInstr {
+                instr: Instruction::LoadImm { ureg: 7, value: 0xFF },
+                reloc: None,
+            }, // R7 = 0xFF (overwrites R7 without reading it)
+            MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::And { rn: 9, rx: 1, ry: 7 }),
+                },
+                reloc: None,
+            }, // R9 = R1 AND R7
+            MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::Xor { rn: 1, rx: 5, ry: 9 }),
+                },
+                reloc: None,
+            }, // R1 = R5 XOR R9 (reads R5: keeps R5=PASS R1 live)
+        ];
+        let mut label_map = HashMap::new();
+        let out = eliminate_dead_copies(&instrs, &mut label_map);
+        let pass_pairs: Vec<(u16, u16)> =
+            out.iter().filter_map(|mi| is_pass_copy(&mi.instr)).collect();
+        assert!(
+            !pass_pairs.contains(&(7, 8)),
+            "dead `R7 = PASS R8` must be eliminated: {out:?}"
+        );
+        assert!(
+            pass_pairs.contains(&(5, 1)),
+            "live `R5 = PASS R1` must survive: {out:?}"
+        );
+        assert_eq!(out.len(), instrs.len() - 1, "exactly one copy removed");
+    }
+
+    #[test]
+    fn dead_copy_kept_when_dest_used_before_overwrite() {
+        // If the destination is read before any rewrite, the copy is live.
+        let instrs = vec![
+            pass_instr(7, 8), // R7 = PASS R8
+            MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::And { rn: 9, rx: 1, ry: 7 }),
+                },
+                reloc: None,
+            }, // R9 = R1 AND R7  (reads R7)
+            MachInstr {
+                instr: Instruction::LoadImm { ureg: 7, value: 0xFF },
+                reloc: None,
+            }, // R7 = 0xFF
+        ];
+        let mut label_map = HashMap::new();
+        let out = eliminate_dead_copies(&instrs, &mut label_map);
+        assert_eq!(out.len(), instrs.len(), "live copy must not be removed");
+    }
+
+    #[test]
+    fn dead_copy_kept_when_overwrite_is_branch_target() {
+        // The rewrite of R7 sits at a branch target, so a jump from elsewhere
+        // could reach it on a path where R7 is still needed; keep the copy.
+        let instrs = vec![
+            pass_instr(7, 8),
+            MachInstr {
+                instr: Instruction::LoadImm { ureg: 7, value: 0xFF },
+                reloc: None,
+            },
+        ];
+        let mut label_map = HashMap::new();
+        label_map.insert(0u32, 1usize);
+        let out = eliminate_dead_copies(&instrs, &mut label_map);
+        assert_eq!(
+            out.len(),
+            instrs.len(),
+            "copy before a branch-target rewrite must survive: {out:?}"
+        );
     }
 
     #[test]

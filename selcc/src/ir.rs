@@ -43,6 +43,9 @@ pub enum IrOp {
     Sub(VReg, VReg, VReg),
     /// dst = lhs * rhs
     Mul(VReg, VReg, VReg),
+    /// dst = high 32 bits of the unsigned 64-bit product lhs * rhs
+    /// (unsigned multiply-high). Used by magic-number division.
+    MulUH(VReg, VReg, VReg),
     /// dst = lhs / rhs (signed 32-bit divide, runtime call)
     Div(VReg, VReg, VReg),
     /// dst = lhs / rhs (unsigned 32-bit divide, runtime call)
@@ -125,6 +128,12 @@ pub enum IrOp {
     Branch(Label),
     /// Conditional jump based on most recent Cmp
     BranchCond(Cond, Label),
+    /// Conditional move based on the most recent Cmp/UCmp: `if cond { dst = src }`.
+    /// When the condition is false `dst` keeps its previous value, so `dst` is
+    /// both read and written. Lowers to a SHARC conditional compute
+    /// (`IF cond Rn = Rx`), letting relational/boolean values be materialised
+    /// branchlessly. No flag-clobbering op may sit between the Cmp and this op.
+    CondMove(VReg, VReg, Cond),
     /// Label marker
     Label(Label),
     /// dst = mem[base + offset]
@@ -322,6 +331,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             | IrOp::BitNot(a, b)
             | IrOp::Cmp(a, b)
             | IrOp::UCmp(a, b)
+            | IrOp::CondMove(a, b, _)
             | IrOp::FNeg(a, b)
             | IrOp::IntToFloat(a, b)
             | IrOp::FloatToInt(a, b)
@@ -335,6 +345,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             IrOp::Add(a, b, c)
             | IrOp::Sub(a, b, c)
             | IrOp::Mul(a, b, c)
+            | IrOp::MulUH(a, b, c)
             | IrOp::Div(a, b, c)
             | IrOp::UDiv(a, b, c)
             | IrOp::Mod(a, b, c)
@@ -605,6 +616,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             IrOp::Add(a, b, c) => IrOp::Add(apply(*a), apply(*b), apply(*c)),
             IrOp::Sub(a, b, c) => IrOp::Sub(apply(*a), apply(*b), apply(*c)),
             IrOp::Mul(a, b, c) => IrOp::Mul(apply(*a), apply(*b), apply(*c)),
+            IrOp::MulUH(a, b, c) => IrOp::MulUH(apply(*a), apply(*b), apply(*c)),
             IrOp::Div(a, b, c) => IrOp::Div(apply(*a), apply(*b), apply(*c)),
             IrOp::UDiv(a, b, c) => IrOp::UDiv(apply(*a), apply(*b), apply(*c)),
             IrOp::Mod(a, b, c) => IrOp::Mod(apply(*a), apply(*b), apply(*c)),
@@ -664,6 +676,7 @@ pub fn renumber_vregs(ir: &[IrOp], num_params: u32) -> Vec<IrOp> {
             },
             IrOp::Branch(l) => IrOp::Branch(*l),
             IrOp::BranchCond(c, l) => IrOp::BranchCond(*c, *l),
+            IrOp::CondMove(a, b, c) => IrOp::CondMove(apply(*a), apply(*b), *c),
             IrOp::Label(l) => IrOp::Label(*l),
             IrOp::Load(d, b, off) => IrOp::Load(apply(*d), apply(*b), *off),
             IrOp::Store(s, b, off) => IrOp::Store(apply(*s), apply(*b), *off),

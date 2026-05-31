@@ -399,6 +399,7 @@ fn decode_mul(opcode: u8, rn: u32, rx: u32, ry: u32) -> String {
         0x1C => format!("{} = TRNC MRF", r(rn)),
         0x1E => format!("{} = TRNC MRB", r(rn)),
         0x30 => format!("{} = {} * {}", f(rn), f(rx), f(ry)),
+        0x44 => format!("MRF = {} * {} (UUI)", r(rx), r(ry)),
         0x4C => format!("MRF = {} * {} (UUF)", r(rx), r(ry)),
         0x70 => format!("{} = {} * {} (SSI)", r(rn), r(rx), r(ry)),
         0x74 => format!("MRF = {} * {} (SSI)", r(rx), r(ry)),

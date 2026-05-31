@@ -3568,6 +3568,9 @@ fn parse_mr_mul(lhs: &str, rhs: &str, line: u32) -> Result<ComputeOp> {
     let ry = parse_dreg(ry_str, line)?;
     let is_b = lhs == "MRB";
 
+    if modifier.contains("UUI") {
+        return Ok(ComputeOp::Mul(MulOp::MrfMulUui { rx, ry }));
+    }
     if modifier.contains("UUF") {
         return Ok(ComputeOp::Mul(MulOp::MrfMulUuf { rx, ry }));
     }

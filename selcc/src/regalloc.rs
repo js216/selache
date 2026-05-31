@@ -22,7 +22,6 @@ use selinstr::encode::{
     ShiftOp,
 };
 
-const UREG_ASTATX: u16 = 0x73;
 const DAG_M_ZERO: u8 = 5;
 
 /// Rewrite virtual register references in a list of machine instructions,
@@ -54,24 +53,76 @@ pub fn allocate(
     reserves_r1: bool,
     label_positions: &[(u32, usize)],
 ) -> (Vec<MachInstr>, u32, Vec<usize>) {
-    let mut alloc = Allocator::new(num_params, reserves_r1);
-    let mut out = Vec::new();
-    let mut index_map = Vec::with_capacity(instrs.len());
-    let live_out = compute_live_out(instrs, label_positions);
-
+    let (live_in, live_out) = compute_liveness(instrs, label_positions);
+    let merge_info = compute_merge_info(instrs, label_positions);
+    let use_positions = compute_use_positions(instrs);
     let label_indices: BTreeSet<usize> = label_positions.iter().map(|&(_, idx)| idx).collect();
 
+    // Single forward pass. The spill slot is the home of every non-permanent
+    // vreg across a TRUE merge: at every such boundary the live register map is
+    // flushed to memory and cleared, so whichever predecessor reaches the merge
+    // at runtime, every vreg's value resides in its spill slot. The lazy
+    // register map is correct only within a straight-line region; the
+    // single-predecessor fall-through skip (`label_requires_flush`) preserves
+    // the map only where there is provably no merge to reconcile.
+    let mut alloc = Allocator::new(num_params, reserves_r1);
+    alloc.use_positions = use_positions;
+    let mut out = Vec::new();
+    let mut index_map = Vec::with_capacity(instrs.len());
+
     for (i, mi) in instrs.iter().enumerate() {
+        // Set the current source index before the label-landing flush so the
+        // Belady next-use scoring in `pick_evict_candidate` is correct.
+        alloc.cur_index = i;
         // Fall-through predecessor flush: at a label landing position,
         // store every live non-pinned vreg to its spill slot, then clear
         // the register map so the post-merge state forces reloads. The
         // stores precede the label landing in the output, so jumpers
         // that target the label (which already flushed at the Branch)
         // skip past the stores --- only the fall-through path runs them.
+        //
+        // Filter the stores by `live_in[i]`: a vreg sitting in a register
+        // on the fall-through edge but dead on entry to the label's block
+        // is never reloaded, so storing it is pure waste. This mirrors the
+        // liveness-filtered Branch jump-source flush below and removes the
+        // bulk of redundant spill traffic in branch-heavy code (every
+        // join point otherwise stored every mapped vreg unconditionally).
+        // The vreg is still unmapped so the next block reloads on use.
+        //
+        // Single-predecessor fall-through retention: only flush at a label
+        // that is a TRUE MERGE (>= 2 predecessors, or the target of some
+        // Branch). When the label's sole predecessor is the immediately-
+        // preceding non-Branch fall-through instruction, the live register map
+        // is carried directly into the next block --- there is exactly one
+        // predecessor, so no reconciliation is needed and the spill/reload
+        // round-trip the flush would force is pure waste. `label_requires_flush`
+        // is conservative: it flushes whenever there is any doubt about the
+        // label's predecessors or incoming edges, so a stale map can never
+        // survive into a real merge.
         if label_indices.contains(&i) {
-            alloc.flush_all_vregs(&mut out);
+            if label_requires_flush(instrs, &merge_info, i) {
+                alloc.flush_vregs(&mut out, Some(&live_in[i]));
+            } else {
+                // Skipping the flush carries the register map into the next
+                // block, but a basic-block boundary must still not leak an
+                // in-flight arg-setup pin: drain them exactly as `flush_vregs`
+                // would. A well-formed stream never places a label between an
+                // arg-setup Pass and its consuming CJUMP, so this is normally
+                // a no-op; it is kept for defensive parity with the flush path.
+                alloc.release_arg_setup_pins();
+            }
         }
         index_map.push(out.len());
+        // The Branch jump-source flush stores only vregs that are live
+        // across the outgoing edge (`live_out[i]`); a vreg sitting in a
+        // register but dead after the branch needs no spill store --- its
+        // value is never reloaded. Pass the boundary liveness in so
+        // `flush_vregs` can drop those dead stores. This is the bulk
+        // of the redundant spill traffic in branch-heavy hot loops, where
+        // the linear-scan core otherwise stores every mapped vreg at every
+        // conditional branch regardless of whether it is still needed.
+        alloc.live_at_branch.clone_from(&live_out[i]);
+        alloc.branch_liveness_valid = true;
         alloc.rewrite(mi, &mut out);
         alloc.release_dead_vregs(&live_out[i]);
     }
@@ -93,7 +144,7 @@ struct Allocator {
     pinned: BTreeSet<u8>,
     /// Vregs whose binding to their physical register is a permanent
     /// ABI mapping (parameter vregs and the return-value pseudo-vregs).
-    /// `flush_all_vregs` skips these so the parameter/return mapping
+    /// `flush_vregs` skips these so the parameter/return mapping
     /// survives across basic-block boundaries: a parameter never gets
     /// stored to a spill slot, so a flush followed by a reload-on-use
     /// would read garbage. Any vreg outside this set lives in memory
@@ -117,6 +168,30 @@ struct Allocator {
     spill_slots: u32,
     /// Spill map: virtual register -> spill slot offset.
     spill_map: BTreeMap<u16, u32>,
+    /// Liveness across the boundary currently being rewritten: the set
+    /// of vregs live-out of the instruction `allocate` is about to hand
+    /// to `rewrite`. The Branch jump-source flush stores only vregs in
+    /// this set --- a mapped vreg dead after the branch needs no spill
+    /// store, since nothing reloads it.
+    live_at_branch: BTreeSet<u16>,
+    /// Whether `live_at_branch` carries a valid liveness set for the
+    /// current instruction. `allocate` sets it before every `rewrite`;
+    /// callers that drive `rewrite` directly (the unit tests) leave it
+    /// `false`, so the Branch flush falls back to flushing every mapped
+    /// vreg (the original, always-correct behaviour).
+    branch_liveness_valid: bool,
+    /// Stage 2 (Belady furthest-next-use eviction): for every vreg, the
+    /// sorted list of source-instruction indices at which it is USED. When
+    /// a physical register must be freed, `pick_evict_candidate` evicts the
+    /// mapped vreg whose next use (the first index >= `cur_index`) is
+    /// furthest in the future, or which has no remaining use at all (dead).
+    /// Empty when `allocate` did not populate it (direct-`rewrite` tests),
+    /// in which case the picker falls back to round-robin.
+    use_positions: BTreeMap<u16, Vec<usize>>,
+    /// The source-instruction index currently being rewritten, set by
+    /// `allocate` before each `rewrite` call. Used together with
+    /// `use_positions` to score eviction candidates by next-use distance.
+    cur_index: usize,
 }
 
 fn spill_mem_access(write: bool) -> MemAccess {
@@ -168,41 +243,6 @@ fn emit_spill_access(out: &mut Vec<MachInstr>, slot: u32, dreg: u16, write: bool
         instr: Instruction::Modify {
             i_reg: target::FRAME_PTR,
             value: -(slot as i32),
-            width: MemWidth::Nw,
-            bitrev: false,
-        },
-        reloc: None,
-    });
-}
-
-fn emit_astat_spill_access(out: &mut Vec<MachInstr>, slot_marker: u32, write: bool) {
-    let offset = slot_marker as i32;
-    out.push(MachInstr {
-        instr: Instruction::Modify {
-            i_reg: target::FRAME_PTR,
-            value: offset,
-            width: MemWidth::Nw,
-            bitrev: false,
-        },
-        reloc: None,
-    });
-    out.push(MachInstr {
-        instr: Instruction::UregDagMove {
-            pm: false,
-            write,
-            ureg: UREG_ASTATX,
-            i_reg: target::FRAME_PTR,
-            m_reg: DAG_M_ZERO,
-            cond: target::COND_TRUE,
-            compute: None,
-            post_modify: false,
-        },
-        reloc: None,
-    });
-    out.push(MachInstr {
-        instr: Instruction::Modify {
-            i_reg: target::FRAME_PTR,
-            value: -offset,
             width: MemWidth::Nw,
             bitrev: false,
         },
@@ -305,7 +345,8 @@ fn collect_mul_refs(mul: &MulOp, refs: &mut VRegRefs) {
         | MrbMacSsf { rx, ry }
         | MrfMsubSsf { rx, ry }
         | MrbMsubSsf { rx, ry }
-        | MrfMulUuf { rx, ry } => {
+        | MrfMulUuf { rx, ry }
+        | MrfMulUui { rx, ry } => {
             add_vreg_use(refs, rx);
             add_vreg_use(refs, ry);
         }
@@ -498,6 +539,102 @@ fn collect_instr_refs(instr: &Instruction) -> VRegRefs {
     refs
 }
 
+/// Per-label merge classification used to gate the fall-through flush in
+/// `allocate`. For every instruction index that is a label landing, decide
+/// whether the register map must be flushed/cleared on entry (a TRUE MERGE)
+/// or may carry straight through from the single fall-through predecessor.
+///
+/// `pred_count[i]` is the number of CFG edges that target index `i` (the
+/// in-degree, obtained by inverting `compute_successors`). `branch_target`
+/// holds every index that is the `PcRelative` destination of some Branch ---
+/// i.e. reachable by a (non-fall-through) jump. A label is a true merge when
+/// it has two or more predecessors OR it is a branch target. Only when a
+/// label's SOLE predecessor is the immediately-preceding fall-through
+/// instruction --- and that instruction is not itself a Branch (a Branch
+/// flushes its own map at the jump-source) --- may the flush be skipped: with
+/// exactly one predecessor and no incoming jump there is nothing to
+/// reconcile, so the live register map carries directly into the next block.
+struct MergeInfo {
+    pred_count: Vec<usize>,
+    branch_target: BTreeSet<usize>,
+}
+
+/// Return `true` when the label landing at index `i` is a TRUE MERGE and the
+/// fall-through flush + map-clear must run. Conservative: any uncertainty
+/// (multiple predecessors, an incoming jump edge, or a predecessor that is
+/// not exactly the immediately-preceding non-Branch fall-through instruction)
+/// forces a flush --- the historically-correct behaviour. Only the narrow,
+/// provably-single-fall-through case skips it.
+fn label_requires_flush(instrs: &[MachInstr], info: &MergeInfo, i: usize) -> bool {
+    // Any incoming jump edge means a sibling predecessor reaches this label
+    // by a path that did not run the fall-through stores: flush.
+    if info.branch_target.contains(&i) {
+        return true;
+    }
+    // Zero or multiple predecessors is a merge (or an unreachable / entry
+    // block); flush to keep the canonical-spill-slot invariant.
+    if info.pred_count[i] != 1 {
+        return true;
+    }
+    // Exactly one predecessor. The only safe skip is when that predecessor
+    // is the immediately-preceding instruction reaching here by fall-through.
+    // Index 0 has no preceding instruction, so it cannot be a fall-through
+    // landing --- flush.
+    if i == 0 {
+        return true;
+    }
+    // The immediately-preceding instruction must NOT be a Branch: a Branch
+    // already flushed its map at the jump-source, so the map carried in is
+    // stale. (compute_successors keeps a conservative fall-through edge for
+    // unconditional/delayed branches, so such an edge can be this label's
+    // sole predecessor.) Flush in that case.
+    if matches!(instrs[i - 1].instr, Instruction::Branch { .. }) {
+        return true;
+    }
+    // Sole predecessor is the preceding non-Branch fall-through instruction:
+    // a straight-line edge with no reconciliation needed. Skip the flush so
+    // the register map carries directly into this block.
+    false
+}
+
+/// Build the `MergeInfo` for the instruction stream: predecessor in-degrees
+/// (inverted adjacency from `compute_successors`) and the set of indices that
+/// are the `PcRelative` destination of some Branch.
+fn compute_merge_info(instrs: &[MachInstr], label_positions: &[(u32, usize)]) -> MergeInfo {
+    let successors = compute_successors(instrs, label_positions);
+    let mut pred_count = vec![0usize; instrs.len()];
+    for succs in &successors {
+        for &s in succs {
+            pred_count[s] += 1;
+        }
+    }
+
+    // A branch target is the resolved index of a Branch's PcRelative label.
+    let label_to_index: BTreeMap<u32, usize> = label_positions.iter().copied().collect();
+    let mut branch_target = BTreeSet::new();
+    for mi in instrs {
+        if let Instruction::Branch {
+            call: false,
+            target: BranchTarget::PcRelative(label),
+            ..
+        } = mi.instr
+        {
+            if let Some(&idx) = (label >= 0)
+                .then(|| label_to_index.get(&(label as u32)))
+                .flatten()
+                .filter(|&&idx| idx < instrs.len())
+            {
+                branch_target.insert(idx);
+            }
+        }
+    }
+
+    MergeInfo {
+        pred_count,
+        branch_target,
+    }
+}
+
 fn compute_successors(instrs: &[MachInstr], label_positions: &[(u32, usize)]) -> Vec<Vec<usize>> {
     let label_to_index: BTreeMap<u32, usize> = label_positions.iter().copied().collect();
     let mut successors = vec![Vec::new(); instrs.len()];
@@ -541,7 +678,15 @@ fn compute_successors(instrs: &[MachInstr], label_positions: &[(u32, usize)]) ->
     successors
 }
 
-fn compute_live_out(instrs: &[MachInstr], label_positions: &[(u32, usize)]) -> Vec<BTreeSet<u16>> {
+/// Compute per-instruction `(live_in, live_out)` vreg sets via the usual
+/// backward dataflow fixpoint. `live_in[i]` is the set of vregs live on
+/// entry to instruction `i` (used by `i` or some later reachable
+/// instruction); `live_out[i]` is the union of the live-in sets of `i`'s
+/// successors.
+fn compute_liveness(
+    instrs: &[MachInstr],
+    label_positions: &[(u32, usize)],
+) -> (Vec<BTreeSet<u16>>, Vec<BTreeSet<u16>>) {
     let refs: Vec<VRegRefs> = instrs
         .iter()
         .map(|mi| collect_instr_refs(&mi.instr))
@@ -576,7 +721,28 @@ fn compute_live_out(instrs: &[MachInstr], label_positions: &[(u32, usize)]) -> V
         }
     }
 
-    live_out
+    (live_in, live_out)
+}
+
+/// Stage 2 helper: build, for every vreg, the ascending list of
+/// source-instruction indices at which it appears as a USE. A vreg's "next
+/// use" relative to instruction `i` is the first entry `>= i`; if none
+/// exists the vreg is dead from `i` onward and is the cheapest possible
+/// eviction target. Only uses (not defs) are recorded: a value resident in a
+/// register is needed again exactly when something reads it, and a pending
+/// def would overwrite it anyway. Fixed/forced-arg pseudo-regs are filtered
+/// out by `collect_instr_refs`, so they never appear here.
+fn compute_use_positions(instrs: &[MachInstr]) -> BTreeMap<u16, Vec<usize>> {
+    let mut positions: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    for (i, mi) in instrs.iter().enumerate() {
+        let refs = collect_instr_refs(&mi.instr);
+        for &vreg in &refs.uses {
+            positions.entry(vreg).or_default().push(i);
+        }
+    }
+    // Indices are appended in ascending `i` order, so each vector is already
+    // sorted --- the binary search in `next_use_distance` relies on this.
+    positions
 }
 
 impl Allocator {
@@ -641,6 +807,10 @@ impl Allocator {
             next_evict: 0,
             spill_slots: 0,
             spill_map: BTreeMap::new(),
+            live_at_branch: BTreeSet::new(),
+            branch_liveness_valid: false,
+            use_positions: BTreeMap::new(),
+            cur_index: 0,
         }
     }
 
@@ -777,7 +947,20 @@ impl Allocator {
     /// Permanent vregs (parameter vregs and the return-value pseudo-
     /// vregs) are skipped: they have no spill slot and the ABI keeps
     /// their register binding live across the whole function.
-    fn flush_all_vregs(&mut self, spill: &mut Vec<MachInstr>) {
+    /// Liveness-aware boundary flush. `live` is the set of vregs live
+    /// across the boundary (the rewriting instruction's `live_out`):
+    /// only those are stored to their spill slots, because a mapped vreg
+    /// dead after the boundary is never reloaded and its store is pure
+    /// waste. When `live` is `None` every non-permanent vreg is stored
+    /// (the unconditionally-correct behaviour used at label landings and
+    /// by direct-`rewrite` unit tests).
+    ///
+    /// Regardless of `live`, EVERY non-permanent vreg is unmapped and its
+    /// physical register released: a boundary clears the register map so
+    /// the next basic block reloads from spill slots, and a dead vreg's
+    /// register must be freed for the next block rather than lingering as
+    /// occupied.
+    fn flush_vregs(&mut self, spill: &mut Vec<MachInstr>, live: Option<&BTreeSet<u16>>) {
         let to_flush: Vec<(u16, u8)> = self
             .vreg_to_phys
             .iter()
@@ -786,11 +969,16 @@ impl Allocator {
             .collect();
 
         for (vreg, phys) in to_flush {
-            let slot = self.spill_slot_for(vreg);
-            // Use a positive offset so `adjust_frame_offsets` reroutes
-            // the slot into the spill region (matching the convention
-            // in `spill_caller_saved` and `get_phys`).
-            emit_spill_access(spill, slot, phys as u16, true);
+            // Skip the spill store for vregs dead across this boundary;
+            // they are still unmapped below so the next block sees a
+            // clean register file.
+            if live.is_none_or(|l| l.contains(&vreg)) {
+                let slot = self.spill_slot_for(vreg);
+                // Use a positive offset so `adjust_frame_offsets` reroutes
+                // the slot into the spill region (matching the convention
+                // in `spill_caller_saved` and `get_phys`).
+                emit_spill_access(spill, slot, phys as u16, true);
+            }
             self.vreg_to_phys.remove(&vreg);
             self.phys_to_vreg.remove(&phys);
             // The phys may have been pinned by spill_caller_saved at an
@@ -803,15 +991,17 @@ impl Allocator {
         // sit between an arg-setup Pass and its consuming CJUMP, but
         // defensively release them here so a stale pin cannot leak
         // into the next basic block.
+        self.release_arg_setup_pins();
+    }
+
+    /// Release any in-flight arg-setup pins, unpinning their physical
+    /// registers. Called at every basic-block boundary so a pin taken by an
+    /// arg-setup `Pass` cannot leak past the boundary if (defensively) a
+    /// label or branch ever lands between the Pass and its consuming CJUMP.
+    fn release_arg_setup_pins(&mut self) {
         for p in self.arg_setup_pins.drain(..) {
             self.pinned.remove(&p);
         }
-    }
-
-    fn has_flushable_vregs(&self) -> bool {
-        self.vreg_to_phys
-            .keys()
-            .any(|vreg| !self.permanent_vregs.contains(vreg))
     }
 
     /// Return a free callee-saved physical register, if any. A register
@@ -925,30 +1115,92 @@ impl Allocator {
         evict_phys
     }
 
-    /// Pick a physical register to evict.  Prefer caller-saved registers
-    /// (R0-R7) since evicting them is cheaper (no prologue/epilogue cost).
-    /// Uses round-robin within the caller-saved group for fairness.
+    /// Distance to the next use of `vreg` at or after the current source
+    /// instruction (`cur_index`), used to score eviction candidates.
+    /// `None` means the vreg has no remaining use (dead) and is the cheapest
+    /// possible eviction target; `Some(d)` is the index of its next use, so a
+    /// larger `d` is a better (furthest-next-use) candidate. When
+    /// `use_positions` is empty (direct-`rewrite` callers) every vreg scores
+    /// as "next use at cur_index", collapsing the tie-break to the caller's
+    /// register-class preference + round-robin fallback.
+    fn next_use_distance(&self, vreg: u16) -> Option<usize> {
+        let uses = self.use_positions.get(&vreg)?;
+        // First recorded use index >= cur_index. The vectors are built in
+        // ascending order by `compute_use_positions`, so a binary search is
+        // valid. `partition_point` returns the count of elements < cur_index.
+        let idx = uses.partition_point(|&p| p < self.cur_index);
+        uses.get(idx).copied()
+    }
+
+    /// Pick a physical register to evict (Stage 2: Belady furthest-next-use).
+    /// Among the currently-occupied, unpinned registers, prefer caller-saved
+    /// (R0-R7) over callee-saved (evicting a caller-saved costs no
+    /// prologue/epilogue), and within each class evict the vreg whose NEXT
+    /// use lies furthest in the future --- a dead vreg (no remaining use)
+    /// wins outright, since reloading it is never needed. Ties keep the
+    /// round-robin `next_evict` cursor as a deterministic fallback so the
+    /// behaviour with no next-use information (unit tests) is unchanged.
     /// Pinned registers (e.g. R0 aliased to vreg 0) are never candidates.
+    ///
+    /// This is a pure allocation-quality choice: WHICH resident vreg to spill.
+    /// Whatever is chosen is stored to its spill slot and reloaded on next
+    /// use, so it cannot affect cross-block correctness.
     fn pick_evict_candidate(&mut self) -> u8 {
-        let n_caller = target::CALLER_SAVED.len() as u8;
-        let start = self.next_evict;
-        loop {
-            let candidate = target::CALLER_SAVED[self.next_evict as usize];
-            self.next_evict = (self.next_evict + 1) % n_caller;
-            if !self.pinned.contains(&candidate) && self.phys_to_vreg.contains_key(&candidate) {
-                return candidate;
+        // Score: dead vregs (None next use) are best (use usize::MAX);
+        // otherwise the next-use index (larger = evict sooner is better).
+        let score = |this: &Self, phys: u8| -> usize {
+            match this.phys_to_vreg.get(&phys) {
+                Some(&vreg) => this.next_use_distance(vreg).unwrap_or(usize::MAX),
+                None => 0,
             }
-            if self.next_evict == start {
-                break;
+        };
+
+        // Caller-saved class: iterate starting at the round-robin cursor so
+        // that when all scores tie (no next-use information --- the unit-test
+        // path) the chosen register and cursor advance match the original
+        // round-robin picker exactly. A strictly-greater comparison keeps the
+        // first (round-robin-earliest) candidate among equals.
+        let n_caller = target::CALLER_SAVED.len();
+        let mut best: Option<(u8, usize)> = None;
+        for k in 0..n_caller {
+            let idx = (self.next_evict as usize + k) % n_caller;
+            let candidate = target::CALLER_SAVED[idx];
+            if self.pinned.contains(&candidate) || !self.phys_to_vreg.contains_key(&candidate) {
+                continue;
+            }
+            let s = score(self, candidate);
+            let better = match best {
+                None => true,
+                Some((_, bs)) => s > bs,
+            };
+            if better {
+                best = Some((candidate, s));
             }
         }
-        // Fallback: scan all registers for an occupied, unpinned one.
-        for i in 0..target::NUM_REGS {
-            if !self.pinned.contains(&i) && self.phys_to_vreg.contains_key(&i) {
-                return i;
+        if let Some((phys, _)) = best {
+            if let Some(pos) = target::CALLER_SAVED.iter().position(|&p| p == phys) {
+                self.next_evict = ((pos + 1) % n_caller) as u8;
+            }
+            return phys;
+        }
+
+        // No caller-saved register is evictable: fall back to callee-saved,
+        // again preferring the furthest next use.
+        let mut best: Option<(u8, usize)> = None;
+        for &candidate in target::CALLEE_SAVED {
+            if self.pinned.contains(&candidate) || !self.phys_to_vreg.contains_key(&candidate) {
+                continue;
+            }
+            let s = score(self, candidate);
+            let better = match best {
+                None => true,
+                Some((_, bs)) => s > bs,
+            };
+            if better {
+                best = Some((candidate, s));
             }
         }
-        0
+        best.map(|(phys, _)| phys).unwrap_or(0)
     }
 
     fn rewrite(&mut self, mi: &MachInstr, out: &mut Vec<MachInstr>) {
@@ -1022,28 +1274,44 @@ impl Allocator {
                 delayed,
             } => {
                 // Jump-source flush: a Branch ends the current basic
-                // block, so every live non-permanent vreg must be in
-                // its spill slot before control transfers. The
-                // matching label-landing flush in `allocate` handles
+                // block, so every vreg live across the outgoing edge
+                // must be in its spill slot before control transfers.
+                // The matching label-landing flush in `allocate` handles
                 // the fall-through side of the merge.
-                if cond == target::COND_TRUE {
-                    self.flush_all_vregs(&mut spill_pre);
-                } else if !self.has_flushable_vregs() {
-                    for p in self.arg_setup_pins.drain(..) {
-                        self.pinned.remove(&p);
-                    }
+                //
+                // Only vregs live-out of this branch need storing: a
+                // mapped vreg dead after the branch is never reloaded on
+                // any successor path, so its boundary store is wasted.
+                // `live_at_branch` carries that liveness when `allocate`
+                // drives the rewrite; direct-`rewrite` callers leave
+                // `branch_liveness_valid` false and fall back to flushing
+                // every mapped vreg.
+                let live: Option<&BTreeSet<u16>> = if self.branch_liveness_valid {
+                    Some(&self.live_at_branch)
                 } else {
-                    // Conditional branches consume flags from the
-                    // immediately preceding compare. The spill stores
-                    // inserted by the boundary flush may update ASTAT,
-                    // so preserve the condition codes across the flush
-                    // and restore them directly before the branch.
-                    let slot_marker = self.spill_slots + 1;
-                    self.spill_slots += 2;
-                    emit_astat_spill_access(&mut spill_pre, slot_marker, true);
-                    self.flush_all_vregs(&mut spill_pre);
-                    emit_astat_spill_access(&mut spill_pre, slot_marker, false);
-                }
+                    None
+                };
+                // Take an owned copy so the flush can borrow `self` mutably
+                // without aliasing the `live_at_branch` field.
+                let live_owned = live.cloned();
+                let live = live_owned.as_ref();
+                // The boundary flush emits only data-memory spill STORES
+                // (`DM(slot,I6)=Rn`, ComputeLoadStore with no compute).
+                // On SHARC+ the ASTAT condition flags (AZ/AN/AC/...) that
+                // a conditional branch consumes are written only by ALU
+                // operations --- "the [ASTAT] flags ... reflect the
+                // status of the most recent ALU operation" (SHARC+ Core
+                // Programming Reference). A data move to memory is not an
+                // ALU operation and leaves those flags unchanged, so the
+                // flush stores cannot clobber the condition codes set by
+                // the compare that precedes the conditional branch. No
+                // ASTAT save/restore wrapper is therefore needed; the
+                // previous wrapper spent two extra memory accesses per
+                // conditional-branch flush preserving flags that the
+                // stores never touched. `flush_vregs` already releases
+                // any lingering arg-setup pins, so a single call handles
+                // every branch condition.
+                self.flush_vregs(&mut spill_pre, live);
                 Instruction::Branch {
                     call,
                     cond,
@@ -1621,6 +1889,10 @@ impl Allocator {
                 rx: self.get_phys(rx, spill),
                 ry: self.get_phys(ry, spill),
             },
+            MrfMulUui { rx, ry } => MrfMulUui {
+                rx: self.get_phys(rx, spill),
+                ry: self.get_phys(ry, spill),
+            },
             ReadMr0f { rn } => ReadMr0f {
                 rn: self.get_phys(rn, spill),
             },
@@ -1915,6 +2187,206 @@ mod tests {
     }
 
     #[test]
+    fn label_landing_flush_skips_dead_vregs() {
+        // Two vregs (10, 20) are materialized and held in registers when
+        // control reaches a label landing. vreg 10 is used after the label
+        // (live across the fall-through edge); vreg 20 is never used again
+        // (dead). The fall-through flush at the label must store ONLY the
+        // live vreg 10 --- storing the dead vreg 20 is pure waste because
+        // nothing reloads it. Before the liveness filter was applied to the
+        // label-landing flush this emitted two spill stores; it must now emit
+        // exactly one.
+        //
+        // The label here is a TRUE MERGE (a conditional Branch at index 0
+        // targets it, and index 3 also falls into it), so the Stage-1
+        // register-retention gate still flushes at the landing --- this test
+        // continues to exercise the liveness-filtered flush path rather than
+        // the single-fall-through skip path.
+        let instrs = vec![
+            // 0: conditional Branch to the label (jump-source predecessor);
+            //    keeps the fall-through edge to index 1 as well.
+            MachInstr {
+                instr: Instruction::Branch {
+                    call: false,
+                    cond: 1,
+                    target: BranchTarget::PcRelative(99),
+                    delayed: false,
+                },
+                reloc: None,
+            },
+            // 1: def vreg 10
+            MachInstr {
+                instr: Instruction::LoadImm {
+                    ureg: target::ureg_r(10),
+                    value: 1,
+                },
+                reloc: None,
+            },
+            // 2: def vreg 20 (dead from index 3 onward)
+            MachInstr {
+                instr: Instruction::LoadImm {
+                    ureg: target::ureg_r(20),
+                    value: 2,
+                },
+                reloc: None,
+            },
+            // 3: label landing (label id 99); uses vreg 10, defines vreg 11
+            MachInstr {
+                instr: Instruction::Compute {
+                    cond: target::COND_TRUE,
+                    compute: ComputeOp::Alu(AluOp::Pass { rn: 11, rx: 10 }),
+                },
+                reloc: None,
+            },
+            // 4: uses vreg 11
+            MachInstr {
+                instr: Instruction::Return {
+                    interrupt: false,
+                    cond: target::COND_TRUE,
+                    delayed: false,
+                    lr: false,
+                    compute: Some(ComputeOp::Alu(AluOp::Pass { rn: 0, rx: 11 })),
+                },
+                reloc: None,
+            },
+        ];
+        // Label lands at instruction index 3.
+        let (out, _, index_map) = allocate(&instrs, 0, false, &[(99, 3)]);
+        // Spill stores inserted by the label-landing flush appear in the
+        // output between the fall-through predecessor (index 2) and the
+        // rewritten label-landing instruction --- this window excludes the
+        // Branch jump-source flush at index 0.
+        let fallthrough_pred = index_map[2];
+        let landing = index_map[3];
+        let flush_stores = out[fallthrough_pred..landing]
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.instr,
+                    Instruction::ComputeLoadStore { access, .. } if access.write
+                )
+            })
+            .count();
+        assert_eq!(
+            flush_stores, 1,
+            "label-landing flush must store only the live vreg, not the \
+             dead one: {out:#?}"
+        );
+    }
+
+    #[test]
+    fn single_pred_fallthrough_retains_map_but_merge_flushes() {
+        // Stage-1 register retention. A vreg (10) is materialized, then a
+        // label lands whose ONLY predecessor is the immediately-preceding
+        // fall-through instruction (no Branch targets it). vreg 10 is live
+        // across the label. Because the label has exactly one fall-through
+        // predecessor, the register map must carry straight through: NO spill
+        // store may be emitted at the landing. Before the merge-detection
+        // gate, the label-landing flush stored vreg 10 unconditionally, so
+        // this asserted-zero count was 1 --- the test fails pre-change.
+        //
+        // The same stream with a Branch added that targets the label turns it
+        // into a >= 2-predecessor merge, which MUST still flush (one spill
+        // store), proving the gate is not blanket-disabling the flush.
+        let mk_loadimm = |vreg: u16, value: u32| MachInstr {
+            instr: Instruction::LoadImm {
+                ureg: target::ureg_r(vreg),
+                value,
+            },
+            reloc: None,
+        };
+        let use_vreg10 = || MachInstr {
+            // label landing: uses vreg 10, defines vreg 11.
+            instr: Instruction::Compute {
+                cond: target::COND_TRUE,
+                compute: ComputeOp::Alu(AluOp::Pass { rn: 11, rx: 10 }),
+            },
+            reloc: None,
+        };
+        let ret_vreg11 = || MachInstr {
+            instr: Instruction::Return {
+                interrupt: false,
+                cond: target::COND_TRUE,
+                delayed: false,
+                lr: false,
+                compute: Some(ComputeOp::Alu(AluOp::Pass { rn: 0, rx: 11 })),
+            },
+            reloc: None,
+        };
+
+        let count_flush_stores = |out: &[MachInstr], landing: usize| {
+            out[..landing]
+                .iter()
+                .filter(|m| {
+                    matches!(
+                        m.instr,
+                        Instruction::ComputeLoadStore { access, .. } if access.write
+                    )
+                })
+                .count()
+        };
+
+        // Case A: single fall-through predecessor. Label at index 1.
+        //   0: def vreg 10
+        //   1: label landing, uses vreg 10
+        //   2: return vreg 11
+        let single_pred = vec![mk_loadimm(10, 1), use_vreg10(), ret_vreg11()];
+        let (out_a, _, map_a) = allocate(&single_pred, 0, false, &[(0, 1)]);
+        assert_eq!(
+            count_flush_stores(&out_a, map_a[1]),
+            0,
+            "single fall-through predecessor must retain the register map \
+             (no spill store at the landing): {out_a:#?}"
+        );
+
+        // Case B: the label at index 3 is BOTH fallen-into (from index 2,
+        // which is a non-Branch that keeps vreg 10 mapped) AND the target of
+        // a Branch at index 0 --- a >= 2-predecessor merge. The landing must
+        // flush the still-mapped, still-live vreg 10 to its spill slot so the
+        // jump-source path reads a coherent value. Count only stores emitted
+        // between the fall-through predecessor (index 2) and the landing, so
+        // the assertion isolates the LANDING flush rather than any earlier
+        // branch jump-source flush.
+        //   0: Branch to label (PcRelative 7), cond --- jump-source predecessor
+        //   1: def vreg 10
+        //   2: def vreg 12 (non-Branch fall-through; keeps vreg 10 mapped)
+        //   3: label landing (label id 7), uses vreg 10
+        //   4: return vreg 11
+        let merge = vec![
+            MachInstr {
+                instr: Instruction::Branch {
+                    call: false,
+                    cond: 1, // conditional: keeps the fall-through edge too
+                    target: BranchTarget::PcRelative(7),
+                    delayed: false,
+                },
+                reloc: None,
+            },
+            mk_loadimm(10, 1),
+            mk_loadimm(12, 2),
+            use_vreg10(),
+            ret_vreg11(),
+        ];
+        let (out_b, _, map_b) = allocate(&merge, 0, false, &[(7, 3)]);
+        let fallthrough_pred = map_b[2];
+        let landing = map_b[3];
+        let landing_stores = out_b[fallthrough_pred..landing]
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.instr,
+                    Instruction::ComputeLoadStore { access, .. } if access.write
+                )
+            })
+            .count();
+        assert!(
+            landing_stores >= 1,
+            "a label that is a Branch target is a real merge and MUST flush \
+             the live register map to its spill slot at the landing: {out_b:#?}"
+        );
+    }
+
+    #[test]
     fn allocate_maps_vregs() {
         // Two vregs added then summed.
         let instrs = vec![
@@ -2155,10 +2627,53 @@ mod tests {
                 reloc: None,
             },
         ];
-        let live_out = compute_live_out(&instrs, &[]);
+        let live_out = compute_liveness(&instrs, &[]).1;
         assert!(
             live_out[1].contains(&11),
             "indirect call must keep post-return vregs live: {live_out:?}"
+        );
+    }
+
+    #[test]
+    fn evict_picks_furthest_next_use() {
+        // Stage 2: when a physical register must be freed, the picker must
+        // evict the resident vreg whose NEXT use is furthest in the future
+        // (Belady), not the naive round-robin victim. Fill the caller-saved
+        // pool with vregs and give each a distinct next-use index. The
+        // round-robin cursor starts at 0, so the OLD picker would evict the
+        // vreg in CALLER_SAVED[0]; the new picker must instead evict the vreg
+        // whose use is furthest out. Constructed so those two differ ---
+        // CALLER_SAVED[0]'s vreg is used SOONEST, another's is used latest ---
+        // so this asserts the Belady choice and fails under round-robin.
+        let mut alloc = Allocator::new(0, false);
+        alloc.cur_index = 100;
+        // Occupy every caller-saved register with a unique vreg, and record a
+        // next-use index for each: the register at CALLER_SAVED[0] is used
+        // almost immediately (small index), the LAST caller-saved register's
+        // vreg is used furthest in the future (large index).
+        let n = target::CALLER_SAVED.len();
+        let mut expected_phys = target::CALLER_SAVED[0];
+        let mut max_use = 0usize;
+        for (k, &phys) in target::CALLER_SAVED.iter().enumerate() {
+            let vreg = 1000 + k as u16;
+            alloc.vreg_to_phys.insert(vreg, phys);
+            alloc.phys_to_vreg.insert(phys, vreg);
+            // Use index increases with k, so CALLER_SAVED[0] is soonest and
+            // CALLER_SAVED[n-1] is furthest.
+            let use_at = 200 + k * 10;
+            alloc.use_positions.insert(vreg, vec![use_at]);
+            if use_at > max_use {
+                max_use = use_at;
+                expected_phys = phys;
+            }
+        }
+        assert_eq!(expected_phys, target::CALLER_SAVED[n - 1]);
+        let chosen = alloc.pick_evict_candidate();
+        assert_eq!(
+            chosen, expected_phys,
+            "eviction must pick the furthest-next-use vreg's register \
+             (R{expected_phys}), not the round-robin victim R{}",
+            target::CALLER_SAVED[0]
         );
     }
 
