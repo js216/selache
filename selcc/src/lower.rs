@@ -707,6 +707,162 @@ fn assigned_in_stmts(stmts: &[Stmt]) -> HashSet<String> {
     set
 }
 
+fn add_address_taken_roots_in_stmts(stmts: &[Stmt], set: &mut HashSet<String>) {
+    for stmt in stmts {
+        add_address_taken_roots_in_stmt(stmt, set);
+    }
+}
+
+fn add_address_taken_roots_in_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) | Stmt::CaseLabel(expr) => {
+            add_address_taken_roots_expr(expr, set);
+        }
+        Stmt::VarDecl { init, vla_dim, .. } => {
+            if let Some(expr) = init {
+                add_address_taken_roots_expr(expr, set);
+            }
+            if let Some(expr) = vla_dim {
+                add_address_taken_roots_expr(expr, set);
+            }
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            add_address_taken_roots_expr(cond, set);
+            add_address_taken_roots_in_stmts(then_body, set);
+            if let Some(body) = else_body {
+                add_address_taken_roots_in_stmts(body, set);
+            }
+        }
+        Stmt::While { cond, body } | Stmt::DoWhile { cond, body } => {
+            add_address_taken_roots_expr(cond, set);
+            add_address_taken_roots_in_stmts(body, set);
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(stmt) = init {
+                add_address_taken_roots_in_stmt(stmt, set);
+            }
+            if let Some(expr) = cond {
+                add_address_taken_roots_expr(expr, set);
+            }
+            if let Some(expr) = step {
+                add_address_taken_roots_expr(expr, set);
+            }
+            add_address_taken_roots_in_stmts(body, set);
+        }
+        Stmt::Block(body) | Stmt::DeclGroup(body) => add_address_taken_roots_in_stmts(body, set),
+        Stmt::Switch { expr, body } => {
+            add_address_taken_roots_expr(expr, set);
+            add_address_taken_roots_in_stmts(body, set);
+        }
+        Stmt::Label(_, inner) => add_address_taken_roots_in_stmt(inner, set),
+        Stmt::Return(None)
+        | Stmt::DefaultLabel
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Goto(_)
+        | Stmt::Asm(_)
+        | Stmt::EnumDecl(_) => {}
+    }
+}
+
+fn add_address_taken_roots_expr(expr: &Expr, set: &mut HashSet<String>) {
+    match expr {
+        Expr::AddrOf(inner) => {
+            if let Some(name) = lvalue_root_ident(inner) {
+                set.insert(name.to_string());
+            }
+            add_address_taken_roots_expr(inner, set);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Deref(operand)
+        | Expr::Cast(_, operand)
+        | Expr::PreInc(operand)
+        | Expr::PreDec(operand)
+        | Expr::PostInc(operand)
+        | Expr::PostDec(operand)
+        | Expr::RealPart(operand)
+        | Expr::ImagPart(operand)
+        | Expr::Member(operand, _)
+        | Expr::Arrow(operand, _) => add_address_taken_roots_expr(operand, set),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Assign {
+            target: lhs,
+            value: rhs,
+        }
+        | Expr::CompoundAssign {
+            target: lhs,
+            value: rhs,
+            ..
+        }
+        | Expr::Index(lhs, rhs)
+        | Expr::Comma(lhs, rhs) => {
+            add_address_taken_roots_expr(lhs, set);
+            add_address_taken_roots_expr(rhs, set);
+        }
+        Expr::Call { args, .. } => {
+            for arg in args {
+                add_address_taken_roots_expr(arg, set);
+            }
+        }
+        Expr::CallIndirect { func_expr, args } => {
+            add_address_taken_roots_expr(func_expr, set);
+            for arg in args {
+                add_address_taken_roots_expr(arg, set);
+            }
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            add_address_taken_roots_expr(cond, set);
+            add_address_taken_roots_expr(then_expr, set);
+            add_address_taken_roots_expr(else_expr, set);
+        }
+        Expr::Sizeof(arg) => {
+            if let SizeofArg::Expr(inner) = arg.as_ref() {
+                add_address_taken_roots_expr(inner, set);
+            }
+        }
+        Expr::InitList(items) => {
+            for item in items {
+                add_address_taken_roots_expr(item, set);
+            }
+        }
+        Expr::DesignatedInit { value, .. } => add_address_taken_roots_expr(value, set),
+        Expr::ArrayDesignator { index, value } => {
+            add_address_taken_roots_expr(index, set);
+            add_address_taken_roots_expr(value, set);
+        }
+        Expr::IntLit(..)
+        | Expr::CharLit(_)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::Ident(_) => {}
+    }
+}
+
+fn lvalue_root_ident(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Ident(name) => Some(name),
+        Expr::Member(base, _) | Expr::Arrow(base, _) | Expr::Index(base, _) => {
+            lvalue_root_ident(base)
+        }
+        Expr::Deref(inner) | Expr::Cast(_, inner) => lvalue_root_ident(inner),
+        _ => None,
+    }
+}
 
 fn invalidate_const_locals(ctx: &mut LowerCtx, names: &HashSet<String>) {
     for name in names {
@@ -1094,21 +1250,25 @@ pub fn lower_function_with_known(
 
             if slot_idx >= target::ARG_REGS.len() {
                 // Parameters beyond the register-passed slots: load from
-                // the caller's stack-arg area, then snapshot immediately.
-                // Their incoming region is above I6 and later expression
-                // lowering can keep the value live for hundreds of
-                // instructions; a local copy avoids relying on a long-lived
-                // scratch register for ABI-owned stack memory.
+                // the caller's stack-arg area. Snapshot only when the value
+                // must survive calls or reassignment; leaf use can stay in a
+                // fresh vreg, which avoids frame-slot-zero aliasing with the
+                // positive stack-arg area.
                 let stack_offset = (slot_idx - target::ARG_REGS.len()) as u32;
-                let slot_offset = ctx.alloc_stack_slot();
                 let param_vreg = ctx.alloc_vreg();
                 if is_float_param {
                     ctx.vreg_is_float.insert(param_vreg, true);
                 }
                 ctx.emit(IrOp::LoadStackArg(param_vreg, stack_offset));
-                ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
-                ctx.locals
-                    .insert(name.clone(), LocalStorage::Stack(slot_offset));
+                if has_call || reassigned.contains(name) {
+                    let slot_offset = ctx.alloc_stack_slot();
+                    ctx.emit(IrOp::Store(param_vreg, 0, slot_offset as i32));
+                    ctx.locals
+                        .insert(name.clone(), LocalStorage::Stack(slot_offset));
+                } else {
+                    ctx.locals
+                        .insert(name.clone(), LocalStorage::Reg(param_vreg));
+                }
                 slot_idx += 1;
                 continue;
             }
@@ -1789,6 +1949,8 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
     let has_vla = block_has_vla(stmts);
     let saved_depth = ctx.vla_depth;
     let snap = ctx.snapshot_scope();
+    let mut assigned = assigned_in_stmts(stmts);
+    add_address_taken_roots_in_stmts(stmts, &mut assigned);
 
     if has_vla {
         // Save stack pointer before any VLA allocations in this block.
@@ -1812,6 +1974,7 @@ fn lower_block_with_vla_scope(ctx: &mut LowerCtx, stmts: &[Stmt]) -> Result<()> 
         ctx.vla_depth = saved_depth;
     }
     ctx.restore_scope(snap);
+    invalidate_const_locals(ctx, &assigned);
     Ok(())
 }
 
@@ -4195,7 +4358,12 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let src_addr = lower_struct_expr_addr(ctx, value)?;
                 let dst_addr = lower_lvalue_addr(ctx, target)?;
                 emit_struct_copy_exact_aligned(
-                    ctx, dst_addr, src_addr, byte_size, src_aligned, dst_aligned,
+                    ctx,
+                    dst_addr,
+                    src_addr,
+                    byte_size,
+                    src_aligned,
+                    dst_aligned,
                 );
                 let result = ctx.alloc_vreg();
                 ctx.emit(IrOp::Load(result, dst_addr, 0));
@@ -5442,8 +5610,12 @@ fn lower_comparison(
 /// Widen a 32-bit vreg to a 64-bit register pair, using sign or zero extension
 /// based on the expression type.
 fn widen_to_64(ctx: &mut LowerCtx, val: VReg, expr: &Expr) -> VReg {
+    widen_to_64_with_signedness(ctx, val, is_unsigned_expr(expr, ctx))
+}
+
+fn widen_to_64_with_signedness(ctx: &mut LowerCtx, val: VReg, unsigned: bool) -> VReg {
     let dst = ctx.alloc_vreg_pair();
-    if is_unsigned_expr(expr, ctx) {
+    if unsigned {
         ctx.emit(IrOp::IntToLongLong(dst, val));
     } else {
         ctx.emit(IrOp::SExtToLongLong(dst, val));
@@ -5548,9 +5720,17 @@ fn lower_log_and(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     // safe to evaluate unconditionally.
     if is_speculatable(rhs) {
         let l = lower_expr(ctx, lhs)?;
-        let lb = if expr_is_boolean(lhs) { l } else { lower_bool_value(ctx, l) };
+        let lb = if expr_is_boolean(lhs) {
+            l
+        } else {
+            lower_bool_value(ctx, l)
+        };
         let r = lower_expr(ctx, rhs)?;
-        let rb = if expr_is_boolean(rhs) { r } else { lower_bool_value(ctx, r) };
+        let rb = if expr_is_boolean(rhs) {
+            r
+        } else {
+            lower_bool_value(ctx, r)
+        };
         let dst = ctx.alloc_vreg();
         ctx.emit(IrOp::BitAnd(dst, lb, rb));
         return Ok(dst);
@@ -5597,9 +5777,17 @@ fn lower_log_or(ctx: &mut LowerCtx, lhs: &Expr, rhs: &Expr) -> Result<VReg> {
     // safe to evaluate unconditionally.
     if is_speculatable(rhs) {
         let l = lower_expr(ctx, lhs)?;
-        let lb = if expr_is_boolean(lhs) { l } else { lower_bool_value(ctx, l) };
+        let lb = if expr_is_boolean(lhs) {
+            l
+        } else {
+            lower_bool_value(ctx, l)
+        };
         let r = lower_expr(ctx, rhs)?;
-        let rb = if expr_is_boolean(rhs) { r } else { lower_bool_value(ctx, r) };
+        let rb = if expr_is_boolean(rhs) {
+            r
+        } else {
+            lower_bool_value(ctx, r)
+        };
         let dst = ctx.alloc_vreg();
         ctx.emit(IrOp::BitOr(dst, lb, rb));
         return Ok(dst);
@@ -6795,7 +6983,10 @@ fn lower_if(
     let mut assigned = assigned_in_stmts(then_body);
     if let Some(else_stmts) = else_body {
         assigned.extend(assigned_in_stmts(else_stmts));
+        add_address_taken_roots_in_stmts(else_stmts, &mut assigned);
     }
+    add_address_taken_roots_expr(cond, &mut assigned);
+    add_address_taken_roots_in_stmts(then_body, &mut assigned);
     if let Expr::IntLit(v, _) | Expr::CharLit(v) = cond {
         let selected = if *v != 0 { Some(then_body) } else { else_body };
         if let Some(body) = selected {
@@ -7053,6 +7244,8 @@ fn lower_while(ctx: &mut LowerCtx, cond: &Expr, body: &[Stmt]) -> Result<()> {
     let break_label = ctx.alloc_label();
     let mut assigned = assigned_in_stmts(body);
     collect_assigned_expr(cond, &mut assigned);
+    add_address_taken_roots_expr(cond, &mut assigned);
+    add_address_taken_roots_in_stmts(body, &mut assigned);
     invalidate_const_locals(ctx, &assigned);
 
     ctx.emit(IrOp::Label(continue_label));
@@ -7098,10 +7291,16 @@ fn lower_for(
     let mut assigned = assigned_in_stmts(body);
     if let Some(step_expr) = step {
         collect_assigned_expr(step_expr, &mut assigned);
+        add_address_taken_roots_expr(step_expr, &mut assigned);
     }
     if let Some(cond_expr) = cond {
         collect_assigned_expr(cond_expr, &mut assigned);
+        add_address_taken_roots_expr(cond_expr, &mut assigned);
     }
+    if let Some(init_stmt) = init {
+        add_address_taken_roots_in_stmt(init_stmt, &mut assigned);
+    }
+    add_address_taken_roots_in_stmts(body, &mut assigned);
     invalidate_const_locals(ctx, &assigned);
 
     // C99 6.8.6.2: a `continue` inside a `for` must jump to the
@@ -7153,6 +7352,8 @@ fn lower_do_while(ctx: &mut LowerCtx, body: &[Stmt], cond: &Expr) -> Result<()> 
     let break_label = ctx.alloc_label();
     let mut assigned = assigned_in_stmts(body);
     collect_assigned_expr(cond, &mut assigned);
+    add_address_taken_roots_expr(cond, &mut assigned);
+    add_address_taken_roots_in_stmts(body, &mut assigned);
     invalidate_const_locals(ctx, &assigned);
 
     ctx.emit(IrOp::Label(top_label));
@@ -9530,10 +9731,7 @@ fn lower_ternary(
     // picks the right one based on the condition's flags. Removes the two
     // branches a ternary otherwise needs (common in inlined shift guards).
     let result_is_float = result_ty.as_ref().is_some_and(|t| t.is_float());
-    if !result_is_64
-        && !result_is_float
-        && is_speculatable(then_expr)
-        && is_speculatable(else_expr)
+    if !result_is_64 && !result_is_float && is_speculatable(then_expr) && is_speculatable(else_expr)
     {
         let tv = lower_ternary_arm(ctx, then_expr, result_ty.as_ref(), result_is_64)?;
         let ev = lower_ternary_arm(ctx, else_expr, result_ty.as_ref(), result_is_64)?;
@@ -9878,7 +10076,12 @@ fn lower_struct_expr_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 let src_addr = lower_struct_expr_addr(ctx, value)?;
                 let dst_addr = lower_lvalue_addr(ctx, target)?;
                 emit_struct_copy_exact_aligned(
-                    ctx, dst_addr, src_addr, byte_size, src_aligned, dst_aligned,
+                    ctx,
+                    dst_addr,
+                    src_addr,
+                    byte_size,
+                    src_aligned,
+                    dst_aligned,
                 );
                 return Ok(dst_addr);
             }
@@ -10204,7 +10407,11 @@ fn lower_call_args_with_params(
             let pair = if ctx.is_64bit_vreg(pair) {
                 pair
             } else {
-                widen_to_64(ctx, pair, arg)
+                let unsigned = arg_ty
+                    .as_ref()
+                    .map(|ty| ty_is_unsigned(ty, ctx))
+                    .unwrap_or_else(|| is_unsigned_expr(arg, ctx));
+                widen_to_64_with_signedness(ctx, pair, unsigned)
             };
             arg_vregs.push(pair);
             arg_vregs.push(pair + 1);
@@ -10440,6 +10647,45 @@ mod tests {
         // Should contain a LoadImm and a Ret
         assert!(ops.iter().any(|op| matches!(op, IrOp::LoadImm(_, 42))));
         assert!(ops.iter().any(|op| matches!(op, IrOp::Ret(Some(_)))));
+    }
+
+    #[test]
+    fn block_assignment_invalidates_restored_outer_const_local() {
+        let unit = parse::parse(
+            "int f(void) {
+                int x = 10;
+                int *outer = &x;
+                int r = 0;
+                {
+                    int x = 20;
+                    int *inner = &x;
+                    r = *outer + *inner;
+                }
+                return r;
+            }",
+        )
+        .unwrap();
+        let ops = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        let ret_vreg = ops
+            .iter()
+            .find_map(|op| match op {
+                IrOp::Ret(Some(vreg)) => Some(*vreg),
+                _ => None,
+            })
+            .expect("return value");
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, IrOp::Load(dst, 0, 2) if *dst == ret_vreg)),
+            "return must reload r's stack slot after the inner block assigns it, got: {ops:?}"
+        );
     }
 
     #[test]
@@ -12613,6 +12859,46 @@ mod tests {
         assert!(ops
             .iter()
             .any(|op| matches!(op, IrOp::Call(_, name, args) if name == "g" && args.len() == 5)));
+    }
+
+    #[test]
+    fn lower_unsigned_member_to_ulonglong_call_zero_extends() {
+        let src = "typedef unsigned int uint32_t;
+                   void g(unsigned long long);
+                   struct S { uint32_t f0; };
+                   const struct S s = { 18446744073709551609UL };
+                   void f(void) { g(s.f0); }";
+        let unit = parse::parse(src).unwrap();
+        let func = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let mut globals: HashMap<String, Type> = unit
+            .globals
+            .iter()
+            .map(|g| (g.name.clone(), g.ty.clone()))
+            .collect();
+        globals.insert(
+            "g".to_string(),
+            Type::FunctionPtr {
+                return_type: Box::new(Type::Void),
+                params: vec![Type::ULongLong],
+            },
+        );
+        let ops = lower_function(
+            func,
+            &globals,
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(
+            ops.iter().any(|op| matches!(op, IrOp::IntToLongLong(..))),
+            "expected unsigned member call arg to zero-extend: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(op, IrOp::SExtToLongLong(..))),
+            "unsigned member call arg must not sign-extend: {ops:?}"
+        );
     }
 
     #[test]

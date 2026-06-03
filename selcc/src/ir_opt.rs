@@ -864,6 +864,34 @@ fn emit_quotient_into(out: &mut Vec<IrOp>, next: &mut VReg, q: VReg, n: VReg, d:
     }
 }
 
+fn emit_signed_const_quotient_into(out: &mut Vec<IrOp>, next: &mut VReg, q: VReg, n: VReg, d: i32) {
+    let sign_shift = bump_fresh_vreg(next);
+    let sign = bump_fresh_vreg(next);
+    out.push(IrOp::LoadImm(sign_shift, -31));
+    out.push(IrOp::Shr(sign, n, sign_shift));
+
+    let xored = bump_fresh_vreg(next);
+    let absn = bump_fresh_vreg(next);
+    out.push(IrOp::BitXor(xored, n, sign));
+    out.push(IrOp::Sub(absn, xored, sign));
+
+    let qabs = bump_fresh_vreg(next);
+    emit_quotient_into(out, next, qabs, absn, d.unsigned_abs());
+
+    let qsign = if d < 0 {
+        let minus_one = bump_fresh_vreg(next);
+        let flipped = bump_fresh_vreg(next);
+        out.push(IrOp::LoadImm(minus_one, -1));
+        out.push(IrOp::BitXor(flipped, sign, minus_one));
+        flipped
+    } else {
+        sign
+    };
+    let adjusted = bump_fresh_vreg(next);
+    out.push(IrOp::BitXor(adjusted, qabs, qsign));
+    out.push(IrOp::Sub(q, adjusted, qsign));
+}
+
 /// Replace unsigned division / modulo by a compile-time-constant
 /// divisor with a magic-number multiply sequence, eliminating the slow
 /// `__sel_udiv32_c` / `__sel_umod32_c` software-divide calls. Tracks
@@ -930,6 +958,54 @@ pub fn strength_reduce_constant_udivmod(ops: &[IrOp]) -> Vec<IrOp> {
                 quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
                 frame_src.insert(*dst, *slot);
                 out.push(op.clone());
+            }
+            IrOp::Copy(dst, src) => {
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                if let Some(value) = known.get(src).copied() {
+                    known.insert(*dst, value);
+                } else {
+                    known.remove(dst);
+                }
+                if let Some(slot) = frame_src.get(src).copied() {
+                    frame_src.insert(*dst, slot);
+                } else {
+                    frame_src.remove(dst);
+                }
+                out.push(op.clone());
+            }
+            IrOp::Div(dst, n, c)
+                if known
+                    .get(c)
+                    .map(|v| *v as i32)
+                    .is_some_and(|d| d != 0 && d != -1) =>
+            {
+                let d = *known.get(c).unwrap() as i32;
+                known.remove(dst);
+                frame_src.remove(dst);
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                emit_signed_const_quotient_into(&mut out, &mut next_vreg, *dst, *n, d);
+            }
+            IrOp::Mod(dst, n, c)
+                if known
+                    .get(c)
+                    .map(|v| *v as i32)
+                    .is_some_and(|d| d != 0 && d != -1) =>
+            {
+                let d = *known.get(c).unwrap() as i32;
+                known.remove(dst);
+                frame_src.remove(dst);
+                quot.retain(|(dv, _), q| *dv != Dividend::Vreg(*dst) && *q != *dst);
+                if d == 1 {
+                    out.push(IrOp::LoadImm(*dst, 0));
+                } else {
+                    let q = bump_fresh_vreg(&mut next_vreg);
+                    emit_signed_const_quotient_into(&mut out, &mut next_vreg, q, *n, d);
+                    let dv = bump_fresh_vreg(&mut next_vreg);
+                    out.push(IrOp::LoadImm(dv, d as i64));
+                    let qd = bump_fresh_vreg(&mut next_vreg);
+                    out.push(IrOp::Mul(qd, q, dv));
+                    out.push(IrOp::Sub(*dst, *n, qd));
+                }
             }
             IrOp::UDiv(dst, n, c) if known.get(c).map(|v| *v as u32).is_some_and(|d| d != 0) => {
                 let d = *known.get(c).unwrap() as u32;
@@ -998,7 +1074,10 @@ pub fn strength_reduce_constant_udivmod(ops: &[IrOp]) -> Vec<IrOp> {
                     // valid (those vregs already hold fixed values).
                     if matches!(
                         op,
-                        IrOp::Store(..) | IrOp::Store64(..) | IrOp::StoreGlobal(..) | IrOp::WriteGlobal64(..)
+                        IrOp::Store(..)
+                            | IrOp::Store64(..)
+                            | IrOp::StoreGlobal(..)
+                            | IrOp::WriteGlobal64(..)
                     ) {
                         quot.retain(|(dv, _), _| matches!(dv, Dividend::Vreg(_)));
                         frame_src.clear();
@@ -3636,8 +3715,24 @@ mod tests {
     #[test]
     fn magicu_matches_true_division() {
         let divisors = [
-            3u32, 5, 6, 7, 9, 10, 11, 12, 13, 25, 100, 1000, 7919, 65535, 100003, 0x0F0F_0F0F,
-            0xFFFF_FFFE, 0xFFFF_FFFF,
+            3u32,
+            5,
+            6,
+            7,
+            9,
+            10,
+            11,
+            12,
+            13,
+            25,
+            100,
+            1000,
+            7919,
+            65535,
+            100003,
+            0x0F0F_0F0F,
+            0xFFFF_FFFE,
+            0xFFFF_FFFF,
         ];
         for &d in &divisors {
             // Edge values plus a scattered sweep across the full u32 range.
@@ -3770,6 +3865,31 @@ mod tests {
                 matches!(op, IrOp::Shl(7, 3, shift) if folded.contains(&IrOp::LoadImm(*shift, 3)))
             }),
             "expected multiply by 8 to become shift: {folded:?}"
+        );
+    }
+
+    #[test]
+    fn strength_reduce_constant_udiv_through_copied_divisor() {
+        let ops = vec![
+            IrOp::Label(0),
+            IrOp::Load(1, 0, 2),
+            IrOp::LoadImm(2, 10),
+            IrOp::UMod(3, 1, 2),
+            IrOp::Store(3, 0, 3),
+            IrOp::Copy(4, 1),
+            IrOp::Copy(5, 2),
+            IrOp::UDiv(6, 4, 5),
+            IrOp::Store(6, 0, 2),
+            IrOp::Branch(0),
+        ];
+        let folded = strength_reduce_constant_udivmod(&ops);
+        assert!(
+            !folded.iter().any(|op| matches!(op, IrOp::UDiv(..) | IrOp::UMod(..))),
+            "copied constant divisor should still strength-reduce: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|op| matches!(op, IrOp::Copy(6, _))),
+            "paired mod/div should reuse the quotient for the copied divide: {folded:?}"
         );
     }
 
@@ -4255,8 +4375,8 @@ mod tests {
             IrOp::Store(1, 2, 0), // arr base element initializer
             IrOp::FrameAddr(3, 5),
             IrOp::Label(0),
-            IrOp::Load(4, 0, 9),    // dynamic index i = arr_idx_slot
-            IrOp::Add(5, 3, 4),     // &arr[i]: escapes slot 5 across the label
+            IrOp::Load(4, 0, 9), // dynamic index i = arr_idx_slot
+            IrOp::Add(5, 3, 4),  // &arr[i]: escapes slot 5 across the label
             IrOp::Load(6, 5, 0),
             IrOp::BranchCond(Cond::Ne, 0),
             IrOp::Ret(Some(6)),
@@ -4890,11 +5010,7 @@ mod tests {
         );
         // Pin the load-bearing fact: the FrameAddr still sits *after* both
         // loop tops, never lifted above Label(0).
-        let fa = pos_of(
-            &out,
-            |op| matches!(op, IrOp::FrameAddr(5, -3)),
-            "FrameAddr",
-        );
+        let fa = pos_of(&out, |op| matches!(op, IrOp::FrameAddr(5, -3)), "FrameAddr");
         let l0 = pos_of(&out, |op| matches!(op, IrOp::Label(0)), "Label(0)");
         let l1 = pos_of(&out, |op| matches!(op, IrOp::Label(1)), "Label(1)");
         assert!(

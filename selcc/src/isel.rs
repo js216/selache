@@ -2788,7 +2788,13 @@ fn emit_indirect_access(
 /// for the low 64 bits of a 64x64 multiply is irrelevant: in two's
 /// complement, multiplication truncated to `N` bits produces the same
 /// bit pattern for signed and unsigned operands.
-fn emit_inline_mul_64(instrs: &mut Vec<MachInstr>, dst: u32, lhs: u32, rhs: u32, scratch_base: u16) {
+fn emit_inline_mul_64(
+    instrs: &mut Vec<MachInstr>,
+    dst: u32,
+    lhs: u32,
+    rhs: u32,
+    scratch_base: u16,
+) {
     let dst_lo = dst as u16;
     let dst_hi = (dst + 1) as u16;
     let lhs_lo = lhs as u16;

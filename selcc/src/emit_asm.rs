@@ -3349,7 +3349,7 @@ fn callee_saved_used(instrs: &[MachInstr]) -> Vec<u16> {
         let reg = reg as u16;
         if instrs
             .iter()
-            .any(|mi| instr_uses_reg(&mi.instr, reg) || runtime_helper_clobbers_reg(mi, reg))
+            .any(|mi| instr_writes_reg(&mi.instr, reg) || runtime_helper_clobbers_reg(mi, reg))
         {
             used.push(reg);
         }
@@ -3370,6 +3370,7 @@ fn runtime_helper_clobbers_reg(mi: &MachInstr, reg: u16) -> bool {
     ) && reg == 12
 }
 
+#[allow(dead_code)]
 fn instr_uses_reg(instr: &Instruction, reg: u16) -> bool {
     fn ureg_is_data_reg(ureg: u16, reg: u16) -> bool {
         (ureg & 0x70) == 0 && (ureg & 0xF) == reg
@@ -3423,6 +3424,176 @@ fn instr_uses_reg(instr: &Instruction, reg: u16) -> bool {
     }
 }
 
+fn instr_writes_reg(instr: &Instruction, reg: u16) -> bool {
+    fn ureg_is_data_reg(ureg: u16, reg: u16) -> bool {
+        (ureg & 0x70) == 0 && (ureg & 0xF) == reg
+    }
+
+    match *instr {
+        Instruction::LoadImm { ureg, .. } => ureg_is_data_reg(ureg, reg),
+        Instruction::Compute { compute, .. } => compute_writes_reg(&compute, reg),
+        Instruction::DualMove { compute, dm, pm } => {
+            (!dm.write && dm.dreg == reg)
+                || (!pm.write && pm.dreg == reg)
+                || compute.is_some_and(|c| compute_writes_reg(&c, reg))
+        }
+        Instruction::ComputeLoadStore {
+            access,
+            dreg,
+            compute,
+            ..
+        } => (!access.write && dreg == reg) || compute.is_some_and(|c| compute_writes_reg(&c, reg)),
+        Instruction::IndirectBranch { compute, .. } | Instruction::DagModify { compute, .. } => {
+            compute.is_some_and(|c| compute_writes_reg(&c, reg))
+        }
+        Instruction::Return { compute, .. } => compute.is_some_and(|c| compute_writes_reg(&c, reg)),
+        Instruction::UregDagMove {
+            write,
+            ureg,
+            compute,
+            ..
+        } => {
+            (!write && ureg_is_data_reg(ureg, reg))
+                || compute.is_some_and(|c| compute_writes_reg(&c, reg))
+        }
+        Instruction::RegisterSwap { dreg, cdreg, .. } => dreg == reg || cdreg == reg,
+        Instruction::UregTransfer {
+            dst_ureg, compute, ..
+        } => {
+            ureg_is_data_reg(dst_ureg, reg) || compute.is_some_and(|c| compute_writes_reg(&c, reg))
+        }
+        Instruction::URegMove { dest, .. } => ureg_is_data_reg(dest, reg),
+        Instruction::UregAbsAccess { write, ureg, .. }
+        | Instruction::UregMemAccess { write, ureg, .. } => !write && ureg_is_data_reg(ureg, reg),
+        Instruction::ImmShift { rn, .. } => rn == reg,
+        Instruction::ImmShiftMem { rn, dreg, .. } => rn == reg || dreg == reg,
+        _ => false,
+    }
+}
+
+fn compute_writes_reg(op: &selinstr::encode::ComputeOp, reg: u16) -> bool {
+    use selinstr::encode::ComputeOp;
+    match *op {
+        ComputeOp::Alu(ref a) => alu_writes_reg(a, reg),
+        ComputeOp::Mul(ref m) => mul_writes_reg(m, reg),
+        ComputeOp::Shift(ref s) => shift_writes_reg(s, reg),
+        ComputeOp::Falu(ref f) => falu_writes_reg(f, reg),
+        ComputeOp::Multi(ref mf) => multi_writes_reg(mf, reg),
+    }
+}
+
+fn alu_writes_reg(op: &selinstr::encode::AluOp, reg: u16) -> bool {
+    use selinstr::encode::AluOp::*;
+    match *op {
+        Add { rn, .. }
+        | Sub { rn, .. }
+        | AddCi { rn, .. }
+        | SubCi { rn, .. }
+        | Avg { rn, .. }
+        | And { rn, .. }
+        | Or { rn, .. }
+        | Xor { rn, .. }
+        | Min { rn, .. }
+        | Max { rn, .. }
+        | Clip { rn, .. }
+        | Pass { rn, .. }
+        | Neg { rn, .. }
+        | Not { rn, .. }
+        | PassCi { rn, .. }
+        | PassCiMinus1 { rn, .. }
+        | Inc { rn, .. }
+        | Dec { rn, .. }
+        | Abs { rn, .. } => rn == reg,
+        Comp { .. } | CompU { .. } => false,
+    }
+}
+
+fn mul_writes_reg(op: &selinstr::encode::MulOp, reg: u16) -> bool {
+    use selinstr::encode::MulOp::*;
+    match *op {
+        MulSsf { rn, .. }
+        | MulSsi { rn, .. }
+        | FMul { rn, .. }
+        | MacSsf { rn, .. }
+        | SatMrf { rn }
+        | SatMrb { rn }
+        | TrncMrfReg { rn }
+        | TrncMrbReg { rn }
+        | ReadMr0f { rn }
+        | ReadMr1f { rn }
+        | ReadMr2f { rn }
+        | ReadMr0b { rn }
+        | ReadMr1b { rn }
+        | ReadMr2b { rn } => rn == reg,
+        _ => false,
+    }
+}
+
+fn shift_writes_reg(op: &selinstr::encode::ShiftOp, reg: u16) -> bool {
+    use selinstr::encode::ShiftOp::*;
+    match *op {
+        Lshift { rn, .. }
+        | Ashift { rn, .. }
+        | OrLshift { rn, .. }
+        | OrAshift { rn, .. }
+        | Rot { rn, .. }
+        | Bclr { rn, .. }
+        | Bset { rn, .. }
+        | Btgl { rn, .. }
+        | Fext { rn, .. }
+        | Fdep { rn, .. }
+        | OrFextSe { rn, .. }
+        | OrFdep { rn, .. }
+        | Exp { rn, .. }
+        | ExpEx { rn, .. }
+        | Leftz { rn, .. }
+        | Lefto { rn, .. }
+        | Fpack { rn, .. }
+        | Funpack { rn, .. } => rn == reg,
+        Btst { .. } => false,
+    }
+}
+
+fn multi_writes_reg(op: &selinstr::encode::MultiOp, reg: u16) -> bool {
+    use selinstr::encode::MultiOp::*;
+    match *op {
+        MulAlu { rm, ra, .. } => rm == reg || ra == reg,
+        MulDualAddSub { rm, ra, rs, .. } => rm == reg || ra == reg || rs == reg,
+    }
+}
+
+fn falu_writes_reg(op: &selinstr::encode::FaluOp, reg: u16) -> bool {
+    use selinstr::encode::FaluOp::*;
+    match *op {
+        Add { rn, .. }
+        | Sub { rn, .. }
+        | Avg { rn, .. }
+        | AbsAdd { rn, .. }
+        | AbsSub { rn, .. }
+        | Scalb { rn, .. }
+        | FixBy { rn, .. }
+        | FloatBy { rn, .. }
+        | TruncBy { rn, .. }
+        | Copysign { rn, .. }
+        | Min { rn, .. }
+        | Max { rn, .. }
+        | Clip { rn, .. }
+        | Pass { rn, .. }
+        | Neg { rn, .. }
+        | Float { rn, .. }
+        | Fix { rn, .. }
+        | Abs { rn, .. }
+        | Rnd { rn, .. }
+        | Mant { rn, .. }
+        | Logb { rn, .. }
+        | Recips { rn, .. }
+        | Rsqrts { rn, .. }
+        | Trunc { rn, .. } => rn == reg,
+        Comp { .. } => false,
+    }
+}
+
+#[allow(dead_code)]
 fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u16) -> bool {
     use selinstr::encode::ComputeOp;
     match *op {
@@ -3434,6 +3605,7 @@ fn compute_uses_reg(op: &selinstr::encode::ComputeOp, reg: u16) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u16) -> bool {
     use selinstr::encode::AluOp::*;
     match *op {
@@ -3460,6 +3632,7 @@ fn alu_uses_reg(op: &selinstr::encode::AluOp, reg: u16) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u16) -> bool {
     use selinstr::encode::MulOp::*;
     match *op {
@@ -3470,6 +3643,7 @@ fn mul_uses_reg(op: &selinstr::encode::MulOp, reg: u16) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u16) -> bool {
     use selinstr::encode::ShiftOp::*;
     match *op {
@@ -3478,6 +3652,7 @@ fn shift_uses_reg(op: &selinstr::encode::ShiftOp, reg: u16) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u16) -> bool {
     use selinstr::encode::MultiOp::*;
     match *op {
@@ -3518,6 +3693,7 @@ fn multi_uses_reg(op: &selinstr::encode::MultiOp, reg: u16) -> bool {
     }
 }
 
+#[allow(dead_code)]
 fn falu_uses_reg(op: &selinstr::encode::FaluOp, reg: u16) -> bool {
     use selinstr::encode::FaluOp::*;
     match *op {
@@ -4549,8 +4725,7 @@ fn pack_multifunction(
     instrs: &[MachInstr],
     label_map: &mut HashMap<Label, usize>,
 ) -> Vec<MachInstr> {
-    let branch_targets: std::collections::HashSet<usize> =
-        label_map.values().copied().collect();
+    let branch_targets: std::collections::HashSet<usize> = label_map.values().copied().collect();
     let mut delay: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (i, mi) in instrs.iter().enumerate() {
         let delayed = matches!(
@@ -5853,7 +6028,7 @@ mod tests {
         let instrs = vec![MachInstr {
             instr: Instruction::UregDagMove {
                 pm: false,
-                write: true,
+                write: false,
                 ureg: target::ureg_r(9),
                 i_reg: target::SCRATCH_I,
                 m_reg: 5,
@@ -5867,36 +6042,61 @@ mod tests {
     }
 
     #[test]
+    fn callee_saved_scan_ignores_read_only_arg_regs() {
+        let instrs = vec![MachInstr {
+            instr: Instruction::Compute {
+                cond: target::COND_TRUE,
+                compute: encode::ComputeOp::Alu(encode::AluOp::Pass { rn: 3, rx: 8 }),
+            },
+            reloc: None,
+        }];
+        assert!(!callee_saved_used(&instrs).contains(&8));
+    }
+
+    #[test]
     fn dead_copy_removed_when_dest_overwritten_before_use() {
         // Models the leftover three-way shuffle the allocator emits in the
         // unrolled crc32 inner loop: `R7 = PASS R8` is immediately clobbered
         // by `R7 = 0xFF` without R7 ever being read, so it is dead.
         let instrs = vec![
-            pass_instr(5, 1),                                 // R5 = PASS R1 (live: read below)
-            pass_instr(7, 8),                                 // R7 = PASS R8 (DEAD)
+            pass_instr(5, 1), // R5 = PASS R1 (live: read below)
+            pass_instr(7, 8), // R7 = PASS R8 (DEAD)
             MachInstr {
-                instr: Instruction::LoadImm { ureg: 7, value: 0xFF },
+                instr: Instruction::LoadImm {
+                    ureg: 7,
+                    value: 0xFF,
+                },
                 reloc: None,
             }, // R7 = 0xFF (overwrites R7 without reading it)
             MachInstr {
                 instr: Instruction::Compute {
                     cond: target::COND_TRUE,
-                    compute: ComputeOp::Alu(AluOp::And { rn: 9, rx: 1, ry: 7 }),
+                    compute: ComputeOp::Alu(AluOp::And {
+                        rn: 9,
+                        rx: 1,
+                        ry: 7,
+                    }),
                 },
                 reloc: None,
             }, // R9 = R1 AND R7
             MachInstr {
                 instr: Instruction::Compute {
                     cond: target::COND_TRUE,
-                    compute: ComputeOp::Alu(AluOp::Xor { rn: 1, rx: 5, ry: 9 }),
+                    compute: ComputeOp::Alu(AluOp::Xor {
+                        rn: 1,
+                        rx: 5,
+                        ry: 9,
+                    }),
                 },
                 reloc: None,
             }, // R1 = R5 XOR R9 (reads R5: keeps R5=PASS R1 live)
         ];
         let mut label_map = HashMap::new();
         let out = eliminate_dead_copies(&instrs, &mut label_map);
-        let pass_pairs: Vec<(u16, u16)> =
-            out.iter().filter_map(|mi| is_pass_copy(&mi.instr)).collect();
+        let pass_pairs: Vec<(u16, u16)> = out
+            .iter()
+            .filter_map(|mi| is_pass_copy(&mi.instr))
+            .collect();
         assert!(
             !pass_pairs.contains(&(7, 8)),
             "dead `R7 = PASS R8` must be eliminated: {out:?}"
@@ -5916,12 +6116,19 @@ mod tests {
             MachInstr {
                 instr: Instruction::Compute {
                     cond: target::COND_TRUE,
-                    compute: ComputeOp::Alu(AluOp::And { rn: 9, rx: 1, ry: 7 }),
+                    compute: ComputeOp::Alu(AluOp::And {
+                        rn: 9,
+                        rx: 1,
+                        ry: 7,
+                    }),
                 },
                 reloc: None,
             }, // R9 = R1 AND R7  (reads R7)
             MachInstr {
-                instr: Instruction::LoadImm { ureg: 7, value: 0xFF },
+                instr: Instruction::LoadImm {
+                    ureg: 7,
+                    value: 0xFF,
+                },
                 reloc: None,
             }, // R7 = 0xFF
         ];
@@ -5937,7 +6144,10 @@ mod tests {
         let instrs = vec![
             pass_instr(7, 8),
             MachInstr {
-                instr: Instruction::LoadImm { ureg: 7, value: 0xFF },
+                instr: Instruction::LoadImm {
+                    ureg: 7,
+                    value: 0xFF,
+                },
                 reloc: None,
             },
         ];
@@ -7388,6 +7598,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rt_dynamic_bound_survives_until_do_loop() {
+        let asm = compile(
+            "
+            struct view { const int *data; int len; };
+            int f(const struct view *v) {
+                int s = 0;
+                for (int i = 0; i < v->len; i++) s += v->data[i];
+                return s;
+            }
+            ",
+        )
+        .text;
+        assert!(asm.contains("LCNTR"), "loop should use hardware DO:\n{asm}");
+        assert!(
+            asm.contains("PASS R3;\n    LCNTR = R"),
+            "dynamic loop bound must be copied into a live register before DO:\n{asm}"
+        );
+    }
+
     /// The Type 12 RELADDR field is PC-relative to the DO instruction,
     /// per the SHARC ISR (Program Flow Control, Type 12 opcode). For a
     /// function whose body has `B` instructions after the DO, the field
@@ -7568,8 +7798,13 @@ mod tests {
         let src = "int f(int a, int b, int c, int d) { return (a+b)*(c+d); }";
         let text = round_trip_disasm(src);
         // Expect a frame-relative DM load (the 4th arg from the stack).
+        // The ABI frame link slot is immediately below I6, so the first
+        // stack-passed argument is reached by modifying I6 upward.
         let has_frame_load = text.iter().any(|t| {
-            t.contains("DM (-0x") && t.contains(",I6)") && !t.contains("=R") // it's a READ, not a callee-save store
+            (t.contains("DM (-0x") && t.contains(",I6)")
+                || t.contains("I4=I6")
+                || t.contains("I4=MODIFY (I4,0x1)(NW)"))
+                && !t.contains("=R") // it's a READ, not a callee-save store
         });
         assert!(
             has_frame_load,

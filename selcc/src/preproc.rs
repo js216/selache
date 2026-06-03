@@ -2078,8 +2078,9 @@ mod tests {
         // the selache builtin for system (`<>`) includes: external
         // system headers inline helper functions that name intrinsics
         // this compiler does not model.
-        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp"))
-            .join(format!("test_selcc_builtin_priority_{}", std::process::id()));
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp")).join(
+            format!("test_selcc_builtin_priority_{}", std::process::id()),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         let header = dir.join("math.h");
         // The shadow header defines a sentinel variable; if it is

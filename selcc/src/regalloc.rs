@@ -53,6 +53,10 @@ pub fn allocate(
     reserves_r1: bool,
     label_positions: &[(u32, usize)],
 ) -> (Vec<MachInstr>, u32, Vec<usize>) {
+    let reserves_r0 = instrs.iter().any(|mi| {
+        let refs = collect_instr_refs(&mi.instr);
+        refs.uses.contains(&target::RETURN_REG_VREG) || refs.defs.contains(&target::RETURN_REG_VREG)
+    });
     let (live_in, live_out) = compute_liveness(instrs, label_positions);
     let merge_info = compute_merge_info(instrs, label_positions);
     let use_positions = compute_use_positions(instrs);
@@ -65,7 +69,7 @@ pub fn allocate(
     // register map is correct only within a straight-line region; the
     // single-predecessor fall-through skip (`label_requires_flush`) preserves
     // the map only where there is provably no merge to reconcile.
-    let mut alloc = Allocator::new(num_params, reserves_r1);
+    let mut alloc = Allocator::new(num_params, reserves_r0, reserves_r1);
     alloc.use_positions = use_positions;
     let mut out = Vec::new();
     let mut index_map = Vec::with_capacity(instrs.len());
@@ -101,7 +105,11 @@ pub fn allocate(
         // survive into a real merge.
         if label_indices.contains(&i) {
             if label_requires_flush(instrs, &merge_info, i) {
-                alloc.flush_vregs(&mut out, Some(&live_in[i]));
+                if label_has_runtime_fallthrough_predecessor(instrs, i) {
+                    alloc.flush_vregs(&mut out, Some(&live_in[i]));
+                } else {
+                    alloc.clear_vregs();
+                }
             } else {
                 // Skipping the flush carries the register map into the next
                 // block, but a basic-block boundary must still not leak an
@@ -534,6 +542,10 @@ fn collect_instr_refs(instr: &Instruction) -> VRegRefs {
             compute: Some(compute),
             ..
         } => collect_compute_refs(compute, &mut refs),
+        Instruction::DoLoop {
+            counter: LoopCounter::Ureg(ureg),
+            ..
+        } => add_vreg_use(&mut refs, *ureg as u16),
         _ => {}
     }
     refs
@@ -595,6 +607,19 @@ fn label_requires_flush(instrs: &[MachInstr], info: &MergeInfo, i: usize) -> boo
     // a straight-line edge with no reconciliation needed. Skip the flush so
     // the register map carries directly into this block.
     false
+}
+
+fn label_has_runtime_fallthrough_predecessor(instrs: &[MachInstr], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    match instrs[i - 1].instr {
+        Instruction::Return { .. } | Instruction::IndirectBranch { call: false, .. } => false,
+        Instruction::Branch {
+            call: false, cond, ..
+        } if cond == target::COND_TRUE => false,
+        _ => true,
+    }
 }
 
 /// Build the `MergeInfo` for the instruction stream: predecessor in-degrees
@@ -746,7 +771,7 @@ fn compute_use_positions(instrs: &[MachInstr]) -> BTreeMap<u16, Vec<usize>> {
 }
 
 impl Allocator {
-    fn new(num_params: u16, reserves_r1: bool) -> Self {
+    fn new(num_params: u16, reserves_r0: bool, reserves_r1: bool) -> Self {
         let mut vreg_to_phys = BTreeMap::new();
         let mut phys_to_vreg = BTreeMap::new();
         let mut pinned = BTreeSet::new();
@@ -770,12 +795,14 @@ impl Allocator {
         // also lives in R0. The lowering stage snapshots vreg 3 into
         // a fresh vreg at function entry so the parameter value is
         // safe from being clobbered by intermediate writes to R0.
-        vreg_to_phys.insert(target::RETURN_REG_VREG, target::RETURN_REG);
-        phys_to_vreg
-            .entry(target::RETURN_REG)
-            .or_insert(target::RETURN_REG_VREG);
-        pinned.insert(target::RETURN_REG);
-        permanent_vregs.insert(target::RETURN_REG_VREG);
+        if reserves_r0 {
+            vreg_to_phys.insert(target::RETURN_REG_VREG, target::RETURN_REG);
+            phys_to_vreg
+                .entry(target::RETURN_REG)
+                .or_insert(target::RETURN_REG_VREG);
+            pinned.insert(target::RETURN_REG);
+            permanent_vregs.insert(target::RETURN_REG_VREG);
+        }
         // Same deal for the hi half of a two-word struct return: pin a
         // pseudo-vreg to physical R1 so isel's explicit `R1 = ...` and
         // `... = R1` transfers survive regalloc remapping. Without this,
@@ -991,6 +1018,21 @@ impl Allocator {
         // sit between an arg-setup Pass and its consuming CJUMP, but
         // defensively release them here so a stale pin cannot leak
         // into the next basic block.
+        self.release_arg_setup_pins();
+    }
+
+    fn clear_vregs(&mut self) {
+        let to_clear: Vec<(u16, u8)> = self
+            .vreg_to_phys
+            .iter()
+            .filter(|(&vreg, _)| !self.permanent_vregs.contains(&vreg))
+            .map(|(&vreg, &phys)| (vreg, phys))
+            .collect();
+        for (vreg, phys) in to_clear {
+            self.vreg_to_phys.remove(&vreg);
+            self.phys_to_vreg.remove(&phys);
+            self.pinned.remove(&phys);
+        }
         self.release_arg_setup_pins();
     }
 
@@ -2491,7 +2533,7 @@ mod tests {
 
     #[test]
     fn arg_setup_pin_survives_dead_source_release() {
-        let mut alloc = Allocator::new(0, false);
+        let mut alloc = Allocator::new(0, false, false);
         alloc.vreg_to_phys.insert(10, 3);
         alloc.phys_to_vreg.insert(3, 10);
         alloc.vreg_to_phys.insert(20, 8);
@@ -2553,7 +2595,7 @@ mod tests {
 
     #[test]
     fn dead_vreg_release_keeps_spill_slot_stable() {
-        let mut alloc = Allocator::new(0, false);
+        let mut alloc = Allocator::new(0, false, false);
         let slot = alloc.spill_slot_for(10);
         alloc.vreg_to_phys.insert(10, 3);
         alloc.phys_to_vreg.insert(3, 10);
@@ -2645,7 +2687,7 @@ mod tests {
         // whose use is furthest out. Constructed so those two differ ---
         // CALLER_SAVED[0]'s vreg is used SOONEST, another's is used latest ---
         // so this asserts the Belady choice and fails under round-robin.
-        let mut alloc = Allocator::new(0, false);
+        let mut alloc = Allocator::new(0, false, false);
         alloc.cur_index = 100;
         // Occupy every caller-saved register with a unique vreg, and record a
         // next-use index for each: the register at CALLER_SAVED[0] is used
@@ -2670,7 +2712,8 @@ mod tests {
         assert_eq!(expected_phys, target::CALLER_SAVED[n - 1]);
         let chosen = alloc.pick_evict_candidate();
         assert_eq!(
-            chosen, expected_phys,
+            chosen,
+            expected_phys,
             "eviction must pick the furthest-next-use vreg's register \
              (R{expected_phys}), not the round-robin victim R{}",
             target::CALLER_SAVED[0]
