@@ -14083,7 +14083,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(indirect_addrs.len(), 2, "expected two indirect calls: {ops:?}");
+        assert_eq!(
+            indirect_addrs.len(),
+            2,
+            "expected two indirect calls: {ops:?}"
+        );
         assert!(
             indirect_addrs
                 .iter()
