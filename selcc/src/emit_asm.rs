@@ -1785,11 +1785,12 @@ fn flatten_subword_aggregate_const_int(
 fn merge_init_byte(v: &mut Vec<InitWord>, field: &str, byte_off: u32, byte: u32) -> Result<()> {
     let word_idx = (byte_off / 4) as usize;
     let shift = (byte_off % 4) * 8;
+    let mask = 0xFFu32 << shift;
     if word_idx >= v.len() {
         v.resize(word_idx + 1, InitWord::Num(0));
     }
     v[word_idx] = match &v[word_idx] {
-        InitWord::Num(prev) => InitWord::Num(prev | ((byte & 0xFF) << shift)),
+        InitWord::Num(prev) => InitWord::Num((prev & !mask) | ((byte & 0xFF) << shift)),
         InitWord::Sym(_) => {
             return Err(Error::Compile {
                 msg: format!("field {field} initializer collides with a symbolic word initializer"),
@@ -1813,6 +1814,35 @@ fn place_const_int_bytes(
     Ok(())
 }
 
+fn init_contains_designator(init: &Expr) -> bool {
+    match init {
+        Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. } => true,
+        Expr::InitList(items) => items.iter().any(init_contains_designator),
+        Expr::Cast(_, inner) => init_contains_designator(inner),
+        _ => false,
+    }
+}
+
+fn promoted_field_type<'a>(
+    fields: &'a [(String, crate::types::Type)],
+    field: &str,
+    tctx: &'a dyn crate::types::TypeCtx,
+) -> Option<&'a crate::types::Type> {
+    for (name, ty) in fields {
+        if name == field {
+            return Some(ty);
+        }
+        if name.starts_with("__anon") {
+            if let Some(inner) = resolve_struct_fields(ty, tctx) {
+                if let Some(found) = promoted_field_type(inner, field, tctx) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn flatten_const_aggregate_bytes(
     v: &mut Vec<InitWord>,
     field: &str,
@@ -1829,10 +1859,19 @@ fn flatten_const_aggregate_bytes(
                 msg: format!("field {field}: nested aggregate references unresolved tag"),
             })?;
             let is_union = matches!(stripped, Type::Union { .. });
+            let single;
             let items = match init {
                 Expr::InitList(items) => items.as_slice(),
+                Expr::DesignatedInit { .. } => {
+                    single = [init.clone()];
+                    single.as_slice()
+                }
                 Expr::Cast(_, boxed) => match boxed.as_ref() {
                     Expr::InitList(items) => items.as_slice(),
+                    Expr::DesignatedInit { .. } => {
+                        single = [boxed.as_ref().clone()];
+                        single.as_slice()
+                    }
                     _ => {
                         return Err(Error::Compile {
                             msg: format!("field {field}: nested aggregate requires braces"),
@@ -1854,11 +1893,20 @@ fn flatten_const_aggregate_bytes(
                     } => {
                         let i = fields
                             .iter()
-                            .position(|(n, _)| n == dfname)
+                            .position(|(n, fty)| {
+                                n == dfname
+                                    || (n.starts_with("__anon")
+                                        && promoted_field_type(
+                                            resolve_struct_fields(fty, tctx).unwrap_or(&[]),
+                                            dfname,
+                                            tctx,
+                                        )
+                                        .is_some())
+                            })
                             .ok_or_else(|| Error::Compile {
                                 msg: format!(
                                     "field {field}: designated initializer .{dfname} \
-                                     does not match nested aggregate"
+                                 does not match nested aggregate"
                                 ),
                             })?;
                         (i, value.as_ref())
@@ -1868,12 +1916,39 @@ fn flatten_const_aggregate_bytes(
                 if fidx >= fields.len() {
                     break;
                 }
-                let (fname, fty) = &fields[fidx];
+                let (fname, raw_fty) = &fields[fidx];
+                let fty = if matches!(item, Expr::DesignatedInit { .. }) {
+                    if let Expr::DesignatedInit { field: dfname, .. } = item {
+                        promoted_field_type(
+                            resolve_struct_fields(raw_fty, tctx).unwrap_or(&[]),
+                            dfname,
+                            tctx,
+                        )
+                        .unwrap_or(raw_fty)
+                    } else {
+                        raw_fty
+                    }
+                } else {
+                    raw_fty
+                };
                 let field_off = if is_union {
                     0
                 } else {
                     let pack = aggregate_pack(stripped, tctx);
-                    crate::types::struct_field_layout_ctx(fields, fname, pack, tctx)
+                    let layout_name = match item {
+                        Expr::DesignatedInit { field: dfname, .. }
+                            if promoted_field_type(
+                                resolve_struct_fields(raw_fty, tctx).unwrap_or(&[]),
+                                dfname,
+                                tctx,
+                            )
+                            .is_some() =>
+                        {
+                            dfname
+                        }
+                        _ => fname,
+                    };
+                    crate::types::struct_field_layout_ctx(fields, layout_name, pack, tctx)
                         .map(|(off, _, _)| off)
                         .ok_or_else(|| Error::Compile {
                             msg: format!("field {field}: internal nested field lookup failed"),
@@ -1889,8 +1964,13 @@ fn flatten_const_aggregate_bytes(
         }
         Type::Array(elem, Some(_)) => {
             let elem_bytes = crate::types::size_bytes_ctx(elem, tctx).max(1);
+            let single;
             let items = match init {
                 Expr::InitList(items) => items.as_slice(),
+                Expr::ArrayDesignator { .. } => {
+                    single = [init.clone()];
+                    single.as_slice()
+                }
                 _ => return flatten_const_aggregate_bytes(v, field, init, elem, byte_off, tctx),
             };
             let mut cursor = 0u32;
@@ -2003,6 +2083,14 @@ fn build_init_words(
                     flatten_const_aggregate_bytes(&mut v, "array", init, t, 0, tctx)?;
                     return Ok(v);
                 }
+                if init_contains_designator(init)
+                    && matches!(strip_type(t, tctx), Type::Struct { .. } | Type::Array(..))
+                {
+                    let declared_words = (size_bytes.div_ceil(4)).max(1) as usize;
+                    let mut v: Vec<InitWord> = vec![InitWord::Num(0); declared_words];
+                    flatten_const_aggregate_bytes(&mut v, "aggregate", init, t, 0, tctx)?;
+                    return Ok(v);
+                }
             }
 
             // Honour designated initializers (`[n] = v`, `.field = v`).
@@ -2090,6 +2178,57 @@ fn build_init_words(
                         fty,
                         bf_info,
                     ));
+                    if fname.starts_with("__anon") {
+                        let Some(inner_fields) = resolve_struct_fields(fty, tctx) else {
+                            continue;
+                        };
+                        for (inner_name, inner_ty) in inner_fields {
+                            if inner_name.starts_with("__anon") {
+                                continue;
+                            }
+                            let (inner_byte_off, inner_bit_off, inner_bit_width) = if is_union {
+                                (0u32, None, None)
+                            } else {
+                                crate::types::struct_field_layout_ctx(
+                                    fields,
+                                    inner_name,
+                                    struct_pack,
+                                    tctx,
+                                )
+                                .ok_or_else(|| Error::Compile {
+                                    msg: format!(
+                                        "internal: promoted field {inner_name} not found in struct"
+                                    ),
+                                })?
+                            };
+                            let inner_bf = match (inner_bit_off, inner_bit_width) {
+                                (Some(bit_off_in_byte), Some(bit_width)) => {
+                                    let bit_pos_in_word =
+                                        (inner_byte_off % 4) * 8 + bit_off_in_byte;
+                                    let bw = bit_width as u32;
+                                    if bit_pos_in_word + bw > 32 {
+                                        return Err(Error::Compile {
+                                            msg: format!(
+                                                "field {inner_name}: bitfield at bit \
+                                                 {bit_pos_in_word} with width {bw} crosses \
+                                                 a 32-bit word boundary; cross-word bitfields \
+                                                 in struct global initializers are not supported"
+                                            ),
+                                        });
+                                    }
+                                    Some((bit_pos_in_word, bw))
+                                }
+                                _ => None,
+                            };
+                            field_map.push((
+                                inner_name.clone(),
+                                (inner_byte_off / 4) as usize,
+                                inner_byte_off % 4,
+                                inner_ty,
+                                inner_bf,
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -2150,10 +2289,13 @@ fn build_init_words(
                             } else {
                                 (1u32 << bit_width) - 1
                             };
+                            let field_mask = mask << bit_pos_in_word;
                             let packed_val = (n & mask) << bit_pos_in_word;
                             ensure(&mut v, woff);
                             v[woff] = match &v[woff] {
-                                InitWord::Num(prev) => InitWord::Num(prev | packed_val),
+                                InitWord::Num(prev) => {
+                                    InitWord::Num((prev & !field_mask) | packed_val)
+                                }
                                 InitWord::Sym(_) => {
                                     return Err(Error::Compile {
                                         msg: format!(
@@ -2192,7 +2334,26 @@ fn build_init_words(
                                     place_const_int_bytes(&mut v, field, byte_off, fsize, n)?;
                                 }
                             } else {
-                                let sub = build_init_words(value, fsize, tctx, Some(fty), ictx)?;
+                                let nested_value;
+                                let value_for_build = if matches!(
+                                    value.as_ref(),
+                                    Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+                                ) && matches!(
+                                    strip_type(fty, tctx),
+                                    Type::Struct { .. } | Type::Union { .. } | Type::Array(..)
+                                ) {
+                                    nested_value = Expr::InitList(vec![value.as_ref().clone()]);
+                                    &nested_value
+                                } else {
+                                    value.as_ref()
+                                };
+                                let sub = build_init_words(
+                                    value_for_build,
+                                    fsize,
+                                    tctx,
+                                    Some(fty),
+                                    ictx,
+                                )?;
                                 for (k, w) in sub.into_iter().enumerate() {
                                     ensure(&mut v, woff + k);
                                     v[woff + k] = w;
@@ -2208,7 +2369,23 @@ fn build_init_words(
                             .unwrap_or(4);
                         let elem_words = (elem_size.div_ceil(4)).max(1) as usize;
                         let woff = i * elem_words;
-                        let sub = build_init_words(value, elem_size, tctx, array_elem, ictx)?;
+                        let nested_value;
+                        let value_for_build = if matches!(
+                            value.as_ref(),
+                            Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+                        ) && array_elem.is_some_and(|elem| {
+                            matches!(
+                                strip_type(elem, tctx),
+                                Type::Struct { .. } | Type::Union { .. } | Type::Array(..)
+                            )
+                        }) {
+                            nested_value = Expr::InitList(vec![value.as_ref().clone()]);
+                            &nested_value
+                        } else {
+                            value.as_ref()
+                        };
+                        let sub =
+                            build_init_words(value_for_build, elem_size, tctx, array_elem, ictx)?;
                         for (k, w) in sub.into_iter().enumerate() {
                             ensure(&mut v, woff + k);
                             v[woff + k] = w;
@@ -2241,10 +2418,13 @@ fn build_init_words(
                                 } else {
                                     (1u32 << bit_width) - 1
                                 };
+                                let field_mask = mask << bit_pos_in_word;
                                 let packed_val = (n & mask) << bit_pos_in_word;
                                 ensure(&mut v, woff);
                                 v[woff] = match &v[woff] {
-                                    InitWord::Num(prev) => InitWord::Num(prev | packed_val),
+                                    InitWord::Num(prev) => {
+                                        InitWord::Num((prev & !field_mask) | packed_val)
+                                    }
                                     InitWord::Sym(_) => {
                                         return Err(Error::Compile {
                                             msg: format!(
@@ -2287,8 +2467,26 @@ fn build_init_words(
                                         place_const_int_bytes(&mut v, &fname, byte_off, fsize, n)?;
                                     }
                                 } else {
-                                    let sub =
-                                        build_init_words(other, fsize, tctx, Some(fty), ictx)?;
+                                    let nested_value;
+                                    let value_for_build = if matches!(
+                                        other,
+                                        Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. }
+                                    ) && matches!(
+                                        strip_type(fty, tctx),
+                                        Type::Struct { .. } | Type::Union { .. } | Type::Array(..)
+                                    ) {
+                                        nested_value = Expr::InitList(vec![other.clone()]);
+                                        &nested_value
+                                    } else {
+                                        other
+                                    };
+                                    let sub = build_init_words(
+                                        value_for_build,
+                                        fsize,
+                                        tctx,
+                                        Some(fty),
+                                        ictx,
+                                    )?;
                                     for (k, w) in sub.into_iter().enumerate() {
                                         ensure(&mut v, woff + k);
                                         v[woff + k] = w;
@@ -6309,12 +6507,12 @@ mod tests {
             m.text
         );
         assert!(
-            m.text.contains(".VAR = 0x66770055;"),
-            "expected second element to start at byte offset 6, got:\n{}",
+            m.text.contains(".VAR = 0x88667755;"),
+            "expected second element to start at byte offset 5, got:\n{}",
             m.text
         );
         assert!(
-            m.text.contains(".VAR = 0x00AA9988;"),
+            m.text.contains(".VAR = 0x0000AA99;"),
             "expected packed tail word in asm, got:\n{}",
             m.text
         );

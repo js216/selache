@@ -116,35 +116,22 @@ pub fn size_bytes_ctx(ty: &Type, ctx: &dyn TypeCtx) -> u32 {
             fields,
             packed,
         } => {
-            // Iter-19: return the NATURAL-aligned size for packed
-            // structs.  The size produced here drives array indexing
-            // strides (`scale_index_by_elem`) and `build_init_words`
-            // `elem_size`, both of which must agree with the
-            // field-by-name access offsets that
-            // `struct_field_layout_ctx(..., pack=0, ...)` computes for
-            // top-level packed-struct globals (the "natural offsets
-            // outside any union" rule baked into
-            // `lvalue_chain_traverses_union` callers).  Returning the
-            // packed size here would mis-stride an array of packed
-            // structs: the init writes 6 words of natural-offset bytes
-            // per element while reads index `i * packed_size`, so
-            // `arr[1].fN` lands in the middle of `arr[0]`'s padding
-            // (`cctest_csmith_9910c0de`'s `g_118` regression).  The
-            // packed value is still consulted by the iter-11 / iter-17
-            // union-overlay path via `resolve_struct_pack` and
-            // `force_pack_for_struct_in_union`, which deliberately
-            // emit packed bytes into the larger natural-sized window
-            // when a chain crosses a union.
-            let _ = packed;
+            let pack = if *packed != 0 {
+                *packed
+            } else if let Some(n) = name {
+                ctx.resolve_tag_pack(n)
+            } else {
+                0
+            };
             if fields.is_empty() {
                 if let Some(sname) = name {
                     if let Some(def) = ctx.resolve_tag(sname) {
-                        return struct_size_bytes_ctx(def, 0, ctx);
+                        return struct_size_bytes_ctx(def, pack, ctx);
                     }
                 }
                 0
             } else {
-                struct_size_bytes_ctx(fields, 0, ctx)
+                struct_size_bytes_ctx(fields, pack, ctx)
             }
         }
         Type::Union { name, fields, .. } => {
@@ -727,7 +714,13 @@ impl Type {
             Type::Pointer(_) => 4,
             Type::Array(elem, Some(n)) => elem.size_bytes() * (*n as u32),
             Type::Array(_, None) => 0,
-            Type::Struct { fields, .. } => struct_size_bytes(fields),
+            Type::Struct { fields, packed, .. } => {
+                if *packed != 0 {
+                    struct_size_bytes_ctx(fields, *packed, &NullCtx)
+                } else {
+                    struct_size_bytes(fields)
+                }
+            }
             Type::Union { fields, .. } => fields
                 .iter()
                 .map(|(_, ty)| ty.size_bytes())
@@ -820,9 +813,16 @@ impl Type {
             Type::Unsigned(inner) => inner.alignment(),
             Type::Pointer(_) | Type::FunctionPtr { .. } => 4,
             Type::Array(elem, _) => elem.alignment(),
-            Type::Struct { fields, .. } => fields
+            Type::Struct { fields, packed, .. } => fields
                 .iter()
-                .map(|(_, ty)| ty.alignment())
+                .map(|(_, ty)| {
+                    let align = ty.alignment();
+                    if *packed != 0 {
+                        align.min(*packed as u32)
+                    } else {
+                        align
+                    }
+                })
                 .max()
                 .unwrap_or(1),
             Type::Union { fields, .. } => fields

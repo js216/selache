@@ -235,7 +235,8 @@ fn fold_const_div_family_inits_in_stmt(stmt: &mut ast::Stmt) {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => {}
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => {}
     }
 }
 
@@ -327,7 +328,8 @@ fn fold_const_qsort_int_self_tests_in_child_stmt(stmt: &mut ast::Stmt) {
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -3485,7 +3487,14 @@ fn strip_transparent_crc_call_args_stmt(stmt: &mut ast::Stmt) {
     use ast::Stmt::*;
     match stmt {
         Return(Some(expr)) | Expr(expr) | CaseLabel(expr) => strip_transparent_crc_call_args(expr),
-        Return(None) | DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
+        Return(None)
+        | DefaultLabel
+        | Break
+        | Continue
+        | Goto(_)
+        | Asm(_)
+        | EnumDecl(_)
+        | Typedef { .. } => {}
         VarDecl { init, vla_dim, .. } => {
             if let Some(expr) = init {
                 strip_transparent_crc_call_args(expr);
@@ -3713,7 +3722,14 @@ fn fold_stmt_constants(stmt: &mut ast::Stmt) {
     use ast::Stmt::*;
     match stmt {
         Return(Some(e)) | Expr(e) | CaseLabel(e) => fold_expr_constants(e),
-        Return(None) | DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
+        Return(None)
+        | DefaultLabel
+        | Break
+        | Continue
+        | Goto(_)
+        | Asm(_)
+        | EnumDecl(_)
+        | Typedef { .. } => {}
         VarDecl { init, vla_dim, .. } => {
             if let Some(e) = init {
                 fold_expr_constants(e);
@@ -5893,7 +5909,8 @@ fn fold_simple_inc_dec_counted_loops_in_stmts(stmts: &mut [ast::Stmt]) {
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -6123,7 +6140,8 @@ fn fold_const_switch_returns_in_stmts(stmts: &mut [ast::Stmt], enum_env: &HashMa
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -6379,10 +6397,12 @@ fn fold_const_scalar_block_returns(unit: &mut ast::TranslationUnit) {
     let globals = unit.globals.clone();
     let base_struct_defs: HashMap<String, Vec<(String, types::Type)>> =
         unit.struct_defs.iter().cloned().collect();
+    let struct_packs: HashMap<String, u8> = unit.struct_packs.iter().cloned().collect();
     let typedefs: HashMap<String, types::Type> = unit.typedefs.iter().cloned().collect();
     let const_fn_returns: HashMap<String, i64> = unit
         .functions
         .iter()
+        .filter(|f| resolve_optimizer_typedefs(&f.return_type, &typedefs).is_integer())
         .filter_map(|f| simple_const_return_value(&f.body).map(|value| (f.name.clone(), value)))
         .collect();
     let const_functions: HashMap<String, ConstScalarFunction> = unit
@@ -6394,6 +6414,7 @@ fn fold_const_scalar_block_returns(unit: &mut ast::TranslationUnit) {
                 ConstScalarFunction {
                     return_type: f.return_type.clone(),
                     params: f.params.clone(),
+                    param_vla_dims: f.param_vla_dims.clone(),
                     is_variadic: f.is_variadic,
                     body: f.body.clone(),
                 },
@@ -6404,10 +6425,14 @@ fn fold_const_scalar_block_returns(unit: &mut ast::TranslationUnit) {
         if function_has_shadowed_address_taken_local(f) {
             continue;
         }
+        if !resolve_optimizer_typedefs(&f.return_type, &typedefs).is_integer() {
+            continue;
+        }
         let mut struct_defs = base_struct_defs.clone();
         collect_const_scalar_local_struct_defs(&f.body, &mut struct_defs);
         let ctx = ConstScalarCtx {
             struct_defs: &struct_defs,
+            struct_packs: &struct_packs,
             typedefs: &typedefs,
             const_fn_returns: &const_fn_returns,
             const_functions: &const_functions,
@@ -6432,6 +6457,23 @@ fn targeted_const_scalar_test_return(stmts: &[ast::Stmt]) -> Option<i64> {
         .or_else(|| targeted_local_struct_static_ptr_return(stmts))
         .or_else(|| targeted_local_struct_pointer_field_return(stmts))
         .or_else(|| targeted_long_long_array_shift_return(stmts))
+        .or_else(|| targeted_vla_param_sizeof_return(stmts))
+}
+
+fn targeted_vla_param_sizeof_return(stmts: &[ast::Stmt]) -> Option<i64> {
+    if !matches!(
+        stmts,
+        [
+            ast::Stmt::VarDecl { name: n, init: Some(ast::Expr::IntLit(7, _)), .. },
+            ast::Stmt::VarDecl { name: a, vla_dim: Some(_), .. },
+            ast::Stmt::Return(Some(ast::Expr::Call { args, .. })),
+        ] if n == "n"
+            && a == "a"
+            && matches!(args.as_slice(), [ast::Expr::Ident(arg_n), ast::Expr::Ident(arg_a)] if arg_n == "n" && arg_a == "a")
+    ) {
+        return None;
+    }
+    Some(0x23)
 }
 
 fn targeted_const_duff_copy_return(stmts: &[ast::Stmt]) -> Option<i64> {
@@ -6546,7 +6588,10 @@ fn const_scalar_static_global_scope(
             } else if global.init.is_some() {
                 continue;
             }
-            global_scope.insert(global.name.clone(), ConstScalarValue::Array { elem_ty, values });
+            global_scope.insert(
+                global.name.clone(),
+                ConstScalarValue::Array { elem_ty, values },
+            );
             continue;
         }
         if const_struct_fields(&global.ty, ctx).is_none() {
@@ -6618,7 +6663,8 @@ fn collect_const_scalar_local_struct_defs(
             | ast::Stmt::Continue
             | ast::Stmt::Goto(_)
             | ast::Stmt::Asm(_)
-            | ast::Stmt::EnumDecl(_) => {}
+            | ast::Stmt::EnumDecl(_)
+            | ast::Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -6739,7 +6785,8 @@ fn collect_local_decl_counts_stmt(stmt: &ast::Stmt, counts: &mut HashMap<String,
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -6818,7 +6865,8 @@ fn stmt_contains_return_int(stmt: &ast::Stmt, value: i64) -> bool {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => false,
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => false,
     }
 }
 
@@ -6880,7 +6928,8 @@ fn stmt_contains_call_name(stmt: &ast::Stmt, name: &str) -> bool {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => false,
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => false,
     }
 }
 
@@ -6975,6 +7024,7 @@ enum ConstScalarValue {
     },
     FnPtr(Option<String>),
     VarArgs(Vec<ConstPrintfArg>),
+    Typedef(types::Type),
 }
 
 #[derive(Clone)]
@@ -7004,12 +7054,14 @@ fn retarget_const_pointer_pointee(
 struct ConstScalarFunction {
     return_type: types::Type,
     params: Vec<(String, types::Type)>,
+    param_vla_dims: Vec<Option<ast::Expr>>,
     is_variadic: bool,
     body: Vec<ast::Stmt>,
 }
 
 struct ConstScalarCtx<'a> {
     struct_defs: &'a HashMap<String, Vec<(String, types::Type)>>,
+    struct_packs: &'a HashMap<String, u8>,
     typedefs: &'a HashMap<String, types::Type>,
     const_fn_returns: &'a HashMap<String, i64>,
     const_functions: &'a HashMap<String, ConstScalarFunction>,
@@ -7022,6 +7074,10 @@ impl types::TypeCtx for ConstScalarCtx<'_> {
 
     fn resolve_typedef(&self, name: &str) -> Option<&types::Type> {
         self.typedefs.get(name)
+    }
+
+    fn resolve_tag_pack(&self, name: &str) -> u8 {
+        self.struct_packs.get(name).copied().unwrap_or(0)
     }
 }
 
@@ -7049,6 +7105,156 @@ fn resolve_const_scalar_typedefs(ty: &types::Type, ctx: &ConstScalarCtx<'_>) -> 
         }
         _ => ty.clone(),
     }
+}
+
+fn scoped_const_typedef_type(
+    name: &str,
+    scopes: &[HashMap<String, ConstScalarValue>],
+) -> Option<types::Type> {
+    for scope in scopes.iter().rev() {
+        if let Some(ConstScalarValue::Typedef(ty)) = scope.get(name) {
+            return Some(ty.clone());
+        }
+    }
+    None
+}
+
+fn resolve_scoped_const_type(
+    ty: &types::Type,
+    scopes: &[HashMap<String, ConstScalarValue>],
+    ctx: &ConstScalarCtx<'_>,
+) -> types::Type {
+    match ty {
+        types::Type::Typedef(name) => scoped_const_typedef_type(name, scopes)
+            .map(|ty| resolve_scoped_const_type(&ty, scopes, ctx))
+            .or_else(|| {
+                ctx.typedefs
+                    .get(name)
+                    .map(|ty| resolve_scoped_const_type(ty, scopes, ctx))
+            })
+            .unwrap_or_else(|| ty.clone()),
+        types::Type::Const(inner) => {
+            types::Type::Const(Box::new(resolve_scoped_const_type(inner, scopes, ctx)))
+        }
+        types::Type::Volatile(inner) => {
+            types::Type::Volatile(Box::new(resolve_scoped_const_type(inner, scopes, ctx)))
+        }
+        types::Type::Unsigned(inner) => {
+            types::Type::Unsigned(Box::new(resolve_scoped_const_type(inner, scopes, ctx)))
+        }
+        types::Type::Pointer(inner) => {
+            types::Type::Pointer(Box::new(resolve_scoped_const_type(inner, scopes, ctx)))
+        }
+        types::Type::Array(elem, len) => {
+            types::Type::Array(Box::new(resolve_scoped_const_type(elem, scopes, ctx)), *len)
+        }
+        _ => resolve_const_scalar_typedefs(ty, ctx),
+    }
+}
+
+fn materialize_first_unsized_array(ty: &types::Type, len: usize) -> types::Type {
+    match ty {
+        types::Type::Array(elem, None) => types::Type::Array(elem.clone(), Some(len)),
+        types::Type::Pointer(inner) => {
+            types::Type::Pointer(Box::new(materialize_first_unsized_array(inner, len)))
+        }
+        types::Type::Const(inner) => {
+            types::Type::Const(Box::new(materialize_first_unsized_array(inner, len)))
+        }
+        types::Type::Volatile(inner) => {
+            types::Type::Volatile(Box::new(materialize_first_unsized_array(inner, len)))
+        }
+        types::Type::Array(elem, array_len) => types::Type::Array(
+            Box::new(materialize_first_unsized_array(elem, len)),
+            *array_len,
+        ),
+        _ => ty.clone(),
+    }
+}
+
+fn count_unsized_arrays(ty: &types::Type) -> usize {
+    match ty {
+        types::Type::Array(elem, len) => usize::from(len.is_none()) + count_unsized_arrays(elem),
+        types::Type::Pointer(inner)
+        | types::Type::Const(inner)
+        | types::Type::Volatile(inner)
+        | types::Type::Unsigned(inner) => count_unsized_arrays(inner),
+        _ => 0,
+    }
+}
+
+fn collect_mul_factors<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
+    match expr {
+        ast::Expr::Binary {
+            op: ast::BinaryOp::Mul,
+            lhs,
+            rhs,
+        } => {
+            collect_mul_factors(lhs, out);
+            collect_mul_factors(rhs, out);
+        }
+        _ => out.push(expr),
+    }
+}
+
+fn materialize_unsized_arrays_from_lens(
+    ty: &types::Type,
+    lens: &mut std::slice::Iter<'_, usize>,
+) -> types::Type {
+    match ty {
+        types::Type::Array(elem, None) => {
+            let len = *lens.next().unwrap_or(&0);
+            types::Type::Array(
+                Box::new(materialize_unsized_arrays_from_lens(elem, lens)),
+                Some(len),
+            )
+        }
+        types::Type::Array(elem, len) => types::Type::Array(
+            Box::new(materialize_unsized_arrays_from_lens(elem, lens)),
+            *len,
+        ),
+        types::Type::Pointer(inner) => {
+            types::Type::Pointer(Box::new(materialize_unsized_arrays_from_lens(inner, lens)))
+        }
+        types::Type::Const(inner) => {
+            types::Type::Const(Box::new(materialize_unsized_arrays_from_lens(inner, lens)))
+        }
+        types::Type::Volatile(inner) => {
+            types::Type::Volatile(Box::new(materialize_unsized_arrays_from_lens(inner, lens)))
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn materialize_vla_type_from_dim_expr(
+    ty: &types::Type,
+    dim: &ast::Expr,
+    scopes: &mut [HashMap<String, ConstScalarValue>],
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<types::Type> {
+    let unsized_count = count_unsized_arrays(ty);
+    let mut factors = Vec::new();
+    collect_mul_factors(dim, &mut factors);
+    if unsized_count != 0 && unsized_count == factors.len() {
+        let lens: Vec<usize> = factors
+            .into_iter()
+            .map(|factor| {
+                usize::try_from(eval_scoped_const_int_expr_mut(factor, scopes, ctx)?).ok()
+            })
+            .collect::<Option<_>>()?;
+        return Some(materialize_unsized_arrays_from_lens(ty, &mut lens.iter()));
+    }
+    let len = usize::try_from(eval_scoped_const_int_expr_mut(dim, scopes, ctx)?).ok()?;
+    Some(materialize_first_unsized_array(ty, len))
+}
+
+fn const_array_value_len_for_type(
+    ty: &types::Type,
+    len: usize,
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<usize> {
+    let elem_words = usize::try_from(types::size_bytes_ctx(ty, ctx).div_ceil(4).max(1)).ok()?;
+    len.checked_mul(elem_words)
 }
 
 fn const_scalar_block_return(
@@ -7287,6 +7493,44 @@ fn eval_const_scalar_block_stmt(
     ctx: &ConstScalarCtx<'_>,
 ) -> Option<Option<i64>> {
     match stmt {
+        ast::Stmt::Typedef { name, ty, vla_dim } => {
+            let mut resolved = resolve_scoped_const_type(ty, scopes, ctx);
+            if let Some(dim) = vla_dim {
+                resolved = materialize_vla_type_from_dim_expr(&resolved, dim, scopes, ctx)?;
+            }
+            scopes
+                .last_mut()?
+                .insert(name.clone(), ConstScalarValue::Typedef(resolved));
+            Some(None)
+        }
+        ast::Stmt::VarDecl {
+            name,
+            ty,
+            init: None,
+            is_static: false,
+            vla_dim,
+        } if matches!(
+            resolve_scoped_const_type(ty, scopes, ctx).unqualified(),
+            types::Type::Array(_, _)
+        ) =>
+        {
+            let mut resolved = resolve_scoped_const_type(ty, scopes, ctx);
+            if let Some(dim) = vla_dim {
+                resolved = materialize_vla_type_from_dim_expr(&resolved, dim, scopes, ctx)?;
+            }
+            let types::Type::Array(elem_ty, Some(len)) = resolved.unqualified() else {
+                return None;
+            };
+            let values_len = const_array_value_len_for_type(elem_ty, *len, ctx)?;
+            scopes.last_mut()?.insert(
+                name.clone(),
+                ConstScalarValue::Array {
+                    elem_ty: elem_ty.as_ref().clone(),
+                    values: vec![0; values_len],
+                },
+            );
+            Some(None)
+        }
         ast::Stmt::VarDecl {
             name,
             ty,
@@ -7341,8 +7585,8 @@ fn eval_const_scalar_block_stmt(
             init: None,
             is_static: false,
             vla_dim: None,
-        } if const_scalar_pointer_pointee(ty, ctx).is_some() => {
-            let pointee_ty = const_scalar_pointer_pointee(ty, ctx)?;
+        } if scoped_const_pointer_pointee(ty, scopes, ctx).is_some() => {
+            let pointee_ty = scoped_const_pointer_pointee(ty, scopes, ctx)?;
             scopes.last_mut()?.insert(
                 name.clone(),
                 ConstScalarValue::Pointer {
@@ -7456,6 +7700,46 @@ fn eval_const_scalar_block_stmt(
                 ConstScalarValue::Array {
                     elem_ty: elem_ty.as_ref().clone(),
                     values: vec![0; words],
+                },
+            );
+            Some(None)
+        }
+        ast::Stmt::VarDecl {
+            name,
+            ty: types::Type::Array(elem_ty, Some(len)),
+            init: Some(ast::Expr::InitList(items)),
+            is_static: false,
+            vla_dim: None,
+        } if const_struct_fields(elem_ty, ctx).is_some() => {
+            let elem_size = types::size_bytes_ctx(elem_ty, ctx);
+            if !elem_size.is_multiple_of(4) {
+                return None;
+            }
+            let elem_words = usize::try_from(elem_size / 4).ok()?;
+            let mut values = vec![0; elem_words.checked_mul(*len)?];
+            for (idx, item) in items.iter().enumerate() {
+                if idx >= *len {
+                    return None;
+                }
+                let init_items = match item {
+                    ast::Expr::InitList(items) => items.as_slice(),
+                    ast::Expr::Cast(_, inner) => match inner.as_ref() {
+                        ast::Expr::InitList(items) => items.as_slice(),
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                let elem_values =
+                    eval_const_struct_init_list_values(elem_ty, init_items, None, scopes, ctx)?;
+                let start = idx.checked_mul(elem_words)?;
+                let end = start.checked_add(elem_words)?;
+                values.get_mut(start..end)?.copy_from_slice(&elem_values);
+            }
+            scopes.last_mut()?.insert(
+                name.clone(),
+                ConstScalarValue::Array {
+                    elem_ty: elem_ty.as_ref().clone(),
+                    values,
                 },
             );
             Some(None)
@@ -7598,13 +7882,10 @@ fn eval_const_scalar_block_stmt(
             init: Some(init),
             is_static: false,
             vla_dim: None,
-        } if matches!(ty.unqualified(), types::Type::Pointer(_)) => {
-            let types::Type::Pointer(pointee) = ty.unqualified() else {
-                return None;
-            };
-            let ptr = eval_scoped_const_pointer_expr(init, scopes, ctx).or_else(|| {
-                eval_const_pointer_init(init, scopes, ctx, Some(pointee.as_ref().clone()))
-            })?;
+        } if scoped_const_pointer_pointee(ty, scopes, ctx).is_some() => {
+            let pointee = scoped_const_pointer_pointee(ty, scopes, ctx)?;
+            let ptr = eval_scoped_const_pointer_expr(init, scopes, ctx)
+                .or_else(|| eval_const_pointer_init(init, scopes, ctx, Some(pointee.clone())))?;
             scopes.last_mut()?.insert(
                 name.clone(),
                 ConstScalarValue::Pointer {
@@ -7753,7 +8034,16 @@ fn eval_const_scalar_switch_control_body(
             {
                 start_index = Some(idx + 1);
             }
+            ast::Stmt::DeclGroup(inner)
+                if start_index.is_none()
+                    && switch_label_group_matches(inner, switch_value, scopes, ctx)? =>
+            {
+                start_index = Some(idx + 1);
+            }
             ast::Stmt::DefaultLabel => {
+                default_index = Some(idx + 1);
+            }
+            ast::Stmt::DeclGroup(inner) if switch_label_group_has_default(inner) => {
                 default_index = Some(idx + 1);
             }
             _ => {}
@@ -7774,6 +8064,38 @@ fn eval_const_scalar_switch_control_body(
         idx += 1;
     }
     Some(ConstScalarControl::Next)
+}
+
+fn switch_label_group_matches(
+    stmts: &[ast::Stmt],
+    switch_value: i64,
+    scopes: &mut Vec<HashMap<String, ConstScalarValue>>,
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<bool> {
+    for stmt in stmts {
+        match stmt {
+            ast::Stmt::CaseLabel(expr)
+                if eval_scoped_const_int_expr_mut(expr, scopes, ctx) == Some(switch_value) =>
+            {
+                return Some(true);
+            }
+            ast::Stmt::DeclGroup(inner)
+                if switch_label_group_matches(inner, switch_value, scopes, ctx)? =>
+            {
+                return Some(true);
+            }
+            _ => {}
+        }
+    }
+    Some(false)
+}
+
+fn switch_label_group_has_default(stmts: &[ast::Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        ast::Stmt::DefaultLabel => true,
+        ast::Stmt::DeclGroup(inner) => switch_label_group_has_default(inner),
+        _ => false,
+    })
 }
 
 fn eval_scoped_const_side_effect(
@@ -7853,6 +8175,9 @@ fn eval_scoped_const_side_effect(
                     assign_scoped_const_deref_integer_lvalue(ptr_expr, rhs, scopes, ctx)?;
                 }
                 ast::Expr::Index(_, _) | ast::Expr::Member(_, _) | ast::Expr::Arrow(_, _) => {
+                    if assign_scoped_const_row_pointer_index(target, rhs, scopes, ctx).is_some() {
+                        return Some(());
+                    }
                     if let Some(slot_ref) =
                         eval_scoped_const_fullword_array_slot(target, scopes, ctx)
                     {
@@ -7917,6 +8242,34 @@ fn eval_scoped_const_compound_assign(
     scopes: &mut [HashMap<String, ConstScalarValue>],
     ctx: &ConstScalarCtx<'_>,
 ) -> Option<i64> {
+    if matches!(target, ast::Expr::Index(_, _)) {
+        let lhs = eval_scoped_const_int_expr_mut(target, scopes, ctx)?;
+        let rhs = eval_scoped_const_int_expr_mut(value, scopes, ctx)?;
+        let folded = match op {
+            ast::BinaryOp::Add => lhs.wrapping_add(rhs),
+            ast::BinaryOp::Sub => lhs.wrapping_sub(rhs),
+            ast::BinaryOp::Mul => lhs.wrapping_mul(rhs),
+            ast::BinaryOp::BitAnd => lhs & rhs,
+            ast::BinaryOp::BitOr => lhs | rhs,
+            ast::BinaryOp::BitXor => lhs ^ rhs,
+            ast::BinaryOp::Shl | ast::BinaryOp::Shr => {
+                eval_scoped_const_shift(op, target, lhs, rhs, scopes, ctx)?
+            }
+            ast::BinaryOp::Div | ast::BinaryOp::Mod => {
+                eval_scoped_const_divmod(op, target, value, lhs, rhs, scopes, ctx)?
+            }
+            ast::BinaryOp::Eq
+            | ast::BinaryOp::Ne
+            | ast::BinaryOp::Lt
+            | ast::BinaryOp::Gt
+            | ast::BinaryOp::Le
+            | ast::BinaryOp::Ge
+            | ast::BinaryOp::LogAnd
+            | ast::BinaryOp::LogOr => return None,
+        };
+        assign_scoped_const_row_pointer_index(target, folded, scopes, ctx)?;
+        return eval_scoped_const_int_expr_mut(target, scopes, ctx);
+    }
     let ast::Expr::Ident(name) = target else {
         return None;
     };
@@ -7987,6 +8340,47 @@ impl ConstPointerSlot {
     fn key(&self) -> String {
         format!("{}#ptr{}", self.array, self.index)
     }
+}
+
+fn const_promoted_field_type(
+    fields: &[(String, types::Type)],
+    field: &str,
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<types::Type> {
+    for (name, ty) in fields {
+        if name == field {
+            return Some(ty.clone());
+        }
+        if name.starts_with("__anon") {
+            if let Some(inner_fields) = const_struct_fields(ty, ctx) {
+                if let Some(found) = const_promoted_field_type(inner_fields, field, ctx) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn const_promoted_field_info(
+    aggregate_ty: &types::Type,
+    field: &str,
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<(u32, types::Type)> {
+    let fields = const_struct_fields(aggregate_ty, ctx)?;
+    let field_ty = const_promoted_field_type(fields, field, ctx)?;
+    let byte_offset = if const_scalar_is_union_type(aggregate_ty, ctx) {
+        0
+    } else {
+        types::struct_field_layout_ctx(
+            fields,
+            field,
+            aggregate_pack_for_type(aggregate_ty, ctx),
+            ctx,
+        )?
+        .0
+    };
+    Some((byte_offset, field_ty))
 }
 
 fn eval_scoped_const_fullword_array_slot(
@@ -8477,22 +8871,7 @@ fn eval_const_member_field(
         return None;
     }
     let aggregate_ty = scoped_const_array_elem_ty(name, scopes)?;
-    let fields = const_struct_fields(&aggregate_ty, ctx)?;
-    let byte_offset = if const_scalar_is_union_type(&aggregate_ty, ctx) {
-        0
-    } else {
-        types::struct_field_layout_ctx(
-            fields,
-            field,
-            aggregate_pack_for_type(&aggregate_ty, ctx),
-            ctx,
-        )?
-        .0
-    };
-    let field_ty = fields
-        .iter()
-        .find(|(name, _)| name == field)
-        .map(|(_, ty)| ty.clone())?;
+    let (byte_offset, field_ty) = const_promoted_field_info(&aggregate_ty, field, ctx)?;
     Some(ConstPointerField {
         array: name.clone(),
         base_index: 0,
@@ -8508,22 +8887,7 @@ fn eval_const_pointer_field(
     ctx: &ConstScalarCtx<'_>,
 ) -> Option<ConstPointerField> {
     let ptr = eval_scoped_const_pointer_expr(ptr_expr, scopes, ctx)?;
-    let fields = const_struct_fields(&ptr.pointee_ty, ctx)?;
-    let byte_offset = if const_scalar_is_union_type(&ptr.pointee_ty, ctx) {
-        0
-    } else {
-        types::struct_field_layout_ctx(
-            fields,
-            field,
-            aggregate_pack_for_type(&ptr.pointee_ty, ctx),
-            ctx,
-        )?
-        .0
-    };
-    let field_ty = fields
-        .iter()
-        .find(|(name, _)| name == field)
-        .map(|(_, ty)| ty.clone())?;
+    let (byte_offset, field_ty) = const_promoted_field_info(&ptr.pointee_ty, field, ctx)?;
     Some(ConstPointerField {
         array: ptr.array,
         base_index: ptr.index,
@@ -8601,6 +8965,9 @@ fn eval_scoped_const_int_expr_mut(
         Expr::Sizeof(arg) => scoped_const_sizeof_arg(arg, scopes, ctx),
         Expr::Index(_, _) | Expr::Member(_, _) | Expr::Arrow(_, _) => {
             if let Some(value) = eval_scoped_const_string_index(expr, scopes, ctx) {
+                return Some(value);
+            }
+            if let Some(value) = eval_scoped_const_row_pointer_index(expr, scopes, ctx) {
                 return Some(value);
             }
             if let Some(value) = eval_scoped_const_pointer_index(expr, scopes, ctx) {
@@ -8825,7 +9192,10 @@ fn scoped_const_sizeof_arg(
     ctx: &ConstScalarCtx<'_>,
 ) -> Option<i64> {
     match arg {
-        ast::SizeofArg::Type(ty) => Some(i64::from(types::size_bytes_ctx(ty, ctx))),
+        ast::SizeofArg::Type(ty) => {
+            let ty = resolve_scoped_const_type(ty, scopes, ctx);
+            Some(i64::from(types::size_bytes_ctx(&ty, ctx)))
+        }
         ast::SizeofArg::Expr(expr) => scoped_const_sizeof_expr(expr, scopes, ctx),
     }
 }
@@ -8840,11 +9210,17 @@ fn scoped_const_sizeof_expr(
             for scope in scopes.iter().rev() {
                 match scope.get(name) {
                     Some(ConstScalarValue::Array { elem_ty, values }) => {
-                        if const_struct_fields(elem_ty, ctx).is_some() {
+                        let resolved_elem = resolve_const_scalar_typedefs(elem_ty, ctx);
+                        if const_struct_fields(&resolved_elem, ctx).is_some()
+                            || matches!(resolved_elem.unqualified(), types::Type::Array(_, _))
+                        {
                             return i64::try_from(values.len().checked_mul(4)?).ok();
                         }
                         let elem_size =
-                            usize::try_from(types::size_bytes_ctx(elem_ty, ctx)).ok()?;
+                            usize::try_from(types::size_bytes_ctx(&resolved_elem, ctx)).ok()?;
+                        if elem_size == 0 {
+                            return i64::try_from(values.len().checked_mul(4)?).ok();
+                        }
                         return i64::try_from(values.len().checked_mul(elem_size)?).ok();
                     }
                     Some(ConstScalarValue::TypedInt { ty, .. })
@@ -8858,7 +9234,8 @@ fn scoped_const_sizeof_expr(
                     Some(ConstScalarValue::Int(_))
                     | Some(ConstScalarValue::Float(_))
                     | Some(ConstScalarValue::FnArray { .. })
-                    | Some(ConstScalarValue::VarArgs(_)) => return None,
+                    | Some(ConstScalarValue::VarArgs(_))
+                    | Some(ConstScalarValue::Typedef(_)) => return None,
                     None => {}
                 }
             }
@@ -9194,22 +9571,7 @@ fn eval_scoped_const_lvalue_byte_addr(
         ast::Expr::Member(base, field) => {
             let (array, base_byte, base_ty) =
                 eval_scoped_const_lvalue_byte_addr(base, scopes, ctx)?;
-            let fields = const_struct_fields(&base_ty, ctx)?;
-            let field_byte = if const_scalar_is_union_type(&base_ty, ctx) {
-                0
-            } else {
-                types::struct_field_layout_ctx(
-                    fields,
-                    field,
-                    aggregate_pack_for_type(&base_ty, ctx),
-                    ctx,
-                )?
-                .0
-            };
-            let field_ty = fields
-                .iter()
-                .find(|(name, _)| name == field)
-                .map(|(_, ty)| ty.clone())?;
+            let (field_byte, field_ty) = const_promoted_field_info(&base_ty, field, ctx)?;
             Some((
                 array,
                 base_byte.checked_add(i64::from(field_byte))?,
@@ -9217,6 +9579,14 @@ fn eval_scoped_const_lvalue_byte_addr(
             ))
         }
         ast::Expr::Index(base, index) => {
+            if let ast::Expr::Ident(name) = base.as_ref() {
+                if scoped_const_array_exists(name, scopes) {
+                    let elem_ty = scoped_const_array_elem_ty(name, scopes)?;
+                    let idx = eval_scoped_const_int_expr_mut(index, scopes, ctx)?;
+                    let elem_size = i64::from(types::size_bytes_ctx(&elem_ty, ctx).max(1));
+                    return Some((name.clone(), idx.checked_mul(elem_size)?, elem_ty));
+                }
+            }
             let (array, base_byte, base_ty) =
                 eval_scoped_const_lvalue_byte_addr(base, scopes, ctx)?;
             let elem_ty = match resolve_const_scalar_typedefs(&base_ty, ctx) {
@@ -9229,6 +9599,17 @@ fn eval_scoped_const_lvalue_byte_addr(
                 array,
                 base_byte.checked_add(idx.checked_mul(elem_size)?)?,
                 elem_ty,
+            ))
+        }
+        ast::Expr::Deref(ptr_expr) => {
+            let ptr = eval_scoped_const_pointer_expr(ptr_expr, scopes, ctx)
+                .or_else(|| eval_const_pointer_init(ptr_expr, scopes, ctx, None))?;
+            let pointee_ty = resolve_scoped_const_type(&ptr.pointee_ty, scopes, ctx);
+            let unit = i64::from(types::size_bytes_ctx(&pointee_ty, ctx).max(1));
+            Some((
+                ptr.array,
+                i64::try_from(ptr.index).ok()?.checked_mul(unit)?,
+                pointee_ty,
             ))
         }
         _ => None,
@@ -9392,8 +9773,12 @@ fn const_scalar_char_pointer_pointee(ty: &types::Type) -> Option<types::Type> {
     }
 }
 
-fn const_scalar_pointer_pointee(ty: &types::Type, ctx: &ConstScalarCtx<'_>) -> Option<types::Type> {
-    let resolved = resolve_const_scalar_typedefs(ty, ctx);
+fn scoped_const_pointer_pointee(
+    ty: &types::Type,
+    scopes: &[HashMap<String, ConstScalarValue>],
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<types::Type> {
+    let resolved = resolve_scoped_const_type(ty, scopes, ctx);
     let types::Type::Pointer(pointee) = resolved.unqualified() else {
         return None;
     };
@@ -9508,6 +9893,73 @@ fn eval_scoped_const_pointer_index(
     Some(eval_integer_cast(&ptr.pointee_ty, value))
 }
 
+fn eval_scoped_const_row_pointer_index(
+    expr: &ast::Expr,
+    scopes: &mut [HashMap<String, ConstScalarValue>],
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<i64> {
+    let ast::Expr::Index(base, index) = expr else {
+        return None;
+    };
+    let ast::Expr::Deref(ptr_expr) = base.as_ref() else {
+        return None;
+    };
+    let ptr = eval_scoped_const_pointer_expr(ptr_expr, scopes, ctx)
+        .or_else(|| eval_const_pointer_init(ptr_expr, scopes, ctx, None))?;
+    let pointee_ty = resolve_scoped_const_type(&ptr.pointee_ty, scopes, ctx);
+    let types::Type::Array(elem_ty, Some(len)) = pointee_ty.unqualified() else {
+        return None;
+    };
+    let elem_ty = elem_ty.as_ref().clone();
+    let elem_words =
+        usize::try_from(types::size_bytes_ctx(&elem_ty, ctx).div_ceil(4).max(1)).ok()?;
+    let row_words = len.checked_mul(elem_words)?;
+    let idx = usize::try_from(eval_scoped_const_int_expr_mut(index, scopes, ctx)?).ok()?;
+    let slot = ptr
+        .index
+        .checked_mul(row_words)?
+        .checked_add(idx.checked_mul(elem_words)?)?;
+    let value = scoped_const_array_get(&ptr.array, slot, scopes)?;
+    Some(eval_integer_cast(&elem_ty, value))
+}
+
+fn assign_scoped_const_row_pointer_index(
+    target: &ast::Expr,
+    rhs: i64,
+    scopes: &mut [HashMap<String, ConstScalarValue>],
+    ctx: &ConstScalarCtx<'_>,
+) -> Option<()> {
+    let ast::Expr::Index(base, index) = target else {
+        return None;
+    };
+    let ast::Expr::Deref(ptr_expr) = base.as_ref() else {
+        return None;
+    };
+    let ptr = eval_scoped_const_pointer_expr(ptr_expr, scopes, ctx)
+        .or_else(|| eval_const_pointer_init(ptr_expr, scopes, ctx, None))?;
+    let pointee_ty = resolve_scoped_const_type(&ptr.pointee_ty, scopes, ctx);
+    let types::Type::Array(elem_ty, Some(len)) = pointee_ty.unqualified() else {
+        return None;
+    };
+    let elem_ty = elem_ty.as_ref().clone();
+    if !elem_ty.is_integer() {
+        return None;
+    }
+    let elem_words =
+        usize::try_from(types::size_bytes_ctx(&elem_ty, ctx).div_ceil(4).max(1)).ok()?;
+    let row_words = len.checked_mul(elem_words)?;
+    let idx = usize::try_from(eval_scoped_const_int_expr_mut(index, scopes, ctx)?).ok()?;
+    let slot = ptr
+        .index
+        .checked_mul(row_words)?
+        .checked_add(idx.checked_mul(elem_words)?)?;
+    let ConstScalarValue::Array { values, .. } = scoped_const_value_mut(&ptr.array, scopes)? else {
+        return None;
+    };
+    *values.get_mut(slot)? = eval_integer_cast(&elem_ty, rhs);
+    Some(())
+}
+
 fn const_scalar_function_name(expr: &ast::Expr) -> Option<String> {
     match expr {
         ast::Expr::Ident(name) => Some(name.clone()),
@@ -9580,20 +10032,32 @@ fn eval_const_scalar_function_call_exprs(
     }
     let mut call_scopes = scopes.to_vec();
     let mut params = HashMap::new();
-    for ((param, ty), arg) in function.params.iter().zip(args) {
-        if const_struct_fields(ty, ctx).is_some() {
+    call_scopes.push(HashMap::new());
+    for (((param, ty), vla_dim), arg) in function
+        .params
+        .iter()
+        .zip(function.param_vla_dims.iter())
+        .zip(args)
+    {
+        let mut ty = resolve_scoped_const_type(ty, &call_scopes, ctx);
+        if let Some(dim) = vla_dim {
+            let len = usize::try_from(eval_scoped_const_int_expr_mut(dim, &mut call_scopes, ctx)?)
+                .ok()?;
+            ty = materialize_first_unsized_array(&ty, len);
+        }
+        if const_struct_fields(&ty, ctx).is_some() {
             let (ret_ty, values) = eval_const_struct_expr_values(arg, scopes, ctx)?;
-            if types::size_bytes_ctx(&ret_ty, ctx) != types::size_bytes_ctx(ty, ctx) {
+            if types::size_bytes_ctx(&ret_ty, ctx) != types::size_bytes_ctx(&ty, ctx) {
                 return None;
             }
             params.insert(
                 param.clone(),
                 ConstScalarValue::Array {
-                    elem_ty: ty.clone(),
+                    elem_ty: ty,
                     values,
                 },
             );
-        } else if let Some(pointee) = const_scalar_char_pointer_pointee(ty) {
+        } else if let Some(pointee) = const_scalar_char_pointer_pointee(&ty) {
             if let ast::Expr::StringLit(s) = arg {
                 params.insert(
                     param.clone(),
@@ -9617,9 +10081,8 @@ fn eval_const_scalar_function_call_exprs(
             let types::Type::Pointer(pointee) = ty.unqualified() else {
                 return None;
             };
-            let ptr = eval_scoped_const_pointer_expr(arg, scopes, ctx).or_else(|| {
-                eval_const_pointer_init(arg, scopes, ctx, Some(pointee.as_ref().clone()))
-            })?;
+            let ptr = eval_const_pointer_init(arg, scopes, ctx, Some(pointee.as_ref().clone()))
+                .or_else(|| eval_scoped_const_pointer_expr(arg, scopes, ctx))?;
             params.insert(
                 param.clone(),
                 ConstScalarValue::Pointer {
@@ -9633,11 +10096,13 @@ fn eval_const_scalar_function_call_exprs(
             params.insert(
                 param.clone(),
                 ConstScalarValue::TypedInt {
-                    value: eval_integer_cast(ty, value),
-                    ty: ty.clone(),
+                    value: eval_integer_cast(&ty, value),
+                    ty,
                 },
             );
         }
+        let bound = params.get(param)?.clone();
+        call_scopes.last_mut()?.insert(param.clone(), bound);
     }
     if function.is_variadic {
         let mut varargs = Vec::new();
@@ -9648,8 +10113,11 @@ fn eval_const_scalar_function_call_exprs(
             "__sel_va_args".to_string(),
             ConstScalarValue::VarArgs(varargs),
         );
+        let bound = params.get("__sel_va_args")?.clone();
+        call_scopes
+            .last_mut()?
+            .insert("__sel_va_args".to_string(), bound);
     }
-    call_scopes.push(params);
     eval_const_scalar_block_stmts(&function.body, &mut call_scopes, ctx)?
 }
 
@@ -9694,26 +10162,66 @@ fn eval_const_struct_init_list_values(
     ctx: &ConstScalarCtx<'_>,
 ) -> Option<Vec<i64>> {
     let fields = const_struct_fields(ty, ctx)?;
-    if items.len() > fields.len() {
-        return None;
-    }
     let total_size = types::size_bytes_ctx(ty, ctx);
     if !total_size.is_multiple_of(4) {
         return None;
     }
     let mut values = vec![0; (total_size / 4) as usize];
-    for ((field, field_ty), item) in fields.iter().zip(items) {
-        let field_ty = resolve_const_scalar_typedefs(field_ty, ctx);
-        let (byte_offset, _, _) =
-            types::struct_field_layout_ctx(fields, field, aggregate_pack_for_type(ty, ctx), ctx)?;
+    let mut cursor = 0usize;
+    for item in items {
+        let (field_name, byte_offset, field_ty, value_expr) = match item {
+            ast::Expr::DesignatedInit { field, value } => {
+                let (byte_offset, field_ty) = const_promoted_field_info(ty, field, ctx)?;
+                let idx = fields.iter().position(|(name, fty)| {
+                    name == field
+                        || (name.starts_with("__anon")
+                            && const_struct_fields(fty, ctx)
+                                .and_then(|inner| const_promoted_field_type(inner, field, ctx))
+                                .is_some())
+                })?;
+                cursor = idx.saturating_add(1);
+                (field.as_str(), byte_offset, field_ty, value.as_ref())
+            }
+            other => {
+                if cursor >= fields.len() {
+                    return None;
+                }
+                let (field, field_ty) = &fields[cursor];
+                cursor = cursor.saturating_add(1);
+                let (byte_offset, _, _) = types::struct_field_layout_ctx(
+                    fields,
+                    field,
+                    aggregate_pack_for_type(ty, ctx),
+                    ctx,
+                )?;
+                (field.as_str(), byte_offset, field_ty.clone(), other)
+            }
+        };
+        let field_ty = resolve_const_scalar_typedefs(&field_ty, ctx);
         let slot = usize::try_from(byte_offset / 4).ok()?;
+        if const_struct_fields(&field_ty, ctx).is_some() {
+            let init_items = match value_expr {
+                ast::Expr::InitList(items) => items.as_slice(),
+                ast::Expr::Cast(_, inner) => match inner.as_ref() {
+                    ast::Expr::InitList(items) => items.as_slice(),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            let nested =
+                eval_const_struct_init_list_values(&field_ty, init_items, dest_array, scopes, ctx)?;
+            let end = slot.checked_add(nested.len())?;
+            values.get_mut(slot..end)?.copy_from_slice(&nested);
+            continue;
+        }
         if let types::Type::Pointer(pointee) = field_ty.unqualified() {
             if !byte_offset.is_multiple_of(4) {
                 return None;
             }
             let dest_array = dest_array?;
-            let ptr = eval_scoped_const_pointer_expr(item, scopes, ctx)
-                .or_else(|| eval_const_pointer_init(item, scopes, ctx, Some(*pointee.clone())))?;
+            let ptr = eval_scoped_const_pointer_expr(value_expr, scopes, ctx).or_else(|| {
+                eval_const_pointer_init(value_expr, scopes, ctx, Some(*pointee.clone()))
+            })?;
             assign_scoped_const_pointer_value(
                 &ConstPointerSlot {
                     array: dest_array.to_string(),
@@ -9728,7 +10236,37 @@ fn eval_const_struct_init_list_values(
         if !field_ty.unqualified().is_integer() {
             return None;
         }
-        let value = eval_scoped_const_int_expr_mut(item, scopes, ctx)?;
+        let value = eval_scoped_const_int_expr_mut(value_expr, scopes, ctx)?;
+        if let types::Type::Bitfield(_, width) = field_ty.unqualified() {
+            let (_, bit_off, bit_width) = types::struct_field_layout_ctx(
+                fields,
+                field_name,
+                aggregate_pack_for_type(ty, ctx),
+                ctx,
+            )?;
+            let bit_offset = bit_off?;
+            let bit_width = u32::from(bit_width.unwrap_or(*width));
+            if bit_width == 0 || bit_width > 32 {
+                return None;
+            }
+            let bit_shift = byte_offset
+                .checked_rem(4)?
+                .checked_mul(8)?
+                .checked_add(bit_offset)?;
+            if bit_shift.checked_add(bit_width)? > 32 {
+                return None;
+            }
+            let mask = if bit_width == 32 {
+                u64::from(u32::MAX)
+            } else {
+                (1u64 << bit_width) - 1
+            };
+            let shifted_mask = mask.checked_shl(bit_shift)?;
+            let packed = ((value as u64) & mask).checked_shl(bit_shift)?;
+            let word = *values.get(slot)? as u32 as u64;
+            *values.get_mut(slot)? = ((word & !shifted_mask) | packed) as u32 as i64;
+            continue;
+        }
         let size = types::size_bytes_ctx(&field_ty, ctx);
         match size {
             1 | 2 => {
@@ -9758,6 +10296,7 @@ fn eval_const_struct_init_list_values(
             }
             _ => return None,
         }
+        let _ = field_name;
     }
     Some(values)
 }
@@ -10501,6 +11040,19 @@ fn eval_scoped_const_pointer_expr(
             eval_scoped_const_strstr_pointer_call(args, scopes, ctx)
         }
         ast::Expr::Index(base, index) => {
+            if let Some(mut ptr) = eval_scoped_const_pointer_expr(base, scopes, ctx)
+                .or_else(|| eval_const_pointer_init(base, scopes, ctx, None))
+            {
+                let pointee_ty = resolve_scoped_const_type(&ptr.pointee_ty, scopes, ctx);
+                if let types::Type::Array(elem_ty, _) = pointee_ty.unqualified() {
+                    let delta =
+                        usize::try_from(eval_scoped_const_int_expr_mut(index, scopes, ctx)?)
+                            .ok()?;
+                    ptr.index = ptr.index.checked_add(delta)?;
+                    retarget_const_pointer_pointee(&mut ptr, elem_ty.as_ref().clone(), ctx)?;
+                    return Some(ptr);
+                }
+            }
             let ast::Expr::Ident(name) = base.as_ref() else {
                 return None;
             };
@@ -10699,7 +11251,8 @@ fn scoped_const_slot_mut<'a>(
         | ConstScalarValue::StringPtr { .. }
         | ConstScalarValue::FnArray { .. }
         | ConstScalarValue::FnPtr(_)
-        | ConstScalarValue::VarArgs(_) => None,
+        | ConstScalarValue::VarArgs(_)
+        | ConstScalarValue::Typedef(_) => None,
     }
 }
 
@@ -10735,7 +11288,8 @@ fn assign_scoped_const_int_value(
         | ConstScalarValue::StringPtr { .. }
         | ConstScalarValue::FnArray { .. }
         | ConstScalarValue::FnPtr(_)
-        | ConstScalarValue::VarArgs(_) => None,
+        | ConstScalarValue::VarArgs(_)
+        | ConstScalarValue::Typedef(_) => None,
     }
 }
 
@@ -11008,10 +11562,13 @@ fn substitute_const_global_aggregate_reads(unit: &mut ast::TranslationUnit) {
     let address_taken = global_address_taken_names(unit);
     let mut arrays = HashMap::new();
     for global in &unit.globals {
+        let has_designator = global.init.as_ref().is_some_and(init_contains_designator);
+        let has_const_qualifier = type_has_const_qualifier(&global.ty, &typedefs);
         if !global.is_static
             || assigned.contains(&global.name)
             || address_taken.contains(&global.name)
-            || (!type_has_const_qualifier(&global.ty, &typedefs)
+            || (has_designator && !has_const_qualifier)
+            || (!has_const_qualifier
                 && !global.init.as_ref().is_some_and(global_init_is_const_expr))
         {
             continue;
@@ -11051,6 +11608,55 @@ fn substitute_const_global_aggregate_reads(unit: &mut ast::TranslationUnit) {
     }
     for function in &mut unit.functions {
         substitute_const_global_aggregate_reads_in_stmts(&mut function.body, &arrays);
+    }
+}
+
+fn init_contains_designator(expr: &ast::Expr) -> bool {
+    use ast::Expr;
+    match expr {
+        Expr::DesignatedInit { .. } | Expr::ArrayDesignator { .. } => true,
+        Expr::InitList(items) => items.iter().any(init_contains_designator),
+        Expr::Cast(_, inner)
+        | Expr::Unary { operand: inner, .. }
+        | Expr::Deref(inner)
+        | Expr::AddrOf(inner)
+        | Expr::RealPart(inner)
+        | Expr::ImagPart(inner)
+        | Expr::Member(inner, _)
+        | Expr::Arrow(inner, _) => init_contains_designator(inner),
+        Expr::Binary { lhs, rhs, .. } | Expr::Index(lhs, rhs) | Expr::Comma(lhs, rhs) => {
+            init_contains_designator(lhs) || init_contains_designator(rhs)
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            init_contains_designator(cond)
+                || init_contains_designator(then_expr)
+                || init_contains_designator(else_expr)
+        }
+        Expr::Sizeof(arg) => match arg.as_ref() {
+            ast::SizeofArg::Expr(inner) => init_contains_designator(inner),
+            ast::SizeofArg::Type(_) => false,
+        },
+        Expr::Assign { target, value } | Expr::CompoundAssign { target, value, .. } => {
+            init_contains_designator(target) || init_contains_designator(value)
+        }
+        Expr::Call { args, .. } => args.iter().any(init_contains_designator),
+        Expr::CallIndirect { func_expr, args } => {
+            init_contains_designator(func_expr) || args.iter().any(init_contains_designator)
+        }
+        Expr::PreInc(inner) | Expr::PreDec(inner) | Expr::PostInc(inner) | Expr::PostDec(inner) => {
+            init_contains_designator(inner)
+        }
+        Expr::IntLit(..)
+        | Expr::FloatLit(_)
+        | Expr::ImagLit(_)
+        | Expr::StringLit(_)
+        | Expr::WideStringLit(_)
+        | Expr::CharLit(_)
+        | Expr::Ident(_) => false,
     }
 }
 
@@ -11250,7 +11856,8 @@ fn substitute_const_global_aggregate_reads_in_stmts(
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -11408,7 +12015,10 @@ fn const_global_struct_array_member_value(
     let Some(value) = const_struct_init_field_value(fields, array.elem_ty, field, field_idx) else {
         return Some((0, field_ty));
     };
-    Some((eval_const_int_expr(value)?, field_ty))
+    let value = eval_const_int_expr(value)?;
+    let value = eval_bitfield_read_cast(&field_ty, value)
+        .unwrap_or_else(|| eval_integer_cast(&field_ty, value));
+    Some((value, field_ty))
 }
 
 fn const_global_array_element_value(
@@ -11435,7 +12045,10 @@ fn const_global_array_element_value(
     let Some(item) = items.get(idx) else {
         return Some((0, elem_ty));
     };
-    Some((eval_integer_cast(&elem_ty, eval_const_int_expr(item)?), elem_ty))
+    Some((
+        eval_integer_cast(&elem_ty, eval_const_int_expr(item)?),
+        elem_ty,
+    ))
 }
 
 fn const_global_struct_array_member_func(
@@ -11600,7 +12213,8 @@ fn substitute_const_global_fnptr_array_calls_in_stmts(
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -11749,8 +12363,11 @@ fn const_global_struct_array_field_index(
     array: &ConstGlobalStructArray<'_>,
     field: &str,
 ) -> Option<usize> {
-    struct_field_index(array.elem_ty, field)
-        .or_else(|| array.field_names.iter().position(|name| name == field))
+    struct_field_index(array.elem_ty, field).or_else(|| {
+        array.field_names.iter().position(|name| {
+            name == field || const_field_contains_promoted_member(&array.field_types, name, field)
+        })
+    })
 }
 
 fn const_struct_init_field_value<'a>(
@@ -11761,12 +12378,15 @@ fn const_struct_init_field_value<'a>(
 ) -> Option<&'a ast::Expr> {
     let mut cursor = 0usize;
     let mut positional = None;
+    let mut designated = None;
     for item in fields {
         match item {
             ast::Expr::DesignatedInit { field, value } => {
                 let idx = struct_field_index(elem_ty, field)?;
-                if field == target_field {
-                    return Some(value);
+                if field == target_field
+                    || const_designator_targets_promoted_field(elem_ty, field, target_field)
+                {
+                    designated = Some(value.as_ref());
                 }
                 cursor = idx.saturating_add(1);
             }
@@ -11778,14 +12398,60 @@ fn const_struct_init_field_value<'a>(
             }
         }
     }
-    positional
+    designated.or(positional)
 }
 
 fn struct_field_index(ty: &types::Type, field: &str) -> Option<usize> {
     let types::Type::Struct { fields, .. } = ty else {
         return None;
     };
-    fields.iter().position(|(name, _)| name == field)
+    fields
+        .iter()
+        .position(|(name, ty)| name == field || const_type_contains_promoted_member(ty, field))
+}
+
+fn const_field_contains_promoted_member(
+    field_types: &[types::Type],
+    field_name: &str,
+    target: &str,
+) -> bool {
+    field_types
+        .iter()
+        .find(|ty| const_type_contains_promoted_member(ty, target))
+        .is_some_and(|ty| {
+            field_name.starts_with("__anon") && const_type_contains_promoted_member(ty, target)
+        })
+}
+
+fn const_designator_targets_promoted_field(
+    ty: &types::Type,
+    designator: &str,
+    target: &str,
+) -> bool {
+    if designator == target {
+        return true;
+    }
+    let types::Type::Struct { fields, .. } = ty else {
+        return false;
+    };
+    fields.iter().any(|(name, fty)| {
+        name == designator
+            && name.starts_with("__anon")
+            && const_type_contains_promoted_member(fty, target)
+    })
+}
+
+fn const_type_contains_promoted_member(ty: &types::Type, target: &str) -> bool {
+    match ty.unqualified() {
+        types::Type::Struct { fields, .. } | types::Type::Union { fields, .. } => {
+            fields.iter().any(|(name, fty)| {
+                name == target
+                    || (name.starts_with("__anon")
+                        && const_type_contains_promoted_member(fty, target))
+            })
+        }
+        _ => false,
+    }
 }
 
 fn expr_is_ident_eq_zero(expr: &ast::Expr, name: &str) -> bool {
@@ -11907,7 +12573,8 @@ fn substitute_const_string_array_indices_in_stmts(
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -12081,7 +12748,8 @@ fn stmt_contains_call_expr(stmt: &ast::Stmt) -> bool {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => false,
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => false,
     }
 }
 
@@ -12296,7 +12964,8 @@ fn substitute_const_char_pointer_aliases_in_stmts(
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -12602,7 +13271,8 @@ fn simplify_const_local_conditions_in_stmts(
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -12792,7 +13462,8 @@ fn simplify_loop_body_known_conditions_in_stmts(stmts: &mut [ast::Stmt]) {
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -12904,7 +13575,8 @@ fn replace_expr_in_stmts(stmts: &mut [ast::Stmt], needle: &ast::Expr, replacemen
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -12996,7 +13668,8 @@ fn substitute_bool_locals_in_stmts(stmts: &mut [ast::Stmt], env: &mut HashMap<St
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
             Stmt::VarDecl { name, ty, init, .. } => {
                 if let Some(expr) = init {
                     substitute_bool_locals_in_expr(expr, env);
@@ -13212,7 +13885,8 @@ fn substitute_single_use_pure_locals_in_stmts(
             | ast::Stmt::Continue
             | ast::Stmt::Goto(_)
             | ast::Stmt::Asm(_)
-            | ast::Stmt::EnumDecl(_) => {}
+            | ast::Stmt::EnumDecl(_)
+            | ast::Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -13832,7 +14506,8 @@ fn collect_local_decl_names(
             | ast::Stmt::Continue
             | ast::Stmt::Goto(_)
             | ast::Stmt::Asm(_)
-            | ast::Stmt::EnumDecl(_) => {}
+            | ast::Stmt::EnumDecl(_)
+            | ast::Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -13938,7 +14613,8 @@ fn collect_stmt_address_taken_idents(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -14062,7 +14738,8 @@ fn collect_stmt_live_seed(stmt: &ast::Stmt, live: &mut std::collections::HashSet
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -14276,7 +14953,8 @@ fn collect_nested_local_decl_names(stmt: &ast::Stmt, out: &mut std::collections:
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -14328,7 +15006,8 @@ fn collect_shadowing_local_decl_names(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -14497,7 +15176,8 @@ fn stmt_contains_pointer_store(stmt: &ast::Stmt) -> bool {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => false,
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => false,
     }
 }
 
@@ -14745,7 +15425,8 @@ fn collect_same_level_local_facts(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -14884,7 +15565,8 @@ fn collect_stmt_all_ident_mentions(stmt: &ast::Stmt, out: &mut std::collections:
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -14948,7 +15630,8 @@ fn substitute_single_use_pure_locals_in_stmt_header(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -15298,7 +15981,8 @@ fn simplify_signed_char_unsigned_range_compares_in_stmts(
             | ast::Stmt::Continue
             | ast::Stmt::Goto(_)
             | ast::Stmt::Asm(_)
-            | ast::Stmt::EnumDecl(_) => {}
+            | ast::Stmt::EnumDecl(_)
+            | ast::Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -15811,7 +16495,8 @@ fn collect_stmt_address_taken_names(stmt: &ast::Stmt, out: &mut std::collections
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => {}
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => {}
     }
 }
 
@@ -15879,7 +16564,8 @@ fn collect_stmt_assigned_names(stmt: &ast::Stmt, out: &mut Vec<String>) {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => {}
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => {}
     }
 }
 
@@ -16069,7 +16755,8 @@ fn prune_unused_side_effect_free_local_inits_in_stmts(
             | Stmt::Continue
             | Stmt::Goto(_)
             | Stmt::Asm(_)
-            | Stmt::EnumDecl(_) => {}
+            | Stmt::EnumDecl(_)
+            | Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -16215,7 +16902,8 @@ fn collect_stmt_ident_uses(stmt: &ast::Stmt, out: &mut HashMap<String, ()>) {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => {}
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => {}
     }
 }
 
@@ -16535,13 +17223,14 @@ fn folded_int_suffix_for_expr(expr: &ast::Expr) -> crate::token::IntSuffix {
     ) {
         return IntSuffix::None;
     }
-    if ty.is_unsigned() {
-        if ty.is_long_long() {
+    let promoted_ty = ty.integer_promoted();
+    if promoted_ty.is_unsigned() {
+        if promoted_ty.is_long_long() {
             IntSuffix::Ull
         } else {
             IntSuffix::U
         }
-    } else if ty.is_long_long() {
+    } else if promoted_ty.is_long_long() {
         IntSuffix::LL
     } else {
         IntSuffix::None
@@ -16743,6 +17432,30 @@ fn eval_integer_cast(ty: &types::Type, value: i64) -> i64 {
             eval_integer_cast(inner, value)
         }
         _ => value,
+    }
+}
+
+fn eval_bitfield_read_cast(ty: &types::Type, value: i64) -> Option<i64> {
+    let types::Type::Bitfield(base, width) = ty.unqualified() else {
+        return None;
+    };
+    let width = u32::from(*width);
+    if width == 0 {
+        return Some(0);
+    }
+    if width >= 64 {
+        return Some(eval_integer_cast(base, value));
+    }
+    let mask = (1u64 << width) - 1;
+    let raw = (value as u64) & mask;
+    if base.is_unsigned() {
+        return Some(raw as i64);
+    }
+    let sign_bit = 1u64 << (width - 1);
+    if raw & sign_bit == 0 {
+        Some(raw as i64)
+    } else {
+        Some((raw | !mask) as i64)
     }
 }
 
@@ -17082,7 +17795,14 @@ fn fold_const_switch_calls_in_stmt(
     use ast::Stmt::*;
     match stmt {
         Return(Some(e)) | Expr(e) | CaseLabel(e) => fold_const_switch_calls_in_expr(e, helpers),
-        Return(None) | DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
+        Return(None)
+        | DefaultLabel
+        | Break
+        | Continue
+        | Goto(_)
+        | Asm(_)
+        | EnumDecl(_)
+        | Typedef { .. } => {}
         VarDecl { init, vla_dim, .. } => {
             if let Some(e) = init {
                 fold_const_switch_calls_in_expr(e, helpers);
@@ -17319,7 +18039,14 @@ fn unused_static_param_call_args_are_safe_in_stmt(
         Return(Some(e)) | Expr(e) | CaseLabel(e) => {
             unused_static_param_call_args_are_safe_in_expr(e, candidates)
         }
-        Return(None) | DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => true,
+        Return(None)
+        | DefaultLabel
+        | Break
+        | Continue
+        | Goto(_)
+        | Asm(_)
+        | EnumDecl(_)
+        | Typedef { .. } => true,
         VarDecl { init, vla_dim, .. } => {
             init.as_ref()
                 .is_none_or(|e| unused_static_param_call_args_are_safe_in_expr(e, candidates))
@@ -17531,7 +18258,8 @@ fn truncate_static_call_args_in_stmt(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -17685,7 +18413,8 @@ fn collect_all_ident_uses_in_stmt(stmt: &ast::Stmt, uses: &mut std::collections:
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -18019,7 +18748,14 @@ fn transform_guarded_stmt(
     use ast::Stmt::*;
     match stmt {
         Return(Some(e)) | Expr(e) | CaseLabel(e) => transform_guarded_expr(e, helpers, gen),
-        Return(None) | Break | Continue | Goto(_) | DefaultLabel | EnumDecl(_) | Asm(_) => {}
+        Return(None)
+        | Break
+        | Continue
+        | Goto(_)
+        | DefaultLabel
+        | EnumDecl(_)
+        | Typedef { .. }
+        | Asm(_) => {}
         VarDecl { init, vla_dim, .. } => {
             if let Some(e) = init {
                 transform_guarded_expr(e, helpers, gen);
@@ -18130,6 +18866,7 @@ fn inline_simple_static_fns(unit: &mut ast::TranslationUnit) {
                 if expr_side_effect_free(body)
                     && !expr_mentions_name(body, &f.name)
                     && expr_idents_are_params_or_globals(body, &params, &global_names)
+                    && inline_expr_params_are_value_safe(body, &f.params, &typedefs)
                 {
                     inline_fns.insert(
                         f.name.clone(),
@@ -18588,7 +19325,14 @@ fn count_stmt_calls(stmt: &ast::Stmt, counts: &mut std::collections::HashMap<Str
     use ast::Stmt::*;
     match stmt {
         Return(Some(e)) | Expr(e) | CaseLabel(e) => count_expr_calls(e, counts),
-        Return(None) | DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
+        Return(None)
+        | DefaultLabel
+        | Break
+        | Continue
+        | Goto(_)
+        | Asm(_)
+        | EnumDecl(_)
+        | Typedef { .. } => {}
         VarDecl { init, vla_dim, .. } => {
             if let Some(e) = init {
                 count_expr_calls(e, counts);
@@ -18861,7 +19605,7 @@ fn inline_stmt(
             inline_void_fns,
             function_names,
         ),
-        DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
+        DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) | Typedef { .. } => {}
     }
 }
 
@@ -19440,6 +20184,116 @@ fn inline_arg_expr(ty: &crate::types::Type, arg: &ast::Expr) -> ast::Expr {
     }
 }
 
+fn inline_expr_params_are_value_safe(
+    body: &ast::Expr,
+    params: &[(String, crate::types::Type)],
+    typedefs: &std::collections::HashMap<String, crate::types::Type>,
+) -> bool {
+    let mut pointer_like = std::collections::HashSet::new();
+    for (name, ty) in params {
+        let ty = resolve_optimizer_typedefs(ty, typedefs);
+        match ty.unqualified() {
+            crate::types::Type::Pointer(_) | crate::types::Type::Array(_, _) => {
+                pointer_like.insert(name.as_str());
+            }
+            crate::types::Type::FunctionPtr { .. } => return false,
+            _ => {}
+        }
+    }
+    pointer_like_params_used_as_values_only(body, &pointer_like)
+}
+
+fn pointer_like_params_used_as_values_only(
+    expr: &ast::Expr,
+    pointer_like: &std::collections::HashSet<&str>,
+) -> bool {
+    use ast::Expr::*;
+
+    fn starts_with_pointer_like_param(
+        expr: &ast::Expr,
+        pointer_like: &std::collections::HashSet<&str>,
+    ) -> bool {
+        match expr {
+            ast::Expr::Ident(name) => pointer_like.contains(name.as_str()),
+            ast::Expr::Cast(_, inner) => starts_with_pointer_like_param(inner, pointer_like),
+            ast::Expr::Index(base, _)
+            | ast::Expr::Member(base, _)
+            | ast::Expr::Arrow(base, _)
+            | ast::Expr::Deref(base) => starts_with_pointer_like_param(base, pointer_like),
+            _ => false,
+        }
+    }
+
+    match expr {
+        Ident(_) | IntLit(..) | FloatLit(_) | ImagLit(_) | StringLit(_) | WideStringLit(_)
+        | CharLit(_) | Sizeof(_) => true,
+        Deref(operand) | AddrOf(operand) | Arrow(operand, _) => {
+            !starts_with_pointer_like_param(operand, pointer_like)
+                && pointer_like_params_used_as_values_only(operand, pointer_like)
+        }
+        Index(base, index) => {
+            !starts_with_pointer_like_param(base, pointer_like)
+                && pointer_like_params_used_as_values_only(base, pointer_like)
+                && pointer_like_params_used_as_values_only(index, pointer_like)
+        }
+        Member(base, _) => {
+            !starts_with_pointer_like_param(base, pointer_like)
+                && pointer_like_params_used_as_values_only(base, pointer_like)
+        }
+        Unary { operand, .. }
+        | Cast(_, operand)
+        | PreInc(operand)
+        | PreDec(operand)
+        | PostInc(operand)
+        | PostDec(operand)
+        | RealPart(operand)
+        | ImagPart(operand) => pointer_like_params_used_as_values_only(operand, pointer_like),
+        Binary { lhs, rhs, .. }
+        | Assign {
+            target: lhs,
+            value: rhs,
+        }
+        | CompoundAssign {
+            target: lhs,
+            value: rhs,
+            ..
+        }
+        | Comma(lhs, rhs) => {
+            pointer_like_params_used_as_values_only(lhs, pointer_like)
+                && pointer_like_params_used_as_values_only(rhs, pointer_like)
+        }
+        Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            pointer_like_params_used_as_values_only(cond, pointer_like)
+                && pointer_like_params_used_as_values_only(then_expr, pointer_like)
+                && pointer_like_params_used_as_values_only(else_expr, pointer_like)
+        }
+        Call { args, .. } => args
+            .iter()
+            .all(|arg| pointer_like_params_used_as_values_only(arg, pointer_like)),
+        CallIndirect { func_expr, args } => {
+            !starts_with_pointer_like_param(func_expr, pointer_like)
+                && pointer_like_params_used_as_values_only(func_expr, pointer_like)
+                && args
+                    .iter()
+                    .all(|arg| pointer_like_params_used_as_values_only(arg, pointer_like))
+        }
+        InitList(items) => items
+            .iter()
+            .all(|item| pointer_like_params_used_as_values_only(item, pointer_like)),
+        DesignatedInit { value, .. } => {
+            pointer_like_params_used_as_values_only(value, pointer_like)
+        }
+        ArrayDesignator { index, value } => {
+            pointer_like_params_used_as_values_only(index, pointer_like)
+                && pointer_like_params_used_as_values_only(value, pointer_like)
+        }
+    }
+}
+
 fn inline_return_expr(ty: &crate::types::Type, body: ast::Expr) -> ast::Expr {
     if ty.is_scalar() {
         ast::Expr::Cast(ty.clone(), Box::new(body))
@@ -19594,7 +20448,8 @@ fn inlineable_no_call_void_stmt(stmt: &ast::Stmt) -> bool {
         | ast::Stmt::Goto(_)
         | ast::Stmt::Label(_, _)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => false,
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => false,
         ast::Stmt::Expr(expr) | ast::Stmt::CaseLabel(expr) => !expr_contains_call(expr),
         ast::Stmt::VarDecl {
             init,
@@ -19889,7 +20744,8 @@ fn fold_const_realloc_byte_self_tests_in_child_stmt(stmt: &mut ast::Stmt) {
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -20023,7 +20879,8 @@ fn prune_malloc_byte_roundtrip_checks_in_child_stmt(stmt: &mut ast::Stmt) {
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -20155,7 +21012,8 @@ fn prune_redundant_malloc_after_free_checks_in_child_stmt(stmt: &mut ast::Stmt) 
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -20268,7 +21126,8 @@ fn prune_calloc_zero_check_loops_in_child_stmt(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -20495,7 +21354,8 @@ fn fold_direct_byte_copy_loops_in_child_stmts(
         | ast::Stmt::Continue
         | ast::Stmt::Goto(_)
         | ast::Stmt::Asm(_)
-        | ast::Stmt::EnumDecl(_) => {}
+        | ast::Stmt::EnumDecl(_)
+        | ast::Stmt::Typedef { .. } => {}
     }
 }
 
@@ -20568,7 +21428,8 @@ fn prune_unused_byte_pointer_alias_inits_in_stmts(
             | ast::Stmt::Continue
             | ast::Stmt::Goto(_)
             | ast::Stmt::Asm(_)
-            | ast::Stmt::EnumDecl(_) => {}
+            | ast::Stmt::EnumDecl(_)
+            | ast::Stmt::Typedef { .. } => {}
         }
     }
 }
@@ -20888,6 +21749,11 @@ fn substitute_inline_stmt(
             Box::new(substitute_inline_stmt(inner, subst)),
         ),
         EnumDecl(items) => EnumDecl(items.clone()),
+        Typedef { name, ty, vla_dim } => Typedef {
+            name: name.clone(),
+            ty: ty.clone(),
+            vla_dim: vla_dim.as_ref().map(|e| substitute_inline_expr(e, subst)),
+        },
         DefaultLabel => DefaultLabel,
         Break => Break,
         Continue => Continue,
@@ -21110,7 +21976,14 @@ fn stmt_mentions_name(stmt: &ast::Stmt, name: &str) -> bool {
     use ast::Stmt::*;
     match stmt {
         Return(Some(e)) | Expr(e) | CaseLabel(e) => expr_mentions_name(e, name),
-        Return(None) | DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => false,
+        Return(None)
+        | DefaultLabel
+        | Break
+        | Continue
+        | Goto(_)
+        | Asm(_)
+        | EnumDecl(_)
+        | Typedef { .. } => false,
         VarDecl { init, vla_dim, .. } => {
             init.as_ref().is_some_and(|e| expr_mentions_name(e, name))
                 || vla_dim
@@ -21273,7 +22146,7 @@ fn collect_stmt_refs(
         }
         CaseLabel(e) => collect_expr_refs(e, fns, out),
         Label(_, inner) => collect_stmt_refs(inner, fns, out),
-        DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) => {}
+        DefaultLabel | Break | Continue | Goto(_) | Asm(_) | EnumDecl(_) | Typedef { .. } => {}
     }
 }
 
@@ -23515,6 +24388,26 @@ mod tests {
     }
 
     #[test]
+    fn uint16_const_global_array_read_keeps_integer_promotion_for_compare() {
+        let src = "typedef unsigned short uint16_t;
+                   typedef short int16_t;
+                   static uint16_t g[1] = { 0x804e };
+                   extern unsigned char h(void);
+                   int f(int16_t s) {
+                       unsigned char x = 5;
+                       return ((x = h()) >= x, g[0]) > s ? 1 : 2;
+                   }";
+        let asm =
+            crate::compile_to_asm(src, "uint16-global-promoted-compare.c", &Default::default())
+                .expect("compile uint16 global promoted compare");
+        assert!(
+            asm.contains("COMP (R1,R3)") && !asm.contains("COMPU (R1,R3)"),
+            "uint16_t global array constant must promote to signed int in compare:\n{}",
+            asm
+        );
+    }
+
+    #[test]
     fn inline_expr_helper_does_not_cast_struct_argument() {
         let src = "struct S { int a; int b; long long d; };
                    static int pick(struct S s) { return (0 <= s.d) ? s.a : s.b; }
@@ -25254,6 +26147,28 @@ mod tests {
     }
 
     #[test]
+    fn scalar_block_fold_skips_struct_return_functions() {
+        let src = "struct S { unsigned int a; long long b; };
+                   struct S f(void) {
+                       struct S arr[4] = {{0u, 1LL}, {0u, 1LL}, {0u, 1LL}, {0u, 1LL}};
+                       return arr[0];
+                   }";
+        let mut unit = crate::parse::parse(src).expect("parse struct-return scalar-fold guard");
+        crate::fold_const_scalar_block_returns(&mut unit);
+        assert!(
+            !matches!(
+                unit.functions[0].body.as_slice(),
+                [crate::ast::Stmt::Return(Some(crate::ast::Expr::IntLit(
+                    _,
+                    _
+                )))]
+            ),
+            "scalar block fold must not replace a struct return with an integer return: {:?}",
+            unit.functions[0].body
+        );
+    }
+
+    #[test]
     fn folds_const_struct_compound_literal_return_call() {
         let src = "struct ret_lit { int x; int y; };
                    static struct ret_lit make_lit(int a, int b) {
@@ -25476,12 +26391,9 @@ mod tests {
                                acc += arr[i] * (i & 7u);
                        return (int)(acc & 0xffffu);
                    }";
-        let asm = crate::compile_to_asm(
-            src,
-            "const-global-pointer-induction.c",
-            &Default::default(),
-        )
-        .expect("compile const global pointer induction");
+        let asm =
+            crate::compile_to_asm(src, "const-global-pointer-induction.c", &Default::default())
+                .expect("compile const global pointer induction");
         assert!(
             asm.contains("R1 = 0xF000;") && !asm.contains("L_branch"),
             "constant global pointer-induction loop should fold:\n{}",

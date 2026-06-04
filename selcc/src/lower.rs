@@ -454,7 +454,8 @@ fn stmt_contains_call(stmt: &Stmt) -> bool {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => false,
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => false,
     }
 }
 
@@ -597,7 +598,8 @@ fn collect_assigned(stmt: &Stmt, set: &mut HashSet<String>) {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => {}
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => {}
         Stmt::Label(_, inner) => collect_assigned(inner, set),
     }
 }
@@ -770,7 +772,8 @@ fn add_address_taken_roots_in_stmt(stmt: &Stmt, set: &mut HashSet<String>) {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::Asm(_)
-        | Stmt::EnumDecl(_) => {}
+        | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. } => {}
     }
 }
 
@@ -1310,6 +1313,13 @@ pub fn lower_function_with_known(
         }
     }
 
+    for ((name, _), dim_expr) in func.params.iter().zip(func.param_vla_dims.iter()) {
+        if let Some(expr) = dim_expr {
+            let dim_vreg = lower_expr(&mut ctx, expr)?;
+            ctx.vla_dims.insert(name.clone(), dim_vreg);
+        }
+    }
+
     // Hidden struct-return pointer: when this function's return type is
     // a struct larger than `target::STRUCT_RET_MAX_REGS` words, the
     // caller allocates the destination buffer and passes its address
@@ -1321,7 +1331,7 @@ pub fn lower_function_with_known(
     if is_struct_type(&func.return_type, &ctx) {
         let ret_words = type_size_words(&func.return_type, &ctx);
         if ret_words > target::STRUCT_RET_MAX_REGS {
-            let ptr_vreg = ctx.alloc_vreg();
+            let ptr_vreg = ctx.alloc_vreg_ptr();
             ctx.emit(IrOp::LoadStructRetPtr(ptr_vreg));
             let slot = ctx.alloc_stack_slot();
             ctx.emit(IrOp::Store(ptr_vreg, 0, slot as i32));
@@ -1561,9 +1571,17 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
                     total
                 };
 
-                // Allocate on the stack: SP -= total, pointer = SP.
+                // Allocate on the stack. Direct calls push the frame link and
+                // return continuation at the current I7 in their delay slots,
+                // so leave two guard words below a dynamic object and point
+                // the C VLA at the first word above that call scratch area.
+                let guard = ctx.alloc_vreg();
+                ctx.emit(IrOp::LoadImm(guard, 2));
+                let total_with_guard = ctx.alloc_vreg();
+                ctx.emit(IrOp::Add(total_with_guard, total_vreg, guard));
                 let ptr_vreg = ctx.alloc_vreg();
-                ctx.emit(IrOp::StackAlloc(ptr_vreg, total_vreg));
+                ctx.emit(IrOp::StackAlloc(ptr_vreg, total_with_guard));
+                ctx.emit(IrOp::Add(ptr_vreg, ptr_vreg, guard));
 
                 // Store the pointer in a regular stack slot so the VLA
                 // variable can be addressed like any other local.
@@ -1828,6 +1846,9 @@ fn lower_stmt(ctx: &mut LowerCtx, stmt: &Stmt) -> Result<()> {
             for (name, val) in consts {
                 ctx.enum_constants.insert(name.clone(), *val);
             }
+        }
+        Stmt::Typedef { name, ty, .. } => {
+            ctx.typedefs.push((name.clone(), ty.clone()));
         }
         Stmt::Switch { expr, body } => {
             lower_switch(ctx, expr, body)?;
@@ -3343,6 +3364,29 @@ fn scale_index_by_elem(ctx: &mut LowerCtx, index: VReg, elem_ty: &Type) -> VReg 
     dst
 }
 
+fn scale_index_for_base(ctx: &mut LowerCtx, index: VReg, base: &Expr, elem_ty: &Type) -> VReg {
+    if let Expr::Ident(name) = base {
+        if let Some(&dim_vreg) = ctx.vla_dims.get(name) {
+            if let Type::Array(inner, None) = resolve_type(elem_ty, ctx).unqualified() {
+                let inner_size = crate::types::size_bytes_ctx(inner, ctx).max(1);
+                let row_elems = if inner_size == 1 {
+                    dim_vreg
+                } else {
+                    let elem_sz = ctx.alloc_vreg();
+                    ctx.emit(IrOp::LoadImm(elem_sz, inner_size as i64));
+                    let row_bytes = ctx.alloc_vreg();
+                    ctx.emit(IrOp::Mul(row_bytes, dim_vreg, elem_sz));
+                    row_bytes
+                };
+                let dst = ctx.alloc_vreg();
+                ctx.emit(IrOp::Mul(dst, index, row_elems));
+                return dst;
+            }
+        }
+    }
+    scale_index_by_elem(ctx, index, elem_ty)
+}
+
 /// Determine the C type of an integer literal based on its suffix and value
 /// per C99 6.4.4.1.  For unsuffixed decimals the sequence is int -> long ->
 /// long long.  For suffixed literals the suffix determines the minimum type.
@@ -3662,7 +3706,11 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                 match storage {
                     LocalStorage::Stack(offset) => {
                         let dst = ctx.alloc_vreg_ptr();
-                        ctx.emit(IrOp::FrameAddr(dst, offset as i32));
+                        if ctx.vla_dims.contains_key(name) {
+                            ctx.emit(IrOp::Load(dst, 0, offset as i32));
+                        } else {
+                            ctx.emit(IrOp::FrameAddr(dst, offset as i32));
+                        }
                         Ok(dst)
                     }
                     LocalStorage::Reg(vreg) => {
@@ -3712,8 +3760,12 @@ fn lower_lvalue_addr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let base_ty = expr_type(base, ctx);
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
-            let scaled = match base_ty.as_ref().and_then(|t| pointee_type_resolved(t, ctx)) {
-                Some(elem) => scale_index_by_elem(ctx, index, &elem.clone()),
+            let elem_ty = base_ty
+                .as_ref()
+                .and_then(|t| pointee_type_resolved(t, ctx))
+                .cloned();
+            let scaled = match elem_ty.as_ref() {
+                Some(elem) => scale_index_for_base(ctx, index, base, elem),
                 None => index,
             };
             let addr = ctx.alloc_vreg();
@@ -4519,7 +4571,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
                     let base_addr = lower_expr(ctx, base)?;
                     let index = lower_expr(ctx, idx)?;
                     let scaled = match elem_ty_opt.as_ref() {
-                        Some(elem) => scale_index_by_elem(ctx, index, elem),
+                        Some(elem) => scale_index_for_base(ctx, index, base, elem),
                         None => index,
                     };
                     let addr = ctx.alloc_vreg();
@@ -4697,7 +4749,7 @@ fn lower_expr(ctx: &mut LowerCtx, expr: &Expr) -> Result<VReg> {
             let base_addr = lower_expr(ctx, base)?;
             let index = lower_expr(ctx, idx)?;
             let scaled = match elem_ty.as_ref() {
-                Some(elem) => scale_index_by_elem(ctx, index, elem),
+                Some(elem) => scale_index_for_base(ctx, index, base, elem),
                 None => index,
             };
             let addr = ctx.alloc_vreg();
@@ -5352,6 +5404,12 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         return Ok(pair.real);
     }
 
+    let common_is_unsigned = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        is_unsigned_expr(lhs, ctx)
+    } else {
+        binary_common_is_unsigned(ctx, lhs, rhs)
+    };
+
     let l = lower_expr(ctx, lhs)?;
     let r = lower_expr(ctx, rhs)?;
     let l_float = ctx.is_float_vreg(l);
@@ -5433,11 +5491,7 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         // Determine signedness from the usual arithmetic conversions.
         // Mixed `uint32_t`/`int64_t` compares are signed 64-bit in C
         // because `int64_t` can represent every `uint32_t` value.
-        let is_unsigned = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
-            is_unsigned_expr(lhs, ctx)
-        } else {
-            binary_common_is_unsigned(ctx, lhs, rhs)
-        };
+        let is_unsigned = common_is_unsigned;
 
         let dst = ctx.alloc_vreg_pair();
         match op {
@@ -5488,11 +5542,7 @@ fn lower_binary(ctx: &mut LowerCtx, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> Res
         return Ok(dst);
     }
 
-    let is_unsigned = if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
-        is_unsigned_expr(lhs, ctx)
-    } else {
-        binary_common_is_unsigned(ctx, lhs, rhs)
-    };
+    let is_unsigned = common_is_unsigned;
 
     // C99 6.5.6: pointer + integer (and integer + pointer) scales the
     // integer operand by `sizeof(*pointer)`. Same scaling for pointer -
@@ -5643,8 +5693,8 @@ fn binary_common_is_unsigned(ctx: &LowerCtx, lhs: &Expr, rhs: &Expr) -> bool {
     let Some(rty) = expr_type(rhs, ctx) else {
         return is_unsigned_expr(lhs, ctx) || is_unsigned_expr(rhs, ctx);
     };
-    let lty = resolve_type(&lty, ctx);
-    let rty = resolve_type(&rty, ctx);
+    let lty = resolve_type_chain(&lty, ctx);
+    let rty = resolve_type_chain(&rty, ctx);
     Type::usual_arithmetic_conversion(&lty, &rty).is_unsigned()
 }
 
@@ -5985,6 +6035,7 @@ fn lower_comparison_branch(
         return Ok(false);
     }
 
+    let is_unsigned = binary_common_is_unsigned(ctx, lhs, rhs);
     let l = lower_expr(ctx, lhs)?;
     let r = lower_expr(ctx, rhs)?;
     if lhs_is_float || rhs_is_float {
@@ -6009,7 +6060,6 @@ fn lower_comparison_branch(
         ));
         return Ok(true);
     }
-    let is_unsigned = binary_common_is_unsigned(ctx, lhs, rhs);
     let cond = emit_compare_for_branch(ctx, op, l, r, is_unsigned, jump_if_true);
     ctx.emit(IrOp::BranchCond(cond, label));
     Ok(true)
@@ -6753,6 +6803,7 @@ fn stmt_uses_alias_only_as_const_index(name: &str, stmt: &Stmt) -> bool {
         | Stmt::Continue
         | Stmt::Goto(_)
         | Stmt::EnumDecl(_)
+        | Stmt::Typedef { .. }
         | Stmt::Asm(_) => true,
     }
 }
@@ -12378,6 +12429,48 @@ mod tests {
     }
 
     #[test]
+    fn lower_struct_array_return_element_keeps_initializer_storage() {
+        let src = r#"
+            struct S { unsigned int a; long long b; };
+            struct S f(void) {
+                struct S arr[4] = {{0u, 1LL}, {0u, 1LL}, {0u, 1LL}, {0u, 1LL}};
+                return arr[0];
+            }
+        "#;
+        let unit = parse::parse(src).unwrap();
+        let result = lower_function(
+            &unit.functions[0],
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap();
+        assert!(
+            result
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::LoadStructRetPtr(v) if *v != 0)),
+            "hidden struct-return pointer must not use frame-sentinel vreg 0: {:?}",
+            result.ops
+        );
+        assert!(
+            !result.static_locals.is_empty()
+                || result
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, IrOp::Store(_, base, 0) if *base != 0)),
+            "array-of-struct initializer must materialize storage before return: {:?}",
+            result.ops
+        );
+        assert!(
+            result.ops.iter().any(|op| matches!(op, IrOp::Ret(Some(_)))),
+            "3-word struct return should return the copied hidden buffer pointer: {:?}",
+            result.ops
+        );
+    }
+
+    #[test]
     fn lower_stack_string_array_init_uses_indirect_frame_stores() {
         let src = "int f(void) { char s[8] = \"abcdefg\"; return s[4]; }";
         let unit = parse::parse(src).unwrap();
@@ -13036,6 +13129,54 @@ mod tests {
         .ops;
         assert!(ops.iter().any(|op| matches!(op, IrOp::Cmp64(..))));
         assert!(!ops.iter().any(|op| matches!(op, IrOp::UCmp64(..))));
+    }
+
+    #[test]
+    fn lower_uint16_array_vs_int16_compare_promotes_to_signed_int() {
+        let src = "typedef unsigned short uint16_t; typedef short int16_t; static uint16_t g[1] = { 0x804e }; extern unsigned char h(void); int f(int16_t s) { unsigned char x = 5; return ((x = h()) >= x, g[0]) > s ? 1 : 2; }";
+        let unit = parse::parse(src).unwrap();
+        let func = unit.functions.iter().find(|f| f.name == "f").unwrap();
+        let globals: HashMap<String, Type> = unit
+            .globals
+            .iter()
+            .map(|g| (g.name.clone(), g.ty.clone()))
+            .collect();
+        let returns = HashMap::from([
+            ("h".to_string(), Type::Unsigned(Box::new(Type::Char))),
+            ("f".to_string(), Type::Int),
+        ]);
+        let known = HashSet::from(["h".to_string(), "f".to_string()]);
+        let params = HashMap::new();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let ops = lower_function(
+            func,
+            &globals,
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Cmp(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::UCmp(..))));
+
+        let ops = lower_function_with_known(
+            func,
+            &globals,
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+        assert!(ops.iter().any(|op| matches!(op, IrOp::Cmp(..))));
+        assert!(!ops.iter().any(|op| matches!(op, IrOp::UCmp(..))));
     }
 
     #[test]
@@ -13887,6 +14028,67 @@ mod tests {
             !ops.iter()
                 .any(|op| matches!(op, IrOp::CallIndirect(_, _, _))),
             "assigned function-pointer array call should not stay indirect, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn lower_function_pointer_array_parameter_loads_callee_elements() {
+        let src = "static int a(void) { return 3; } static int b(void) { return 5; } static int sum(int (*fp[2])(void)) { return fp[0]() * 10 + fp[1](); }";
+        let unit = parse::parse(src).unwrap();
+        let known: HashSet<_> = unit.functions.iter().map(|f| f.name.clone()).collect();
+        let returns: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.return_type.clone()))
+            .collect();
+        let params: HashMap<_, _> = unit
+            .functions
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    f.params.iter().map(|(_, t)| t.clone()).collect(),
+                )
+            })
+            .collect();
+        let unit_ctx = LowerUnitCtx {
+            known_functions: &known,
+            function_return_types: &returns,
+            function_param_types: &params,
+            struct_packs: &unit.struct_packs,
+        };
+        let sum = unit.functions.iter().find(|f| f.name == "sum").unwrap();
+        let ops = lower_function_with_known(
+            sum,
+            &HashMap::new(),
+            &unit.struct_defs,
+            &unit.enum_constants,
+            &unit.typedefs,
+            &unit_ctx,
+        )
+        .unwrap()
+        .ops;
+
+        let loaded_vregs: HashSet<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                IrOp::Load(dst, _, _) => Some(*dst),
+                _ => None,
+            })
+            .collect();
+        let indirect_addrs: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                IrOp::CallIndirect(_, addr, _) => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(indirect_addrs.len(), 2, "expected two indirect calls: {ops:?}");
+        assert!(
+            indirect_addrs
+                .iter()
+                .all(|addr| loaded_vregs.contains(addr)),
+            "function-pointer array parameter calls must load callee elements, got: {ops:?}"
         );
     }
 

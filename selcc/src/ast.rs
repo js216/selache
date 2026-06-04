@@ -150,6 +150,11 @@ pub enum Stmt {
     /// them into `ctx.enum_constants` inside the current scope and
     /// the block's `restore_scope` rolls them back on exit.
     EnumDecl(Vec<(String, i64)>),
+    Typedef {
+        name: String,
+        ty: Type,
+        vla_dim: Option<Expr>,
+    },
     Switch {
         expr: Expr,
         body: Vec<Stmt>,
@@ -168,6 +173,7 @@ pub struct Function {
     pub name: String,
     pub return_type: Type,
     pub params: Vec<(String, Type)>,
+    pub param_vla_dims: Vec<Option<Expr>>,
     pub is_variadic: bool,
     pub body: Vec<Stmt>,
     pub is_static: bool,

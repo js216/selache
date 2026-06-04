@@ -101,6 +101,20 @@ impl<'a> Lexer<'a> {
 
         // Hex: 0x...
         if first == b'0' {
+            if let Some(b'b' | b'B') = self.peek() {
+                self.advance();
+                let mut val: i64 = 0;
+                while let Some(ch) = self.peek() {
+                    if matches!(ch, b'0' | b'1') {
+                        val = val.wrapping_mul(2).wrapping_add((ch - b'0') as i64);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                let suffix = parse_int_suffix(self);
+                return Token::IntLit(val, suffix);
+            }
             if let Some(b'x' | b'X') = self.peek() {
                 self.advance();
                 let mut val: i64 = 0;

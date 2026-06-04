@@ -3884,7 +3884,9 @@ mod tests {
         ];
         let folded = strength_reduce_constant_udivmod(&ops);
         assert!(
-            !folded.iter().any(|op| matches!(op, IrOp::UDiv(..) | IrOp::UMod(..))),
+            !folded
+                .iter()
+                .any(|op| matches!(op, IrOp::UDiv(..) | IrOp::UMod(..))),
             "copied constant divisor should still strength-reduce: {folded:?}"
         );
         assert!(

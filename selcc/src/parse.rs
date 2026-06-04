@@ -6,7 +6,7 @@ use crate::ast::{BinaryOp, Expr, Function, GlobalDecl, SizeofArg, Stmt, Translat
 use crate::error::Error;
 use crate::lex::Lexer;
 use crate::token::Token;
-use crate::types::Type;
+use crate::types::{struct_field_layout_ctx, Type};
 
 /// Check if a token starts a type specifier.
 fn is_type_start(t: &Token) -> bool {
@@ -35,6 +35,8 @@ fn is_type_start(t: &Token) -> bool {
         return matches!(
             name.as_str(),
             "__builtin_quad"
+                | "__typeof__"
+                | "typeof"
                 | "__pm"
                 | "__dm"
                 | "__byte_addressed"
@@ -53,6 +55,8 @@ struct Parser<'a> {
     current: Token,
     /// Names that have been declared as typedefs.
     typedef_names: std::collections::HashSet<String>,
+    /// Target types for typedef names visible to the parser.
+    typedef_types: std::collections::HashMap<String, Type>,
     /// Enum constants collected during parsing.
     enum_constants: Vec<(String, i64)>,
     /// Depth of nested function bodies / blocks currently being parsed.
@@ -86,7 +90,10 @@ struct Parser<'a> {
     pending_block_extern_variadic_named: std::collections::HashMap<String, usize>,
     /// Current function name for __func__ (C99 6.4.2.2).
     current_function: String,
+    known_struct_defs: std::collections::HashMap<String, Vec<(String, Type)>>,
+    known_struct_packs: std::collections::HashMap<String, u8>,
     pending_weak_attr: bool,
+    pending_packed_attr: bool,
     /// Effective `#pragma pack(N)` for the next struct/union declared
     /// at file scope.  `0` means natural alignment; csmith inputs use
     /// `1` exclusively today (`#pragma pack(push)` / `pack(1)` /
@@ -108,6 +115,7 @@ impl<'a> Parser<'a> {
             lexer,
             current,
             typedef_names: std::collections::HashSet::new(),
+            typedef_types: std::collections::HashMap::new(),
             enum_constants: Vec::new(),
             block_depth: 0,
             pending_block_enum_consts: Vec::new(),
@@ -115,7 +123,10 @@ impl<'a> Parser<'a> {
             pending_block_extern_variadic: std::collections::HashSet::new(),
             pending_block_extern_variadic_named: std::collections::HashMap::new(),
             current_function: String::new(),
+            known_struct_defs: std::collections::HashMap::new(),
+            known_struct_packs: std::collections::HashMap::new(),
             pending_weak_attr: false,
+            pending_packed_attr: false,
             current_pack: 0,
             pack_stack: Vec::new(),
         })
@@ -151,6 +162,60 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn is_attr_ident_token(tok: &Token) -> bool {
+        matches!(tok, Token::Ident(name) if name == "__attribute__")
+    }
+
+    fn is_restrict_ident_token(tok: &Token) -> bool {
+        matches!(tok, Token::Ident(name) if matches!(name.as_str(), "restrict" | "__restrict" | "__restrict__"))
+    }
+
+    fn skip_attribute(&mut self) -> Result<bool, Error> {
+        if !Self::is_attr_ident_token(&self.current) {
+            return Ok(false);
+        }
+        self.advance()?;
+        if self.current == Token::LParen {
+            let mut depth = 0_i32;
+            loop {
+                if self.current == Token::LParen {
+                    depth += 1;
+                } else if self.current == Token::RParen {
+                    depth -= 1;
+                } else if matches!(&self.current, Token::Ident(name) if name == "weak") {
+                    self.pending_weak_attr = true;
+                } else if matches!(&self.current, Token::Ident(name) if name == "packed") {
+                    self.pending_packed_attr = true;
+                }
+                self.advance()?;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn skip_attributes(&mut self) -> Result<(), Error> {
+        while self.skip_attribute()? {}
+        Ok(())
+    }
+
+    fn skip_qualifiers_and_attrs(&mut self) -> Result<(), Error> {
+        loop {
+            if matches!(self.current, Token::Const | Token::Volatile)
+                || Self::is_restrict_ident_token(&self.current)
+                || matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed"))
+            {
+                self.advance()?;
+            } else if self.skip_attribute()? {
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Check whether the current token starts a type specifier, including
     /// typedef names.
     fn is_type_token(&self) -> bool {
@@ -173,12 +238,12 @@ impl<'a> Parser<'a> {
             } else if self.current == Token::Volatile {
                 has_volatile = true;
                 self.advance()?;
-            } else if matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed" | "__section" | "__attribute__" | "__inline" | "__inline__" | "inline" | "__restrict" | "restrict" | "__restrict__"))
+            } else if matches!(self.current, Token::Register | Token::Auto | Token::Static)
+                || matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed" | "__section" | "__inline" | "__inline__" | "inline" | "__extension__" | "__restrict" | "restrict" | "__restrict__"))
             {
-                let is_attribute =
-                    matches!(&self.current, Token::Ident(name) if name == "__attribute__");
                 self.advance()?;
-                // Skip __attribute__((xxx)) if present
+            } else if Self::is_attr_ident_token(&self.current) {
+                self.advance()?;
                 if self.current == Token::LParen {
                     let mut depth = 0;
                     loop {
@@ -188,10 +253,11 @@ impl<'a> Parser<'a> {
                         if self.current == Token::RParen {
                             depth -= 1;
                         }
-                        if is_attribute
-                            && matches!(&self.current, Token::Ident(name) if name == "weak")
-                        {
+                        if matches!(&self.current, Token::Ident(name) if name == "weak") {
                             self.pending_weak_attr = true;
+                        }
+                        if matches!(&self.current, Token::Ident(name) if name == "packed") {
+                            self.pending_packed_attr = true;
                         }
                         self.advance()?;
                         if depth == 0 {
@@ -377,6 +443,19 @@ impl<'a> Parser<'a> {
             Token::Ident(ref name) if name == "__builtin_quad" => {
                 self.advance()?;
                 Type::Long
+            }
+            Token::Ident(ref name) if matches!(name.as_str(), "__typeof__" | "typeof") => {
+                self.advance()?;
+                self.expect(&Token::LParen)?;
+                let ty = if self.is_type_token() {
+                    let ty = self.parse_type()?;
+                    self.parse_pointer_type(ty)
+                } else {
+                    self.parse_expr()?;
+                    Type::Int
+                };
+                self.expect(&Token::RParen)?;
+                ty
             }
             Token::Ident(ref name) if matches!(name.as_str(), "size_t" | "uintptr_t") => {
                 self.advance()?;
@@ -649,6 +728,8 @@ impl<'a> Parser<'a> {
             std::collections::HashSet::new();
         while self.current != Token::Eof {
             self.pending_weak_attr = false;
+            self.pending_packed_attr = false;
+            self.skip_attributes()?;
             // Consume synthetic `#pragma pack(...)` markers emitted by
             // the preprocessor.  Each marker is `IDENT ;` so it shows
             // up as a top-level token-stream `Ident("...")` followed by
@@ -691,10 +772,12 @@ impl<'a> Parser<'a> {
                         self.finish_paren_ptr_type(ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias.clone());
+                    self.typedef_types.insert(alias.clone(), final_ty.clone());
                     typedefs.push((alias, final_ty));
                     continue;
                 }
                 let mut alias = self.expect_ident()?;
+                self.skip_attributes()?;
                 // Check for function type typedef: typedef rettype name(params);
                 if self.current == Token::LParen {
                     let params = self.parse_fnptr_params()?;
@@ -704,6 +787,7 @@ impl<'a> Parser<'a> {
                     };
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias.clone());
+                    self.typedef_types.insert(alias.clone(), fnptr_ty.clone());
                     typedefs.push((alias, fnptr_ty));
                     continue;
                 }
@@ -712,6 +796,7 @@ impl<'a> Parser<'a> {
                     let (arr_ty, _) = self.parse_array_dimensions(ty)?;
                     self.expect(&Token::Semicolon)?;
                     self.typedef_names.insert(alias.clone());
+                    self.typedef_types.insert(alias.clone(), arr_ty.clone());
                     typedefs.push((alias, arr_ty));
                     continue;
                 }
@@ -719,6 +804,7 @@ impl<'a> Parser<'a> {
                 let mut current_ty = ty.clone();
                 loop {
                     self.typedef_names.insert(alias.clone());
+                    self.typedef_types.insert(alias.clone(), current_ty.clone());
                     typedefs.push((alias, current_ty.clone()));
                     if self.current != Token::Comma {
                         break;
@@ -726,14 +812,21 @@ impl<'a> Parser<'a> {
                     self.advance()?; // skip comma
                     current_ty = self.parse_pointer_type(ty.clone());
                     alias = self.expect_ident()?;
+                    self.skip_attributes()?;
                 }
                 self.expect(&Token::Semicolon)?;
                 continue;
             }
 
+            while matches!(&self.current, Token::Ident(name) if matches!(name.as_str(), "__inline" | "__inline__" | "inline" | "__extension__"))
+            {
+                self.advance()?;
+                self.skip_attributes()?;
+            }
             let is_static = self.current == Token::Static;
             if is_static {
                 self.advance()?;
+                self.skip_attributes()?;
             }
             let is_extern = self.current == Token::Extern;
             if is_extern {
@@ -742,6 +835,7 @@ impl<'a> Parser<'a> {
                 if let Token::StringLit(_) = &self.current {
                     self.advance()?;
                 }
+                self.skip_attributes()?;
             }
             // Parse optional const/volatile qualifiers before the type.
             let is_const = self.current == Token::Const;
@@ -801,6 +895,86 @@ impl<'a> Parser<'a> {
 
             // Check for parenthesized pointer declarator: type (*name)(params), type (*name)[N], etc.
             if self.current == Token::LParen && self.is_fnptr_declarator() {
+                let remaining = self.lexer.remaining_bytes();
+                if remaining
+                    .iter()
+                    .position(|&b| b == b')')
+                    .is_some_and(|pos| remaining.get(pos + 1) == Some(&b')'))
+                {
+                    self.advance()?; // (
+                    self.expect(&Token::Star)?;
+                    let name = self.expect_ident()?;
+                    self.expect(&Token::LParen)?;
+                    let mut params = Vec::new();
+                    let mut param_vla_dims = Vec::new();
+                    if self.current != Token::RParen {
+                        if self.current == Token::Void {
+                            self.advance()?;
+                        } else {
+                            loop {
+                                let pty = self.parse_type()?;
+                                let pty = self.parse_pointer_type(pty);
+                                let pname = if let Token::Ident(n) = &self.current {
+                                    if !self.typedef_names.contains(n) {
+                                        self.expect_ident()?
+                                    } else {
+                                        format!("__param{}", params.len())
+                                    }
+                                } else {
+                                    format!("__param{}", params.len())
+                                };
+                                params.push((pname, pty));
+                                param_vla_dims.push(None);
+                                if self.current == Token::Comma {
+                                    self.advance()?;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    self.expect(&Token::RParen)?;
+                    let return_type = if self.current == Token::LBracket {
+                        let (arr_ty, _) = self.parse_array_dimensions(ty)?;
+                        Type::Pointer(Box::new(arr_ty))
+                    } else if self.current == Token::LParen {
+                        let fp_params = self.parse_fnptr_params()?;
+                        Type::FunctionPtr {
+                            return_type: Box::new(ty),
+                            params: fp_params,
+                        }
+                    } else {
+                        Type::Pointer(Box::new(ty))
+                    };
+                    if self.current == Token::LBrace {
+                        self.current_function = name.clone();
+                        let body = self.parse_block_stmts()?;
+                        self.current_function.clear();
+                        functions.push(Function {
+                            name,
+                            return_type,
+                            params,
+                            param_vla_dims,
+                            is_variadic: false,
+                            body,
+                            is_static,
+                            is_weak,
+                        });
+                        continue;
+                    }
+                    self.expect(&Token::Semicolon)?;
+                    globals.push(GlobalDecl {
+                        name,
+                        ty: return_type,
+                        init: None,
+                        is_static,
+                        is_extern: true,
+                    });
+                    continue;
+                }
+            }
+            if self.current == Token::LParen && self.is_fnptr_declarator() {
                 self.advance()?; // (
                 let (stars, name, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
                 let final_ty = self.finish_paren_ptr_type(ty, stars, has_brackets, array_dim)?;
@@ -834,11 +1008,13 @@ impl<'a> Parser<'a> {
             } else {
                 self.expect_ident()?
             };
+            self.skip_attributes()?;
 
             if self.current == Token::LParen {
                 // Function definition.
                 self.advance()?;
                 let mut params = Vec::new();
+                let mut param_vla_dims = Vec::new();
                 let mut is_variadic = false;
                 // Check for K&R-style parameters: ident, ident, ...
                 // Detect by checking if first token is a non-type identifier.
@@ -852,6 +1028,7 @@ impl<'a> Parser<'a> {
                     while let Token::Ident(_) = &self.current {
                         let pname = self.expect_ident()?;
                         params.push((pname, Type::Int));
+                        param_vla_dims.push(None);
                         if self.current == Token::Comma {
                             self.advance()?;
                         } else {
@@ -861,8 +1038,12 @@ impl<'a> Parser<'a> {
                     self.expect(&Token::RParen)?;
                     // Skip K&R type declarations: `int a; int b;` etc.
                     while is_type_start(&self.current)
+                        || matches!(self.current, Token::Register | Token::Auto)
                         || (matches!(&self.current, Token::Ident(n) if self.typedef_names.contains(n)))
                     {
+                        if matches!(self.current, Token::Register | Token::Auto) {
+                            self.advance()?;
+                        }
                         let kr_ty = self.parse_type()?;
                         let kr_ty = self.parse_pointer_type(kr_ty);
                         let kr_name = self.expect_ident()?;
@@ -883,6 +1064,9 @@ impl<'a> Parser<'a> {
                                 is_variadic = true;
                                 break;
                             }
+                            if matches!(self.current, Token::Register | Token::Auto) {
+                                self.advance()?;
+                            }
                             let pty = self.parse_type()?;
                             let pty = self.parse_pointer_type(pty);
                             // C89/C99 6.7.5.3/10: `(void)` as the sole
@@ -899,60 +1083,46 @@ impl<'a> Parser<'a> {
                             // Check for function pointer or pointer-to-array parameter
                             if self.current == Token::LParen && self.is_fnptr_declarator() {
                                 self.advance()?; // (
-                                self.expect(&Token::Star)?;
-                                // Name is optional: void (*)(void) vs void (*fp)(void)
-                                let pname = if let Token::Ident(_) = &self.current {
-                                    self.expect_ident()?
-                                } else {
-                                    format!("__param{}", params.len())
-                                };
-                                self.expect(&Token::RParen)?;
-                                let param_ty = if self.current == Token::LParen {
-                                    let fp_params = self.parse_fnptr_params()?;
-                                    Type::FunctionPtr {
-                                        return_type: Box::new(pty),
-                                        params: fp_params,
-                                    }
-                                } else {
-                                    // Pointer to array: int (*m)[N]
-                                    let (arr_ty, _) = self.parse_array_dimensions(pty)?;
-                                    Type::Pointer(Box::new(arr_ty))
-                                };
+                                let (stars, pname, has_brackets, array_dim) =
+                                    self.parse_paren_ptr_decl()?;
+                                let param_ty = self.finish_paren_ptr_type(
+                                    pty,
+                                    stars,
+                                    has_brackets,
+                                    array_dim,
+                                )?;
+                                let param_ty = Self::decay_parameter_type(param_ty);
                                 params.push((pname, param_ty));
+                                param_vla_dims.push(None);
+                            } else if self.current == Token::LBracket {
+                                let pname = format!("__param{}", params.len());
+                                let (pty, param_vla_dim) = self.parse_param_array_decay(pty)?;
+                                params.push((pname, pty));
+                                param_vla_dims.push(param_vla_dim);
                             } else if self.current == Token::RParen || self.current == Token::Comma
                             {
                                 // Unnamed parameter (declaration only).
                                 let pname = format!("__param{}", params.len());
                                 params.push((pname, pty));
+                                param_vla_dims.push(None);
                             } else {
                                 // Skip const/volatile/__restrict between type and parameter name
-                                while matches!(self.current, Token::Const | Token::Volatile)
-                                    || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__restrict" | "restrict" | "__restrict__"))
-                                {
-                                    self.advance()?;
-                                }
+                                self.skip_qualifiers_and_attrs()?;
                                 let pname = self.expect_ident()?;
+                                self.skip_attributes()?;
                                 // Array parameter decay: int arr[N] -> int *arr
                                 // C99 6.7.5.3: allows static/const/restrict/volatile inside []
+                                let mut param_vla_dim = None;
                                 let pty = if self.current == Token::LBracket {
-                                    self.advance()?;
-                                    // Skip qualifiers inside []: static, const, restrict, volatile
-                                    while matches!(
-                                        self.current,
-                                        Token::Static | Token::Const | Token::Volatile
-                                    ) || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "restrict" | "__restrict" | "__restrict__"))
-                                    {
-                                        self.advance()?;
-                                    }
-                                    if self.current != Token::RBracket {
-                                        self.parse_expr()?; // consume size, discard
-                                    }
-                                    self.expect(&Token::RBracket)?;
-                                    Type::Pointer(Box::new(pty))
+                                    let (arr_param_ty, arr_vla_dim) =
+                                        self.parse_param_array_decay(pty)?;
+                                    param_vla_dim = arr_vla_dim;
+                                    arr_param_ty
                                 } else {
                                     pty
                                 };
                                 params.push((pname, pty));
+                                param_vla_dims.push(param_vla_dim);
                             }
                             if self.current == Token::Comma {
                                 self.advance()?;
@@ -997,6 +1167,7 @@ impl<'a> Parser<'a> {
                         name,
                         return_type: ty,
                         params,
+                        param_vla_dims,
                         is_variadic,
                         body,
                         is_static,
@@ -1038,7 +1209,9 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     let ptr_ty = self.parse_pointer_type(base_ty.clone());
                     let extra_name = self.expect_ident()?;
+                    self.skip_attributes()?;
                     let (extra_ty, _) = self.parse_array_dimensions(ptr_ty)?;
+                    self.skip_attributes()?;
                     let extra_init = if self.current == Token::Assign {
                         self.advance()?;
                         if self.current == Token::LBrace {
@@ -1120,15 +1293,25 @@ impl<'a> Parser<'a> {
 
     /// Parse struct or union type after the `struct`/`union` keyword.
     fn parse_struct_or_union(&mut self, is_struct: bool) -> Result<Type, Error> {
+        let leading_packed_attr = self.pending_packed_attr;
+        self.pending_packed_attr = false;
+        self.skip_attributes()?;
+        let before_name_packed_attr = self.pending_packed_attr;
+        self.pending_packed_attr = false;
         let name = if let Token::Ident(_) = &self.current {
             Some(self.expect_ident()?)
         } else {
             None
         };
+        self.skip_attributes()?;
+        let after_name_packed_attr = self.pending_packed_attr;
+        self.pending_packed_attr = false;
         let fields = if self.current == Token::LBrace {
             self.advance()?;
             let mut fields = Vec::new();
             while self.current != Token::RBrace {
+                self.skip_attributes()?;
+                self.pending_packed_attr = false;
                 let field_ty = self.parse_type()?;
                 let field_ty = self.parse_pointer_type(field_ty);
                 // Anonymous struct/union member (no field name).
@@ -1162,26 +1345,56 @@ impl<'a> Parser<'a> {
                     fields.push((anon_name, bf_ty));
                     continue;
                 }
-                let field_name = self.expect_ident()?;
-                let (field_ty, _) = self.parse_array_dimensions(field_ty)?;
-                // Named bitfield: `type name : width;`
-                let field_ty = if self.current == Token::Colon {
-                    self.advance()?;
-                    let width_expr = self.parse_assign()?;
-                    let width = const_eval(&width_expr) as u8;
-                    Type::Bitfield(Box::new(field_ty), width)
-                } else {
-                    field_ty
-                };
+                loop {
+                    let mut decl_ty = self.parse_pointer_type(field_ty.clone());
+                    let field_name = self.expect_ident()?;
+                    let (arr_ty, _) = self.parse_array_dimensions(decl_ty)?;
+                    decl_ty = arr_ty;
+                    self.skip_attributes()?;
+                    self.pending_packed_attr = false;
+                    // Named bitfield: `type name : width;`
+                    let decl_ty = if self.current == Token::Colon {
+                        self.advance()?;
+                        let width_expr = self.parse_assign()?;
+                        let width = const_eval(&width_expr) as u8;
+                        Type::Bitfield(Box::new(decl_ty), width)
+                    } else {
+                        decl_ty
+                    };
+                    fields.push((field_name, decl_ty));
+                    if self.current == Token::Comma {
+                        self.advance()?;
+                    } else {
+                        break;
+                    }
+                }
                 self.expect(&Token::Semicolon)?;
-                fields.push((field_name, field_ty));
             }
             self.expect(&Token::RBrace)?;
+            self.skip_attributes()?;
             fields
         } else {
             Vec::new()
         };
-        let packed = self.current_pack;
+        let after_body_packed_attr = self.pending_packed_attr;
+        self.pending_packed_attr = false;
+        let packed = if leading_packed_attr
+            || before_name_packed_attr
+            || after_name_packed_attr
+            || after_body_packed_attr
+        {
+            1
+        } else {
+            self.current_pack
+        };
+        if let Some(n) = &name {
+            if !fields.is_empty() {
+                self.known_struct_defs.insert(n.clone(), fields.clone());
+                if packed != 0 {
+                    self.known_struct_packs.insert(n.clone(), packed);
+                }
+            }
+        }
         if is_struct {
             Ok(Type::Struct {
                 name,
@@ -1201,25 +1414,29 @@ impl<'a> Parser<'a> {
     fn parse_pointer_type(&mut self, base: Type) -> Type {
         let mut ty = base;
         // Skip qualifiers that may appear between type and *
-        while matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed"))
-            || matches!(self.current, Token::Const | Token::Volatile)
-        {
-            self.advance().expect("qualifier already matched");
-        }
+        self.skip_qualifiers_and_attrs()
+            .expect("qualifier skipping should not fail");
         while self.current == Token::Star {
             self.advance().expect("star already matched");
             // Track const/volatile after * (these qualify the pointer itself)
             let mut ptr_const = false;
             let mut ptr_volatile = false;
             while matches!(self.current, Token::Const | Token::Volatile)
+                || Self::is_restrict_ident_token(&self.current)
                 || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__pm" | "__dm" | "__byte_addressed" | "__word_addressed"))
+                || Self::is_attr_ident_token(&self.current)
             {
                 if self.current == Token::Const {
                     ptr_const = true;
                 } else if self.current == Token::Volatile {
                     ptr_volatile = true;
                 }
-                self.advance().expect("qualifier already matched");
+                if Self::is_attr_ident_token(&self.current) {
+                    self.skip_attribute()
+                        .expect("attribute skipping should not fail");
+                } else {
+                    self.advance().expect("qualifier already matched");
+                }
             }
             ty = Type::Pointer(Box::new(ty));
             if ptr_volatile {
@@ -1241,6 +1458,12 @@ impl<'a> Parser<'a> {
         // Skip whitespace.
         while i < remaining.len() && remaining[i].is_ascii_whitespace() {
             i += 1;
+        }
+        while i < remaining.len() && remaining[i] == b'(' {
+            i += 1;
+            while i < remaining.len() && remaining[i].is_ascii_whitespace() {
+                i += 1;
+            }
         }
         i < remaining.len() && remaining[i] == b'*'
     }
@@ -1297,32 +1520,40 @@ impl<'a> Parser<'a> {
     /// Handles `*name`, `**name`, `*const name`, `*name[N]`, etc.
     /// Returns (indirection_count, name, has_array_brackets, optional_array_size).
     fn parse_paren_ptr_decl(&mut self) -> Result<(usize, String, bool, Option<Expr>), Error> {
+        let mut extra_parens = 0;
+        while self.current == Token::LParen {
+            self.advance()?;
+            extra_parens += 1;
+        }
         let mut stars = 0;
         while self.current == Token::Star {
             self.advance()?;
             stars += 1;
         }
-        // Skip const/volatile qualifiers
-        while matches!(self.current, Token::Const | Token::Volatile) {
-            self.advance()?;
-        }
+        self.skip_qualifiers_and_attrs()?;
         // Handle nested parenthesized declarator: (*(*pp)) — skip inner parens
         if self.current == Token::LParen {
             self.advance()?; // skip inner (
+            extra_parens += 1;
             let mut inner_stars = 0;
+            while self.current == Token::LParen {
+                self.advance()?;
+                extra_parens += 1;
+            }
             while self.current == Token::Star {
                 self.advance()?;
                 inner_stars += 1;
             }
-            while matches!(self.current, Token::Const | Token::Volatile) {
-                self.advance()?;
-            }
+            self.skip_qualifiers_and_attrs()?;
             let name = self.expect_ident()?;
-            self.expect(&Token::RParen)?; // inner )
-            self.expect(&Token::RParen)?; // outer )
+            self.skip_attributes()?;
+            for _ in 0..=extra_parens {
+                self.expect(&Token::RParen)?;
+            }
             return Ok((stars + inner_stars, name, false, None));
         }
         let name = self.expect_ident()?;
+        self.skip_attributes()?;
         let (has_brackets, array_dim) = if self.current == Token::LBracket {
             self.advance()?;
             if self.current == Token::RBracket {
@@ -1336,7 +1567,9 @@ impl<'a> Parser<'a> {
         } else {
             (false, None)
         };
-        self.expect(&Token::RParen)?;
+        for _ in 0..=extra_parens {
+            self.expect(&Token::RParen)?;
+        }
         Ok((stars, name, has_brackets, array_dim))
     }
 
@@ -1397,14 +1630,16 @@ impl<'a> Parser<'a> {
                     self.advance()?;
                     break;
                 }
-                let pty = self.parse_type()?;
-                let pty = self.parse_pointer_type(pty);
-                // Skip const/volatile/__restrict qualifiers before optional parameter name.
-                while matches!(self.current, Token::Const | Token::Volatile)
-                    || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__restrict" | "restrict" | "__restrict__"))
-                {
+                if matches!(self.current, Token::Register | Token::Auto) {
                     self.advance()?;
                 }
+                let pty = self.parse_type()?;
+                let pty = self.parse_pointer_type(pty);
+                if matches!(pty, Type::Void) && params.is_empty() && self.current == Token::RParen {
+                    break;
+                }
+                // Skip const/volatile/__restrict qualifiers before optional parameter name.
+                self.skip_qualifiers_and_attrs()?;
                 // Skip optional parameter name.
                 if let Token::Ident(name) = &self.current {
                     if !self.typedef_names.contains(name) {
@@ -1413,13 +1648,11 @@ impl<'a> Parser<'a> {
                 }
                 // Skip array parameter decay: name[N]
                 if self.current == Token::LBracket {
-                    self.advance()?;
-                    if self.current != Token::RBracket {
-                        self.parse_expr()?;
-                    }
-                    self.expect(&Token::RBracket)?;
+                    let (decayed, _) = self.parse_param_array_decay(pty.clone())?;
+                    params.push(decayed);
+                } else {
+                    params.push(pty);
                 }
-                params.push(pty);
                 if self.current == Token::Comma {
                     self.advance()?;
                 } else {
@@ -1462,15 +1695,66 @@ impl<'a> Parser<'a> {
         // int m[2][3] -> dims = [Some(2), Some(3)]
         // Result: Array(Array(Int, Some(3)), Some(2))
         //
-        // VLA dimension expression is only meaningful for the outermost
-        // dimension (C99 does not allow VLA inner dimensions in practice
-        // for local arrays).
-        let vla_dim = dims.first().and_then(|(_, expr)| expr.clone());
+        let vla_dim = dims
+            .iter()
+            .filter_map(|(_, expr)| expr.clone())
+            .reduce(|lhs, rhs| Expr::Binary {
+                op: BinaryOp::Mul,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            });
         let mut ty = base;
         for (size, _) in dims.into_iter().rev() {
             ty = Type::Array(Box::new(ty), size);
         }
         Ok((ty, vla_dim))
+    }
+
+    fn parse_param_array_decay(&mut self, base: Type) -> Result<(Type, Option<Expr>), Error> {
+        let mut dims: Vec<(Option<usize>, Option<Expr>)> = Vec::new();
+        while self.current == Token::LBracket {
+            self.advance()?;
+            while matches!(self.current, Token::Static | Token::Const | Token::Volatile)
+                || Self::is_restrict_ident_token(&self.current)
+            {
+                self.advance()?;
+            }
+            let dim = if self.current == Token::RBracket {
+                (None, None)
+            } else {
+                let expr = self.parse_assign()?;
+                match self.try_const_eval_with_enums(&expr) {
+                    Some(v) => (Some(v as usize), None),
+                    None => (None, Some(expr)),
+                }
+            };
+            self.expect(&Token::RBracket)?;
+            dims.push(dim);
+        }
+        if dims.is_empty() {
+            return Ok((base, None));
+        }
+        let vla_dim = dims
+            .iter()
+            .skip(1)
+            .filter_map(|(_, expr)| expr.clone())
+            .reduce(|lhs, rhs| Expr::Binary {
+                op: BinaryOp::Mul,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            });
+        let mut elem_ty = base;
+        for (size, _) in dims.into_iter().skip(1).rev() {
+            elem_ty = Type::Array(Box::new(elem_ty), size);
+        }
+        Ok((Type::Pointer(Box::new(elem_ty)), vla_dim))
+    }
+
+    fn decay_parameter_type(ty: Type) -> Type {
+        match ty {
+            Type::Array(elem, _) => Type::Pointer(elem),
+            other => other,
+        }
     }
 
     // ---- Statement parsing ----
@@ -1520,6 +1804,21 @@ impl<'a> Parser<'a> {
             Token::Case => {
                 self.advance()?;
                 let val = self.parse_expr()?;
+                if self.current == Token::Ellipsis {
+                    self.advance()?;
+                    let end = self.parse_expr()?;
+                    self.expect(&Token::Colon)?;
+                    let start_v = const_eval(&val);
+                    let end_v = const_eval(&end);
+                    let mut labels = Vec::new();
+                    for v in start_v..=end_v {
+                        labels.push(Stmt::CaseLabel(Expr::IntLit(
+                            v,
+                            crate::token::IntSuffix::None,
+                        )));
+                    }
+                    return Ok(Stmt::DeclGroup(labels));
+                }
                 self.expect(&Token::Colon)?;
                 Ok(Stmt::CaseLabel(val))
             }
@@ -1590,6 +1889,19 @@ impl<'a> Parser<'a> {
                 let inner = self.parse_stmt()?;
                 Ok(Stmt::Label(label, Box::new(inner)))
             }
+            Token::Ident(name) if name == "__label__" => {
+                self.advance()?;
+                loop {
+                    self.expect_ident()?;
+                    if self.current == Token::Comma {
+                        self.advance()?;
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&Token::Semicolon)?;
+                Ok(Stmt::Block(Vec::new()))
+            }
             Token::Typedef => {
                 // Local typedef: register the alias in typedef_names
                 // and emit a no-op statement (the alias only affects
@@ -1600,16 +1912,34 @@ impl<'a> Parser<'a> {
                 if self.current == Token::LParen && self.is_fnptr_declarator() {
                     self.advance()?;
                     let (stars, alias, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
-                    let _ = self.finish_paren_ptr_type(_ty, stars, has_brackets, array_dim)?;
+                    let final_ty =
+                        self.finish_paren_ptr_type(_ty, stars, has_brackets, array_dim)?;
                     self.expect(&Token::Semicolon)?;
-                    self.typedef_names.insert(alias);
+                    self.typedef_names.insert(alias.clone());
+                    self.typedef_types.insert(alias.clone(), final_ty.clone());
+                    if !matches!(final_ty, Type::Array(_, None)) {
+                        return Ok(Stmt::Block(Vec::new()));
+                    }
+                    Ok(Stmt::Typedef {
+                        name: alias,
+                        ty: final_ty,
+                        vla_dim: None,
+                    })
                 } else {
                     let alias = self.expect_ident()?;
-                    let _ = self.parse_array_dimensions(_ty)?;
-                    self.typedef_names.insert(alias);
+                    let (alias_ty, vla_dim) = self.parse_array_dimensions(_ty)?;
+                    self.typedef_names.insert(alias.clone());
+                    self.typedef_types.insert(alias.clone(), alias_ty.clone());
                     self.expect(&Token::Semicolon)?;
+                    if vla_dim.is_none() {
+                        return Ok(Stmt::Block(Vec::new()));
+                    }
+                    Ok(Stmt::Typedef {
+                        name: alias,
+                        ty: alias_ty,
+                        vla_dim,
+                    })
                 }
-                Ok(Stmt::Block(Vec::new()))
             }
             Token::Extern => {
                 // Block-scope `extern` declaration. C99 6.2.2p4: such an
@@ -1643,13 +1973,12 @@ impl<'a> Parser<'a> {
                                 is_variadic = true;
                                 break;
                             }
-                            let pty = self.parse_type()?;
-                            let pty = self.parse_pointer_type(pty);
-                            while matches!(self.current, Token::Const | Token::Volatile)
-                                || matches!(&self.current, Token::Ident(n) if matches!(n.as_str(), "__restrict" | "restrict" | "__restrict__"))
-                            {
+                            if matches!(self.current, Token::Register | Token::Auto) {
                                 self.advance()?;
                             }
+                            let pty = self.parse_type()?;
+                            let pty = self.parse_pointer_type(pty);
+                            self.skip_qualifiers_and_attrs()?;
                             if let Token::Ident(n) = &self.current {
                                 if !self.typedef_names.contains(n) {
                                     self.advance()?;
@@ -1831,7 +2160,9 @@ impl<'a> Parser<'a> {
 
         // Parse first declarator.
         let name = self.expect_ident()?;
+        self.skip_attributes()?;
         let (ty, vla_dim) = self.parse_array_dimensions(base_ty.clone())?;
+        self.skip_attributes()?;
         let init = if self.current == Token::Assign {
             self.advance()?;
             if self.current == Token::LBrace {
@@ -1872,8 +2203,22 @@ impl<'a> Parser<'a> {
             if is_const && !ptr_ty.is_const() {
                 ptr_ty = Type::Const(Box::new(ptr_ty));
             }
-            let decl_name = self.expect_ident()?;
-            let (decl_ty, decl_vla_dim) = self.parse_array_dimensions(ptr_ty)?;
+            let (decl_name, decl_ty, decl_vla_dim) =
+                if self.current == Token::LParen && self.is_fnptr_declarator() {
+                    self.advance()?;
+                    let (stars, name, has_brackets, array_dim) = self.parse_paren_ptr_decl()?;
+                    (
+                        name,
+                        self.finish_paren_ptr_type(ptr_ty, stars, has_brackets, array_dim)?,
+                        None,
+                    )
+                } else {
+                    let decl_name = self.expect_ident()?;
+                    self.skip_attributes()?;
+                    let (decl_ty, decl_vla_dim) = self.parse_array_dimensions(ptr_ty)?;
+                    self.skip_attributes()?;
+                    (decl_name, decl_ty, decl_vla_dim)
+                };
             let decl_init = if self.current == Token::Assign {
                 self.advance()?;
                 if self.current == Token::LBrace {
@@ -2219,7 +2564,11 @@ impl<'a> Parser<'a> {
 
         if self.current == Token::Question {
             self.advance()?;
-            let then_expr = self.parse_expr()?;
+            let then_expr = if self.current == Token::Colon {
+                cond.clone()
+            } else {
+                self.parse_expr()?
+            };
             self.expect(&Token::Colon)?;
             let else_expr = self.parse_ternary()?;
             Ok(Expr::Ternary {
@@ -2435,6 +2784,64 @@ impl<'a> Parser<'a> {
                 if name == "__func__" {
                     return Ok(Expr::StringLit(self.current_function.clone()));
                 }
+                if name == "__builtin_types_compatible_p" {
+                    self.expect(&Token::LParen)?;
+                    let lhs = self.parse_type()?;
+                    let lhs = self.parse_pointer_type(lhs);
+                    self.expect(&Token::Comma)?;
+                    let rhs = self.parse_type()?;
+                    let rhs = self.parse_pointer_type(rhs);
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::IntLit(
+                        (lhs == rhs) as i64,
+                        crate::token::IntSuffix::None,
+                    ));
+                }
+                if name == "__builtin_offsetof" {
+                    self.expect(&Token::LParen)?;
+                    let ty = self.parse_type()?;
+                    self.expect(&Token::Comma)?;
+                    let field = self.expect_ident()?;
+                    self.expect(&Token::RParen)?;
+                    let offset = match ty {
+                        Type::Struct {
+                            name,
+                            fields,
+                            packed,
+                        }
+                        | Type::Union {
+                            name,
+                            fields,
+                            packed,
+                        } => {
+                            let resolved_fields = if fields.is_empty() {
+                                name.as_ref().and_then(|n| self.known_struct_defs.get(n))
+                            } else {
+                                Some(&fields)
+                            };
+                            let pack = if packed != 0 {
+                                packed
+                            } else {
+                                name.as_ref()
+                                    .and_then(|n| self.known_struct_packs.get(n).copied())
+                                    .unwrap_or(0)
+                            };
+                            resolved_fields
+                                .and_then(|fields| {
+                                    struct_field_layout_ctx(
+                                        fields,
+                                        &field,
+                                        pack,
+                                        &crate::types::NullCtx,
+                                    )
+                                })
+                                .map(|(off, _, _)| off as i64)
+                                .unwrap_or(0)
+                        }
+                        _ => 0,
+                    };
+                    return Ok(Expr::IntLit(offset, crate::token::IntSuffix::None));
+                }
                 // Function call?
                 if self.current == Token::LParen {
                     self.advance()?;
@@ -2509,8 +2916,22 @@ impl<'a> Parser<'a> {
                         } else {
                             ty
                         };
-                        let (ty, _) = self.parse_array_dimensions(ty)?;
+                        let (ty, vla_dim) = self.parse_array_dimensions(ty)?;
                         self.expect(&Token::RParen)?;
+                        if let Some(dim) = vla_dim {
+                            let elem_size = match &ty {
+                                Type::Array(elem, _) => elem.size_bytes().max(1),
+                                _ => 1,
+                            };
+                            return Ok(Expr::Binary {
+                                op: BinaryOp::Mul,
+                                lhs: Box::new(dim),
+                                rhs: Box::new(Expr::IntLit(
+                                    elem_size as i64,
+                                    crate::token::IntSuffix::None,
+                                )),
+                            });
+                        }
                         Ok(Expr::Sizeof(Box::new(crate::ast::SizeofArg::Type(ty))))
                     } else {
                         let expr = self.parse_expr()?;
@@ -2525,6 +2946,14 @@ impl<'a> Parser<'a> {
             }
             Token::LParen => {
                 self.advance()?;
+                if self.current == Token::LBrace {
+                    let stmts = self.parse_block_stmts()?;
+                    self.expect(&Token::RParen)?;
+                    if let Some(v) = eval_simple_stmt_expr(&stmts) {
+                        return Ok(Expr::IntLit(v, crate::token::IntSuffix::None));
+                    }
+                    return Err(self.err("unsupported statement expression".into()));
+                }
                 // Check for cast or compound literal: (type)expr or (type){...}
                 if self.is_type_token() {
                     let ty = self.parse_type()?;
@@ -2600,6 +3029,190 @@ fn const_eval(expr: &Expr) -> i64 {
             rhs,
         } => const_eval(lhs) >> const_eval(rhs),
         _ => 0,
+    }
+}
+
+fn eval_simple_stmt_expr(stmts: &[Stmt]) -> Option<i64> {
+    let mut env = std::collections::HashMap::new();
+    let mut last = None;
+    for stmt in stmts {
+        last = eval_simple_stmt(stmt, &mut env)?;
+    }
+    last
+}
+
+fn eval_simple_stmt(
+    stmt: &Stmt,
+    env: &mut std::collections::HashMap<String, i64>,
+) -> Option<Option<i64>> {
+    match stmt {
+        Stmt::VarDecl { name, init, .. } => {
+            let v = if let Some(init) = init {
+                eval_simple_expr(init, env)?
+            } else {
+                0
+            };
+            env.insert(name.clone(), v);
+            Some(None)
+        }
+        Stmt::Expr(expr) => Some(Some(eval_simple_expr(expr, env)?)),
+        Stmt::DeclGroup(stmts) | Stmt::Block(stmts) => {
+            let mut last = None;
+            for stmt in stmts {
+                last = eval_simple_stmt(stmt, env)?;
+            }
+            Some(last)
+        }
+        Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(init) = init {
+                eval_simple_stmt(init, env)?;
+            }
+            let mut guard = 0;
+            while if let Some(cond) = cond {
+                eval_simple_expr(cond, env)?
+            } else {
+                1
+            } != 0
+            {
+                for stmt in body {
+                    eval_simple_stmt(stmt, env)?;
+                }
+                if let Some(step) = step {
+                    eval_simple_expr(step, env)?;
+                }
+                guard += 1;
+                if guard > 100_000 {
+                    return None;
+                }
+            }
+            Some(None)
+        }
+        Stmt::Return(Some(expr)) => Some(Some(eval_simple_expr(expr, env)?)),
+        Stmt::Return(None) => Some(Some(0)),
+        _ => None,
+    }
+}
+
+fn eval_simple_expr(expr: &Expr, env: &mut std::collections::HashMap<String, i64>) -> Option<i64> {
+    match expr {
+        Expr::IntLit(v, _) | Expr::CharLit(v) => Some(*v),
+        Expr::Ident(name) => env.get(name).copied(),
+        Expr::Unary { op, operand } => {
+            let v = eval_simple_expr(operand, env)?;
+            Some(match op {
+                UnaryOp::Neg => -v,
+                UnaryOp::BitNot => !v,
+                UnaryOp::LogNot => (v == 0) as i64,
+            })
+        }
+        Expr::Binary { op, lhs, rhs } => {
+            let l = eval_simple_expr(lhs, env)?;
+            let r = eval_simple_expr(rhs, env)?;
+            Some(match op {
+                BinaryOp::Add => l.wrapping_add(r),
+                BinaryOp::Sub => l.wrapping_sub(r),
+                BinaryOp::Mul => l.wrapping_mul(r),
+                BinaryOp::Div => l / r,
+                BinaryOp::Mod => l % r,
+                BinaryOp::BitAnd => l & r,
+                BinaryOp::BitOr => l | r,
+                BinaryOp::BitXor => l ^ r,
+                BinaryOp::Shl => l << r,
+                BinaryOp::Shr => ((l as u64) >> r) as i64,
+                BinaryOp::Eq => (l == r) as i64,
+                BinaryOp::Ne => (l != r) as i64,
+                BinaryOp::Lt => (l < r) as i64,
+                BinaryOp::Gt => (l > r) as i64,
+                BinaryOp::Le => (l <= r) as i64,
+                BinaryOp::Ge => (l >= r) as i64,
+                BinaryOp::LogAnd => ((l != 0) && (r != 0)) as i64,
+                BinaryOp::LogOr => ((l != 0) || (r != 0)) as i64,
+            })
+        }
+        Expr::Assign { target, value } => {
+            let v = eval_simple_expr(value, env)?;
+            let Expr::Ident(name) = target.as_ref() else {
+                return None;
+            };
+            env.insert(name.clone(), v);
+            Some(v)
+        }
+        Expr::CompoundAssign { op, target, value } => {
+            let Expr::Ident(name) = target.as_ref() else {
+                return None;
+            };
+            let lhs = *env.get(name)?;
+            let rhs = eval_simple_expr(value, env)?;
+            let v = match op {
+                BinaryOp::Add => lhs.wrapping_add(rhs),
+                BinaryOp::Sub => lhs.wrapping_sub(rhs),
+                BinaryOp::Mul => lhs.wrapping_mul(rhs),
+                BinaryOp::Div => lhs / rhs,
+                BinaryOp::Mod => lhs % rhs,
+                BinaryOp::BitAnd => lhs & rhs,
+                BinaryOp::BitOr => lhs | rhs,
+                BinaryOp::BitXor => lhs ^ rhs,
+                BinaryOp::Shl => lhs << rhs,
+                BinaryOp::Shr => ((lhs as u64) >> rhs) as i64,
+                _ => return None,
+            };
+            env.insert(name.clone(), v);
+            Some(v)
+        }
+        Expr::PostInc(inner) => {
+            let Expr::Ident(name) = inner.as_ref() else {
+                return None;
+            };
+            let old = *env.get(name)?;
+            env.insert(name.clone(), old + 1);
+            Some(old)
+        }
+        Expr::PreInc(inner) => {
+            let Expr::Ident(name) = inner.as_ref() else {
+                return None;
+            };
+            let new = *env.get(name)? + 1;
+            env.insert(name.clone(), new);
+            Some(new)
+        }
+        Expr::PostDec(inner) => {
+            let Expr::Ident(name) = inner.as_ref() else {
+                return None;
+            };
+            let old = *env.get(name)?;
+            env.insert(name.clone(), old - 1);
+            Some(old)
+        }
+        Expr::PreDec(inner) => {
+            let Expr::Ident(name) = inner.as_ref() else {
+                return None;
+            };
+            let new = *env.get(name)? - 1;
+            env.insert(name.clone(), new);
+            Some(new)
+        }
+        Expr::Comma(lhs, rhs) => {
+            eval_simple_expr(lhs, env)?;
+            eval_simple_expr(rhs, env)
+        }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            if eval_simple_expr(cond, env)? != 0 {
+                eval_simple_expr(then_expr, env)
+            } else {
+                eval_simple_expr(else_expr, env)
+            }
+        }
+        Expr::Cast(_, inner) => eval_simple_expr(inner, env),
+        _ => None,
     }
 }
 
@@ -3689,6 +4302,27 @@ mod tests {
             other => panic!("expected FunctionPtr param, got {other:?}"),
         }
         assert_eq!(unit.functions[0].params[0].0, "f");
+    }
+
+    #[test]
+    fn parse_function_pointer_array_param_decays() {
+        let src = "void apply(int (*fp[2])(void)) { return; }";
+        let unit = parse(src).unwrap();
+        assert_eq!(unit.functions[0].params.len(), 1);
+        assert_eq!(unit.functions[0].params[0].0, "fp");
+        match &unit.functions[0].params[0].1 {
+            Type::Pointer(inner) => match inner.as_ref() {
+                Type::FunctionPtr {
+                    return_type,
+                    params,
+                } => {
+                    assert_eq!(**return_type, Type::Int);
+                    assert!(params.is_empty());
+                }
+                other => panic!("expected decayed function-pointer element, got {other:?}"),
+            },
+            other => panic!("expected pointer-decayed array parameter, got {other:?}"),
+        }
     }
 
     #[test]

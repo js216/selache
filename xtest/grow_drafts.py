@@ -60,6 +60,19 @@ def expect_of(stem):
     return int(m.group(1), 0)
 
 
+def record_exp_ticks(stem, ticks):
+    src = DRAFT_DIR / f"{stem}.c"
+    text = src.read_text()
+    budget = max(ticks + 8, (ticks * 11 + 9) // 10)
+    line = f"/* @exp_ticks 0x{budget:x} */"
+    if re.search(r"@exp_ticks\s+(0x[0-9a-fA-F]+|\d+)", text):
+        text = re.sub(r"/\*\s*@exp_ticks\s+(0x[0-9a-fA-F]+|\d+)\s*\*/",
+                      line, text, count=1)
+    else:
+        text = re.sub(r"(/\*\s*@expect\s+(?:0x[0-9a-fA-F]+|\d+)\s*\*/)",
+                      r"\1\n" + line, text, count=1)
+    src.write_text(text)
+
 def make_drafts():
     """Build all draft .ldr files. If a specific case fails (e.g. seld
     layout overflow on a particularly large csmith output), delete
@@ -110,10 +123,10 @@ def make_drafts():
 
 
 def hw_check(stem, toolchain, expect):
-    """Submit one draft .ldr to the bench, return (ok, reason)."""
+    """Submit one draft .ldr to the bench, return (ok, reason, ticks)."""
     ldr = BUILD_DIR / toolchain / f"{stem}.0x{expect:x}.ldr"
     if not ldr.exists():
-        return False, f"missing {ldr}"
+        return False, f"missing {ldr}", None
     with tempfile.TemporaryDirectory(prefix=f"hw_{stem}_") as tmp:
         plan_path = pathlib.Path(tmp) / "plan.txt"
         extract = pathlib.Path(tmp) / "artefact"
@@ -137,36 +150,39 @@ def hw_check(stem, toolchain, expect):
             capture_output=True, text=True, timeout=900)
         if cp.returncode != 0:
             return False, (f"submit.py rc={cp.returncode}: "
-                           f"{(cp.stderr or cp.stdout)[-500:]}")
+                           f"{(cp.stderr or cp.stdout)[-500:]}"), None
         manifest = json.loads((extract / "manifest.json").read_text())
         n_errors = manifest.get("n_errors", -1)
         if n_errors != 0:
-            return False, f"manifest n_errors={n_errors}"
+            return False, f"manifest n_errors={n_errors}", None
         uart = (extract / "streams/dsp.uart.bin").read_bytes().decode(
             "ascii", "replace")
-        m = re.search(r"got\s+([0-9a-fA-F]+)", uart)
+        m = re.search(r"got\s+([0-9a-fA-F]+)(?:\s+ticks\s+([0-9a-fA-F]+))?", uart)
         if not m:
-            return False, f"no `got NN` in uart: {uart!r}"
+            return False, f"no `got NN` in uart: {uart!r}", None
         got = int(m.group(1), 16)
         if got != expect:
-            return False, f"expect=0x{expect:x} got=0x{got:x}"
-    return True, None
+            return False, f"expect=0x{expect:x} got=0x{got:x}", None
+        ticks = int(m.group(2), 16) if m.group(2) else None
+    return True, None, ticks
 
 
 def validate_one(stem):
     expect = expect_of(stem)
     for tc in ("cces", "sel"):
         t0 = time.monotonic()
-        ok, why = hw_check(stem, tc, expect)
+        ok, why, ticks = hw_check(stem, tc, expect)
         if not ok:
             # Retry once: transient bench faults (USB glitch on
             # dsp:reset, queue race, missed uart sentinel) reproduce
             # as a different `why` on the next submit, while a real
             # toolchain miscompile fails both attempts identically.
-            ok, why2 = hw_check(stem, tc, expect)
+            ok, why2, ticks = hw_check(stem, tc, expect)
             if not ok:
                 dt = time.monotonic() - t0
                 return False, f"{tc}: {why} | retry: {why2} (+{dt:.1f}s)"
+        if tc == "sel" and ticks is not None:
+            record_exp_ticks(stem, ticks)
         dt = time.monotonic() - t0
     return True, None
 
