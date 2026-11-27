@@ -720,8 +720,8 @@ pub fn encode_word(instr: &Instruction) -> Result<u64, EncodeError> {
             //   bits[30:27] = dst_ureg[6:3]
             //   bits[26:23] = dst_ureg[3:0]
             //   bits[22:0]  = compute
-            let src = src_ureg as u64;
-            let dst = dst_ureg as u64;
+            let src = type5a_ureg_code(src_ureg)?;
+            let dst = type5a_ureg_code(dst_ureg)?;
             let src_hi = (src >> 2) & 0x1F;
             let src_lo = src & 0x03;
             let dst_hi = (dst >> 4) & 0x0F;
@@ -1588,6 +1588,23 @@ fn encode_type14(pm: bool, write: bool, ureg: u16, addr: u32) -> Result<u64, Enc
 // bits[22:0] = compute (0 = no compute)
 // ---------------------------------------------------------------------------
 
+fn type5a_ureg_code(ureg: u16) -> Result<u64, EncodeError> {
+    // These registers are not yet supported by the 32-bit compressor.
+    let code = match ureg {
+        0x90 => Some(0x6E), // TPERIOD
+        0x91 => Some(0x6F), // TCOUNT
+        0x80 => Some(0x70), // USTAT1
+        0x81 => Some(0x71), // USTAT2
+        0x7C => Some(0x73), // MMASK
+        0x82 => Some(0x7E), // USTAT3
+        0x83 => Some(0x7F), // USTAT4
+        _ => crate::visa_encode::visa_ureg_code(ureg),
+    };
+    code.map(u64::from).ok_or_else(|| EncodeError {
+        msg: format!("register 0x{ureg:X} has no SHARC+ Type 5a UREG code"),
+    })
+}
+
 fn encode_type5a(dest: u16, src: u16) -> Result<u64, EncodeError> {
     // Type 5a layout (see `decode_type5a` for the bit-field split):
     //   bits[47:45] = 011, bit[44]=1
@@ -1608,8 +1625,8 @@ fn encode_type5a(dest: u16, src: u16) -> Result<u64, EncodeError> {
     // (`IF BM, UREG(0xB7)=B4`) and trampled the register file. Use
     // the same bit layout the 48-bit UregTransfer encoder below
     // already uses, which the hardware does honour.
-    let src = src as u64;
-    let dst = dest as u64;
+    let src = type5a_ureg_code(src)?;
+    let dst = type5a_ureg_code(dest)?;
     let src_hi = (src >> 2) & 0x1F;
     let src_lo = src & 0x03;
     let dst_hi = (dst >> 4) & 0x0F;
@@ -2984,6 +3001,118 @@ mod tests {
         };
         let text = roundtrip(&instr);
         assert_eq!(text, "DM (0x1,I0)=M2");
+    }
+
+    // -- Type 5a: Universal register transfer --
+
+    #[test]
+    fn type5a_system_register_codes() {
+        // SHARC+ Core Programming Reference, chapter 27, UREG Registers Class.
+        // Parsed instructions retain the classic 8-bit codes; Type 5a uses
+        // these 7-bit wire codes for both sources and destinations.
+        for (parsed, wire, name) in [
+            (0x60, 0x60, "FADDR"),
+            (0x61, 0x61, "DADDR"),
+            (0x62, 0x63, "PC"),
+            (0x63, 0x64, "PCSTK"),
+            (0x64, 0x65, "PCSTKP"),
+            (0x65, 0x66, "LADDR"),
+            (0x66, 0x67, "CURLCNTR"),
+            (0x67, 0x68, "LCNTR"),
+            (0x68, 0x69, "EMUCLK"),
+            (0x69, 0x6A, "EMUCLK2"),
+            (0x6C, 0x6B, "PX"),
+            (0x6D, 0x6C, "PX1"),
+            (0x6E, 0x6D, "PX2"),
+            (0x90, 0x6E, "TPERIOD"),
+            (0x91, 0x6F, "TCOUNT"),
+            (0x80, 0x70, "USTAT1"),
+            (0x81, 0x71, "USTAT2"),
+            (0x70, 0x72, "MODE1"),
+            (0x7C, 0x73, "MMASK"),
+            (0x71, 0x74, "MODE2"),
+            (0x72, 0x75, "FLAGS"),
+            (0x73, 0x76, "ASTATx"),
+            (0x74, 0x77, "ASTATy"),
+            (0x75, 0x78, "STKYx"),
+            (0x76, 0x79, "STKYy"),
+            (0x78, 0x7A, "IRPTL"),
+            (0x79, 0x7B, "IMASK"),
+            (0x7A, 0x7C, "IMASKP"),
+            (0x7D, 0x7D, "MODE1STK"),
+            (0x82, 0x7E, "USTAT3"),
+            (0x83, 0x7F, "USTAT4"),
+        ] {
+            for general in [false, true] {
+                let move_reg = |src, dest| {
+                    if general {
+                        Instruction::UregTransfer {
+                            src_ureg: src,
+                            dst_ureg: dest,
+                            cond: 31,
+                            compute: None,
+                        }
+                    } else {
+                        Instruction::URegMove { src, dest }
+                    }
+                };
+                let read = move_reg(parsed, 0);
+                let write = move_reg(0, parsed);
+                let read_word = encode_word(&read).unwrap();
+                let write_word = encode_word(&write).unwrap();
+                assert_eq!((read_word >> 38 & 0x1F) << 2 | (read_word >> 31 & 3), wire);
+                assert_eq!(
+                    (write_word >> 27 & 0xF) << 4 | (write_word >> 23 & 0xF),
+                    wire
+                );
+                assert_eq!(roundtrip(&read), format!("R0={name}"));
+                assert_eq!(roundtrip(&write), format!("{name}=R0"));
+            }
+        }
+    }
+
+    #[test]
+    fn type5a_system_register_exact_words() {
+        for (src, dest, expected) in [
+            (0x68, 0x00, 0x76be_8000_0000), // R0 = EMUCLK
+            (0x67, 0x00, 0x76be_0000_0000), // R0 = LCNTR
+            (0x90, 0x00, 0x76ff_0000_0000), // R0 = TPERIOD
+            (0x80, 0x00, 0x773e_0000_0000), // R0 = USTAT1
+            (0x00, 0x70, 0x703e_3900_0000), // MODE1 = R0
+            (0x16, 0x17, 0x717f_0b80_0000), // I7 = I6 (unchanged)
+        ] {
+            assert_eq!(
+                encode_word(&Instruction::URegMove { src, dest }).unwrap(),
+                expected
+            );
+        }
+        let conditional = Instruction::UregTransfer {
+            src_ureg: 0x68,
+            dst_ureg: 0,
+            cond: 0,
+            compute: Some(ComputeOp::Alu(AluOp::Add {
+                rn: 2,
+                rx: 3,
+                ry: 4,
+            })),
+        };
+        let word = encode_word(&conditional).unwrap();
+        assert_eq!(word & !0x7fffff, 0x7680_8000_0000);
+        assert_eq!(roundtrip(&conditional), "IF EQ R2 = R3 + R4 , R0=EMUCLK");
+        for invalid in [0x7B, 0x84, 0x100] {
+            assert!(encode(&Instruction::URegMove {
+                src: invalid,
+                dest: 0
+            })
+            .is_err());
+            assert!(encode(&Instruction::UregTransfer {
+                src_ureg: 0,
+                dst_ureg: invalid,
+                cond: 31,
+                compute: None,
+            })
+            .is_err());
+        }
     }
 
     // -- Type 6b: Immediate shift --

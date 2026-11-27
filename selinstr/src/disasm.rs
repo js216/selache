@@ -168,13 +168,15 @@ fn visa_ureg_name(code: u32) -> String {
             0xB => "PX".into(),
             0xC => "PX1".into(),
             0xD => "PX2".into(),
+            0xE => "TPERIOD".into(),
+            0xF => "TCOUNT".into(),
             _ => format!("UREG(0x{code:02X})"),
         },
         0x7 => match reg {
-            0x0 => "MODE1".into(),
-            0x1 => "MODE2".into(),
+            0x0 => "USTAT1".into(),
+            0x1 => "USTAT2".into(),
             0x2 => "MODE1".into(),
-            0x3 => "MODE2".into(),
+            0x3 => "MMASK".into(),
             0x4 => "MODE2".into(),
             0x5 => "FLAGS".into(),
             0x6 => "ASTATx".into(),
@@ -185,6 +187,8 @@ fn visa_ureg_name(code: u32) -> String {
             0xB => "IMASK".into(),
             0xC => "IMASKP".into(),
             0xD => "MODE1STK".into(),
+            0xE => "USTAT3".into(),
+            0xF => "USTAT4".into(),
             _ => format!("UREG(0x{code:02X})"),
         },
         _ => format!("UREG(0x{code:02X})"),
@@ -902,7 +906,7 @@ fn decode_type5a(word: u64) -> String {
 
     let compute = bits(word, 22, 0);
 
-    let xfer = format!("{}={}", ureg_name(dst_ureg), ureg_name(src_ureg));
+    let xfer = format!("{}={}", visa_ureg_name(dst_ureg), visa_ureg_name(src_ureg));
 
     let mut out = String::new();
     if cond != 31 {

@@ -1325,6 +1325,33 @@ mod tests {
     }
 
     #[test]
+    fn test_type5a_system_register_exact_bytes() {
+        let source = ".SECTION/PM seg_pmco;\n\
+                      .NOCOMPRESS;\n\
+                      R0 = EMUCLK;\n\
+                      R0 = LCNTR;\n\
+                      R0 = TPERIOD;\n\
+                      R0 = USTAT1;\n\
+                      MODE1 = R0;\n";
+        for visa in [false, true] {
+            let data = assemble_source(source, visa).unwrap();
+            let hdr = selelf::elf::parse_header(&data).unwrap();
+            let section = find_section_by_name(&data, &hdr, "seg_pmco").unwrap();
+            let start = section.sh_offset as usize;
+            let end = start + section.sh_size as usize;
+            assert_eq!(
+                &data[start..end],
+                &[
+                    0x76, 0xbe, 0x80, 0x00, 0x00, 0x00, 0x76, 0xbe, 0x00, 0x00, 0x00, 0x00, 0x76,
+                    0xff, 0x00, 0x00, 0x00, 0x00, 0x77, 0x3e, 0x00, 0x00, 0x00, 0x00, 0x70, 0x3e,
+                    0x39, 0x00, 0x00, 0x00,
+                ],
+                "visa={visa}",
+            );
+        }
+    }
+
+    #[test]
     fn test_assemble_and_readback() {
         let data = assemble_str(
             ".SECTION/PM seg_pmco;\n\
