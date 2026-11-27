@@ -88,11 +88,10 @@ impl VisaEncoded {
     }
 }
 
-/// Translate a normal 48-bit ISA universal-register code into the compact
-/// SW/VISA 7-bit ureg field. The 32-bit forms use a different numbering
-/// for system registers; copying the ISA value directly makes
-/// `ASTATx` stores/restores hit `MODE2` on hardware.
-fn visa_ureg_code(ureg: u16) -> Option<u16> {
+/// Translate the parser's classic 8-bit register code into the SHARC+
+/// 7-bit UREG field, shared by the 32-bit forms and 48-bit Type 5a.
+/// See the Core Programming Reference, chapter 27, UREG Registers Class.
+pub(crate) fn visa_ureg_code(ureg: u16) -> Option<u16> {
     let mapped = match ureg {
         // R/I/M/L/B/S registers keep their ISA numbering.
         0x00..=0x5F => ureg,
