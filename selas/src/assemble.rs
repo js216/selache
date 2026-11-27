@@ -1325,6 +1325,30 @@ mod tests {
     }
 
     #[test]
+    fn test_negative_shift_exact_bytes() {
+        let source = ".SECTION/PM seg_pmco;\n\
+                      .NOCOMPRESS;\n\
+                      R0 = LSHIFT R11 BY -16;\n\
+                      R3 = LSHIFT R9 BY -19;\n\
+                      R0 = LSHIFT R0 BY 10;\n";
+        for visa in [false, true] {
+            let data = assemble_source(source, visa).unwrap();
+            let hdr = selelf::elf::parse_header(&data).unwrap();
+            let section = find_section_by_name(&data, &hdr, "seg_pmco").unwrap();
+            let start = section.sh_offset as usize;
+            let end = start + section.sh_size as usize;
+            assert_eq!(
+                &data[start..end],
+                &[
+                    0x02, 0x3e, 0x78, 0x00, 0xf0, 0x0b, 0x02, 0x3e, 0x78, 0x00, 0xed, 0x39, 0x02,
+                    0x3e, 0x00, 0x00, 0x0a, 0x00,
+                ],
+                "visa={visa}",
+            );
+        }
+    }
+
+    #[test]
     fn test_assemble_and_readback() {
         let data = assemble_str(
             ".SECTION/PM seg_pmco;\n\

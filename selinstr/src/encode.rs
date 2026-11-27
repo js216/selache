@@ -1737,6 +1737,13 @@ fn encode_type6b(
     cond: u8,
 ) -> Result<u64, EncodeError> {
     let op_field = ((shift_type as u64 & 0xF) << 4) | (sub_op as u64 & 3);
+    // Shift counts are signed: DATAEX[3:0] extends DATA[7]. FEXT/FDEP
+    // instead use DATAEX for the length and must retain those bits.
+    let data_hi = if matches!(shift_type, 0 | 2) && (imm as i8) < 0 && data_hi == 0 {
+        0xF
+    } else {
+        data_hi
+    };
     let word = (0x02u64 << 40)
         | ((cond as u64 & 0x1F) << 33)
         | ((data_hi as u64 & 0x1F) << 27)
@@ -2987,6 +2994,46 @@ mod tests {
     }
 
     // -- Type 6b: Immediate shift --
+
+    #[test]
+    fn immediate_shift_sign_extension() {
+        // Issue #1: DATAEX[3:0] extends the sign of a shift count.
+        // Exact words also catch the error a decoder-only round trip misses.
+        for (imm, rn, rx, expected) in [
+            (-16i8, 0, 11, 0x023e_7800_f00b),
+            (-19, 3, 9, 0x023e_7800_ed39),
+            (10, 0, 0, 0x023e_0000_0a00),
+            (-128, 0, 0, 0x023e_7800_8000),
+            (-1, 0, 0, 0x023e_7800_ff00),
+            (0, 0, 0, 0x023e_0000_0000),
+            (127, 0, 0, 0x023e_0000_7f00),
+        ] {
+            let word = encode_word(&Instruction::ImmShift {
+                shift_type: 0,
+                sub_op: 0,
+                imm: imm as u8,
+                rn,
+                rx,
+                data_hi: 0,
+                cond: 31,
+            })
+            .unwrap();
+            assert_eq!(word, expected, "LSHIFT by {imm}");
+        }
+
+        // FEXT's immediate packs position and length, not a signed count.
+        let word = encode_word(&Instruction::ImmShift {
+            shift_type: 1,
+            sub_op: 0,
+            imm: 0x80,
+            rn: 0,
+            rx: 1,
+            data_hi: 2,
+            cond: 31,
+        })
+        .unwrap();
+        assert_eq!(word, 0x023e_1010_8001);
+    }
 
     #[test]
     fn roundtrip_imm_lshift_positive() {
